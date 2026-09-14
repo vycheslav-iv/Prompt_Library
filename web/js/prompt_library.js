@@ -697,32 +697,25 @@ app.registerExtension({
             // Никакого offsetHeight (создавал обратную связь при зуме/resize).
             const DETAIL_H = 160;
             const BASE_H = 436;
-            const widgetComputeSize = (w) => {
+            // Фронтенд ComfyUI вызывает this.computeSize() (метод НОДЫ), а не
+            // browserWidget.computeSize. Поэтому перезаписываем computeSize на
+            // самой ноде — иначе detail-панель не расширяет ноду.
+            const prevComputeSize = this.computeSize;
+            this.computeSize = (w) => {
                 try {
+                    const base = prevComputeSize ? prevComputeSize.call(this, w) : [w || 470, 200];
                     const showDetail = detail && detail.style.display !== "none";
-                    return [w || this.size[0], BASE_H + (showDetail ? DETAIL_H : 0)];
+                    const needH = BASE_H + (showDetail ? DETAIL_H : 0);
+                    return [Math.max(base[0], w || 470), Math.max(base[1], needH)];
                 } catch (e) { return [w || 470, BASE_H]; }
             };
-            try {
-                browserWidget.computeSize = widgetComputeSize;
-            } catch (e) { /* silent */ }
             st.syncNodeSize = () => {
                 try {
-                    const need = widgetComputeSize(this.size[0]);
-                    this.setSize([Math.max(this.size[0], need[0]), Math.max(this.size[1], need[1])]);
+                    const [w, h] = this.computeSize(this.size[0]);
+                    this.setSize([Math.max(this.size[0], w), Math.max(this.size[1], h)]);
+                    this.graph?.setDirtyCanvas(true, true);
                 } catch (e) { /* silent */ }
             };
-            // При ручном resize ноды — синхронизировать DOM-контейнер.
-            // computeSize вызывается только при создании, при resize ноды — нет.
-            try {
-                const ro = new ResizeObserver(() => {
-                    try {
-                        root.style.height = this.size[1] + "px";
-                        this.graph?.setDirtyCanvas(true, true);
-                    } catch (e) { /* silent */ }
-                });
-                ro.observe(this.element);
-            } catch (e) { /* silent */ }
 
             reload();
             requestAnimationFrame(() => { st.enforceMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
