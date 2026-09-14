@@ -38,7 +38,10 @@ app.registerExtension({
 
             // --- DOM: библиотека ---
             const root = document.createElement("div");
-            root.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:340px;";
+            root.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:400px;";
+            // Ноду нельзя сжать уже контента, иначе дерево вылезает за границу.
+            // (Само присвоение — ниже, после this._pl = st, иначе TDZ-ошибка.)
+            const MIN_W = 470;
 
             // Тулбар: поиск + сортировка (как картотека)
             const toolbar = document.createElement("div");
@@ -89,12 +92,12 @@ app.registerExtension({
             treeHead.appendChild(treeTitle);
             treeHead.appendChild(newFolderBtn);
             const tree = document.createElement("div");
-            tree.style.cssText = "display:flex;flex-direction:column;gap:2px;max-height:300px;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:4px;background:#191919;";
+            tree.style.cssText = "display:flex;flex-direction:column;gap:2px;height:320px;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:4px;background:#191919;";
             treeBox.appendChild(treeHead);
             treeBox.appendChild(tree);
 
             const list = document.createElement("div");
-            list.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;max-height:336px;overflow-y:auto;";
+            list.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;height:320px;overflow-y:auto;";
 
             // Слева список книг, справа проводник категорий
             main.appendChild(list);
@@ -158,6 +161,12 @@ app.registerExtension({
             };
             this._pl = st;
 
+            st.enforceMinWidth = () => {
+                try {
+                    if (this.size[0] < MIN_W) this.setSize([MIN_W, this.size[1]]);
+                } catch (e) { /* silent */ }
+            };
+
             // Папка сохранения = выбранная в дереве; персистится через скрытый save_folder
             st.syncSaveFolder = () => {
                 try {
@@ -175,6 +184,7 @@ app.registerExtension({
                     st.folders = data.folders || [];
                     renderTree();
                     render();
+                    try { st.fitNode?.(); } catch (e) { /* silent */ }
                 } catch (e) { /* silent */ }
             };
             st.reload = reload;
@@ -489,6 +499,7 @@ app.registerExtension({
                         if (modeW) modeW.value = "📤 Выдача";
                         await this._pl?.ensureIssueSafe?.();
                         render();
+                        try { this._pl?.fitNode?.(); } catch (e) { /* silent */ }
                         this.graph?.setDirtyCanvas(true, true);
                     };
 
@@ -512,6 +523,7 @@ app.registerExtension({
             viewSel.onchange = () => {
                 try { localStorage.setItem("promptLibrary.view", viewSel.value); } catch (e) { /* silent */ }
                 render();
+                try { st.fitNode?.(); } catch (e) { /* silent */ }
                 this.graph?.setDirtyCanvas(true, true);
             };
 
@@ -576,28 +588,55 @@ app.registerExtension({
             };
             st.checkCycle = checkCycle;
 
-            // Фикс высоты окна: фронтенд рисует multiline как DOM-textarea
-            // (textarea.comfy-multiline-input), computeSize он игнорирует.
-            // Поднимаемся от нашего DOM-виджета до контейнера ноды (первый предок
-            // ровно с одним textarea — чтобы не задеть чужие ноды) и фиксируем высоту.
-            st.fixTextarea = () => {
-                try {
-                    let el = root.parentElement, depth = 0;
-                    while (el && depth < 12) {
-                        const tas = el.querySelectorAll
-                            ? el.querySelectorAll("textarea.comfy-multiline-input") : [];
-                        if (tas.length === 1) {
-                            tas[0].style.maxHeight = "160px";
-                            tas[0].style.overflowY = "auto";
-                            tas[0].style.resize = "vertical";
-                            break;
-                        }
-                        if (tas.length > 1) break;
-                        el = el.parentElement; depth++;
-                    }
-                } catch (e) { /* silent */ }
+            // Высота ноды: в окне при проводе только голова текста (стабильно ~5 строк),
+            // полный текст — в базе и панели книги. Никакого CSS и флагов: только
+            // публичный widget.value, который фронтенд точно не сносит.
+            // Спискам отдаётся дельта растягивания ноды (ниже).
+            // Всё через публичный API; единицы экранные делим на зум канваса.
+            st.HEAD_CHARS = 300;
+            st.lastFullText = "";
+            try { console.log("[PromptLibrary] build 20260914-noloop"); } catch (e) {}
+            // Высота окна инлайн-стилем строго на своём элементе (ни классов, ни
+            // таблиц стилей — протечь на другие ноды нечему). Переприменяется,
+            // т.к. Vue может подменить элемент.
+            // Высоту окна держим контентом (голова текста при проводе, см. onExecuted),
+            // а не стилями/наблюдателями: фронтенд их перерисовками сносит.
+            const plScale = () => {
+                try { return (app.canvas && app.canvas.ds && app.canvas.ds.scale) || 1; }
+                catch (e) { return 1; }
             };
-            requestAnimationFrame(() => { st.fixTextarea(); });
+            // Угол тянет только рамку; списки фиксированы (320px, внутренний скролл).
+            // Никакой подгонки контента под ресайз — именно она давала петлю
+            // с автофитом фронтенда (бесконечное вытягивание вниз).
+            try {
+                const prevOnResize = this.onResize ? this.onResize.bind(this) : null;
+                this.onResize = (size) => {
+                    try { if (prevOnResize) prevOnResize(size); } catch (e) { /* silent */ }
+                    // Свой программный ресайз не обрабатываем — иначе петля.
+                    if (st.autoSizing) return;
+                    try {
+                        // Уже контента не сжимаем: иначе дерево и панель вылезают за границу.
+                        // Однократная коррекция — второй вызов уже видит норму, петли нет.
+                        if (this.size[0] < MIN_W) this.setSize([MIN_W, this.size[1]]);
+                    } catch (e) { /* silent */ }
+                };
+            } catch (e) { /* silent */ }
+            // Рамка обнимает контент: DOM-виджет отдаёт свою высоту в computeSize,
+            // fitNode подгоняет ноду (только наружу). Флаг autoSizing гасит эхо в onResize.
+            st.fitNode = () => {
+                try {
+                    if (typeof this.computeSize !== "function") return;
+                    const need = this.computeSize(this.size[0]);
+                    if (!need || need.length < 2) return;
+                    const targetW = Math.max(this.size[0], MIN_W, need[0] || 0);
+                    const targetH = Math.max(this.size[1], need[1] || 0);
+                    if (Math.abs(targetW - this.size[0]) < 2 && Math.abs(targetH - this.size[1]) < 2) return;
+                    st.autoSizing = true;
+                    this.setSize([targetW, targetH]);
+                    st.autoSizing = false;
+                } catch (e) { try { st.autoSizing = false; } catch (_) {} }
+            };
+            requestAnimationFrame(() => { st.rebaseMain(); });
 
             // Автосокеты виджетов: фронтенд 1.52 создаёт сокет каждому виджету
             // (getWidgetConfig, тип `*` по умолчанию). У окна промпта он лишний —
@@ -649,7 +688,9 @@ app.registerExtension({
                     const pw = this.widgets?.find((w) => w.name === "prompt");
                     // Сохраняем в открытую в дереве категорию (корень — если выбрано «Всё»)
                     const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
-                    const text = (pw?.value || "").trim();
+                    // При проводе в окне голова текста — берём полный из последнего выполнения
+                    const linked = (this.inputs?.find((i) => i.name === "source")?.link ?? null) != null;
+                    const text = ((linked && st.lastFullText ? st.lastFullText : (pw?.value || "")).trim());
                     if (!text) {
                         saveBtn.label = "⚠️ Пусто — нечего сохранять";
                         setTimeout(() => { saveBtn.label = "💾 Сохранить промпт"; }, 1500);
@@ -680,14 +721,23 @@ app.registerExtension({
 
             requestAnimationFrame(() => { st.checkCycle?.(); });
 
-            this.addDOMWidget("pl_browser", "custom", root, {
+            const browserWidget = this.addDOMWidget("pl_browser", "custom", root, {
                 serialize: false,
                 getValue: () => null,
                 setValue: () => {},
             });
+            // Высота DOM-контента для layout-движка (единицы канваса).
+            try {
+                browserWidget.computeSize = (w) => {
+                    try {
+                        const s = plScale();
+                        return [w || this.size[0], (root.scrollHeight || 420) / s];
+                    } catch (e) { return [w || 470, 420]; }
+                };
+            } catch (e) { /* silent */ }
 
             reload();
-            requestAnimationFrame(() => this.graph?.setDirtyCanvas(true, true));
+            requestAnimationFrame(() => { st.enforceMinWidth?.(); st.fitNode?.(); this.graph?.setDirtyCanvas(true, true); });
             return ret;
         };
 
@@ -695,7 +745,6 @@ app.registerExtension({
         nodeType.prototype.onConnectionsChange = function () {
             const ret = origOnConnectionsChange?.apply(this, arguments);
             try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
-            try { this._pl?.fixTextarea?.(); } catch (e) { /* silent */ }
             try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
             return ret;
         };
@@ -705,12 +754,17 @@ app.registerExtension({
             const ret = origOnExecuted?.apply(this, arguments);
             try {
                 if (message?.text?.[0] !== undefined) {
+                    const full = message.text[0] || "";
+                    const st = this._pl;
+                    if (st) st.lastFullText = full;
                     const promptWidget = this.widgets?.find((w) => w.name === "prompt");
-                    if (promptWidget && message.text[0] !== promptWidget.value) {
-                        promptWidget.value = message.text[0];
+                    if (promptWidget) {
+                        const linked = (this.inputs?.find((i) => i.name === "source")?.link ?? null) != null;
+                        const head = (linked && full.length > (st?.HEAD_CHARS || 300))
+                            ? full.slice(0, st.HEAD_CHARS) + "\n…(полный текст — в панели книги)"
+                            : full;
+                        if (head !== promptWidget.value) promptWidget.value = head;
                     }
-                    // Vue может перерисовать textarea при смене значения — фиксируем заново
-                    try { this._pl?.fixTextarea?.(); } catch (e) { /* silent */ }
                 }
                 if (message?.entries && this._pl) {
                     // Полное обновление списка и дерева (renderTree живёт в замыкании onNodeCreated)
@@ -724,12 +778,19 @@ app.registerExtension({
             return ret;
         };
 
+        const origOnRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function () {
+            const ret = origOnRemoved?.apply(this, arguments);
+            try { if (this._pl?.pinTimer) { clearInterval(this._pl.pinTimer); this._pl.pinTimer = null; } } catch (e) {}
+            return ret;
+        };
+
         const origOnConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
             const ret = origOnConfigure?.apply(this, arguments);
             requestAnimationFrame(() => {
                 try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
-                try { this._pl?.fixTextarea?.(); } catch (e) { /* silent */ }
+                try { this._pl?.fitNode?.(); } catch (e) { /* silent */ }
                 try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
                 try {
                     this._pl?.reload?.().then(() => {
