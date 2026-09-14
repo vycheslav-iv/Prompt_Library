@@ -378,9 +378,9 @@ app.registerExtension({
                 const by = st.sortSel.value;
                 const ts = (s) => s || "";
                 if (by === "title") arr = [...arr].sort((a, b) => (a.title || a.head).localeCompare(b.title || b.head, "ru"));
-                else if (by === "old") arr = [...arr].sort((a, b) => ts(a.created_at) < ts(b.created_at) ? -1 : 1);
-                else if (by === "used") arr = [...arr].sort((a, b) => ts(b.last_used || "") < ts(a.last_used || "") ? -1 : 1);
-                else arr = [...arr].sort((a, b) => ts(b.created_at) < ts(a.created_at) ? -1 : 1);
+                else if (by === "old") arr = [...arr].sort((a, b) => ts(a.created_at) < ts(b.created_at) ? -1 : ts(a.created_at) > ts(b.created_at) ? 1 : 0);
+                else if (by === "used") arr = [...arr].sort((a, b) => ts(b.last_used || "") < ts(a.last_used || "") ? -1 : ts(b.last_used || "") > ts(a.last_used || "") ? 1 : 0);
+                else arr = [...arr].sort((a, b) => ts(b.created_at) < ts(a.created_at) ? -1 : ts(b.created_at) > ts(a.created_at) ? 1 : 0);
                 return arr;
             };
 
@@ -603,7 +603,7 @@ app.registerExtension({
             // Никаких подгонок под ресайз, CSS и таймеров.
             st.HEAD_CHARS = 300;
             st.lastFullText = "";
-            try { console.log("[PromptLibrary] build 20260915-audit"); } catch (e) {}
+            try { console.debug("[PromptLibrary] build 20260915-audit"); } catch (e) {}
             // Высоту окна держим контентом (голова текста при проводе, см. onExecuted).
             // computeSize отдаёт визуальную высоту — фронтенд сам управляет размером ноды.
             // plScale удалён: computeSize отдаёт CSS-пиксели, canvas-трансформация — фронтенду.

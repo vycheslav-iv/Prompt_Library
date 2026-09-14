@@ -219,7 +219,11 @@ class PromptLibrary:
         entries, folders = _load_db()
 
         # Входящий текст: провод source приоритетнее виджета (паттерн Prompt Keeper).
-        incoming = str(source).strip() if source is not None else (prompt or "").strip()
+        # Защита: source — ANY-тип, нужно фильтровать не-строки (IMAGE, LATENT и т.д.).
+        if source is not None and isinstance(source, str):
+            incoming = source.strip()
+        else:
+            incoming = (prompt or "").strip()
         display = incoming
 
         # 1. Исходящий текст (выдача книги с полки — фиксируем дату)
@@ -237,22 +241,14 @@ class PromptLibrary:
         # 2. Автосохранение входящего промпта в папку из виджета (только в режиме записи)
         fld = _norm_folder(folder)
         if not issue and incoming:
-            h = _dedup_hash(incoming, fld)
-            if not any(e.get("hash") == h for e in entries):
-                entry_id = _new_id(h)
+            entry_id, added = _add_entry(entries, incoming, fld)
+            if added:
                 preview = _save_thumbnail(image, entry_id) if image is not None else None
-                entries.insert(0, {
-                    "id": entry_id,
-                    "hash": h,
-                    "title": _auto_title(incoming),
-                    "prompt": incoming,
-                    "folder": fld,
-                    "category": fld,
-                    "favorite": False,
-                    "created_at": _now(),
-                    "last_used": None,
-                    "preview": f"previews/{preview}" if preview else None,
-                })
+                if preview:
+                    for e in entries:
+                        if e.get("id") == entry_id:
+                            e["preview"] = f"previews/{preview}"
+                            break
                 entries = entries[:MAX_ENTRIES]
                 if fld and fld not in folders:
                     folders.append(fld)
