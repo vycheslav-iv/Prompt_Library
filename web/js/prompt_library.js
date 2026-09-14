@@ -104,7 +104,7 @@ app.registerExtension({
             treeBox.appendChild(tree);
 
             const list = document.createElement("div");
-            list.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;height:320px;overflow-y:auto;";
+            list.style.cssText = "min-width:0;display:flex;flex-direction:column;gap:4px;height:320px;overflow-y:auto;";
 
             // Слева список книг, справа проводник категорий
             main.appendChild(list);
