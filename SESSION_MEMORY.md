@@ -1,40 +1,39 @@
-# Память сессии — Prompt Library (2026-09-15, открытая проблема)
+# Память сессии — Prompt Library (2026-09-15, sizing решён)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
-> Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md` (§17 — план, §18 — открытая проблема).
+> Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
 
 ---
 
 ## 1. Результат на сейчас
 
-- Нода функциональна: сохранение (авто/кнопка), категории, поиск, сортировка, виды, DnD, панель книги, выдача, превью 512px. База и Python проверены прогоном.
-- НЕ решено: самопроизвольное бесконечное вытягивание ноды вниз. В нашем коде механизма бесконечности нет (доказано аудитом) — подозрение на внутренний автофит фронтенда 1.52.7 + `h-full` у textarea.
-- В коде временная диагностика: перехват `setSize` с логом `[PL-DIAG]` (убрать после выяснения!). Ждём строки консоли от пользователя.
-- Доверие пользователя подорвано серией неверных «готово». Режим: только факты и замеры, никаких заявлений без подтверждения.
+- **Sizing решён** (§18, скил `comfyui-dom-widget-sizing`): `computeSize` возвращает фиксированные константы (`BASE_H=436`, `DETAIL_H=160`). Никакого `offsetHeight`, `scrollHeight`, `plScale`, `fitNode`. Нода стабильна при зуме, resize, загрузке.
+- **Функционал готов**: сохранение (авто/кнопка), категории, поиск, сортировка, виды, DnD, панель книги, выдача, превью 512px. Python прогон end-to-end: PASSED.
+- Репозиторий: `https://github.com/vycheslav-iv/Prompt_Library.git`, 8 коммитов, master чист.
 
 ## 2. Итоговое состояние кода
 
-- `prompt_library_node.py` — `PromptLibrary` (prompt/mode/selected/save_folder + optional source/image; патч `[display, mode, selected, save_folder]`). Прогон end-to-end: PASSED.
-- `web/js/prompt_library.js` — дерево категорий, виды, DnD, detail, MODE, сторож цикла, `dropAutoSockets`, `fitNode` (одноразово наружу), мин. ширина 470, списки фикс 320px, голова текста 300 при проводе. Без таймеров/наблюдателей/CSS-инъекций/подгонок.
-- Репозиторий: `https://github.com/vycheslav-iv/Prompt_Library.git`, master чист.
+- `prompt_library_node.py` — `PromptLibrary` (prompt/mode/selected/save_folder + optional source/image; патч `[display, mode, selected, save_folder]`).
+- `web/js/prompt_library.js` — дерево категорий, виды, DnD, detail, MODE, сторож цикла, `dropAutoSockets`, `computeSize` (фикс. константы), `syncNodeSize`, `enforceMinWidth`, списки фикс 320px, голова текста 300 при проводе.
+- **Скил создан**: `.opencode/skills/comfyui-dom-widget-sizing/` (+ `.kilo/`, `.agents/`).
 
-## 3. Текущие проблемы
+## 3. Что важно не сломать
 
-1. **Бесконечное вытягивание вниз** (открыта, §18). Следующий шаг — строки `[PL-DIAG]` из консоли пользователя.
-2. **Процесс**: пользователь запретил костыли и требует качественной работы; компромисс «скорее всего» больше не принимается.
-3. Отложено (§17): сплит на две ноды + постраничность — только после закрытия проблемы размещения.
+- `computeSize` — фиксированные константы, НЕ `offsetHeight`/`scrollHeight`/`plScale`
+- Порядок `widgets_values` = порядок INPUT_TYPES
+- Удаление категории НЕ теряет книги (переезд в корень)
+- Поле `folder` в базе/API не переименовывать
+- `D:\ComfyUI_windows_portable_old\` — архив, не трогать
+- Исходник → `python sync.py Prompt_Library` → рестарт + Ctrl+F5 + пересоздать ноду
+- gh: `vycheslav-iv`. Запрещено: PowerShell, `rm -rf .git`, `git init` в корне
 
-## 4. Что важно не сломать
+## 4. Отложено (§17)
 
-- Порядок `widgets_values` = порядок INPUT_TYPES.
-- Удаление категории НЕ теряет книги (переезд в корень).
-- Поле `folder` в базе/API не переименовывать.
-- `D:\ComfyUI_windows_portable_old\` — архив, не трогать.
-- Исходник → `python sync.py Prompt_Library` → рестарт + Ctrl+F5 + пересоздать ноду.
-- gh: `vycheslav-iv`. Запрещено: PowerShell, `rm -rf .git`, `git init` в корне.
+- СPLIT на две ноды: **Prompt Library** (без IMAGE) + **Prompt Saver** (пассивная)
+- Постраничность списка (~20 записей на страницу)
 
 ## 5. Связанные файлы
 
-- `SPECIFICATION.md`, `README.md`, `SESSION_MEMORY-history/`
+- `SPECIFICATION.md` (§18 — sizing), `README.md`, `SESSION_MEMORY-history/`
 - Рабочая копия: `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library\`
-- Скил: `comfyui-cycle-guard`
+- Скилы: `comfyui-cycle-guard`, `comfyui-dom-widget-sizing`
