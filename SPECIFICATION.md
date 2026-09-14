@@ -1,6 +1,6 @@
 # Техническое задание (ТЗ) — Prompt Library для ComfyUI
 
-**Версия:** v1.1 (реализовано: проводник + каталожная модель; sizing решён — §18, скил `comfyui-dom-widget-sizing`)
+**Версия:** v1.2 (sizing решён — §18; audit — §19; скил `comfyui-dom-widget-sizing`)
 **Связь:** продолжение серии Prompt Keeper (v1.0 — «последний промпт», Library — «база промптов»)
 
 ## Модель «как в реальной библиотеке»
@@ -422,3 +422,65 @@ comfyui_frontend_package\static\assets\core-*.js
 
 Если контент динамический (카드 list растёт) — используй `overflow:auto` с фиксированной
 высотой на контейнере, `computeSize` считай по контейнеру, а не по содержимому.
+
+---
+
+# 19. Аудит ошибок (deep audit, 2026-09-15)
+
+## 19.1. Python: isinstance(source, str) — защита от IMAGE-тензора
+
+**Проблема:** `source` объявлен как `("*", {})` — ANY-тип. Если подключить IMAGE
+(тензор), `str(source)` вернёт `"<torch.Tensor object at 0x...>"` → мусор в промпте.
+
+**Решение:**
+```python
+if source is not None and isinstance(source, str):
+    incoming = source.strip()
+else:
+    incoming = (prompt or "").strip()
+```
+
+## 19.2. Python: дедупликация через _add_entry вместо ручного кода
+
+**Проблема:** `execute()` содержал копию логики `_add_entry()` (dedup + insert),
+дублируя код. Пропущен параметр `title`.
+
+**Решение:** `execute()` вызывает `_add_entry(entries, incoming, fld)` —
+единая точка дедупликации и вставки.
+
+## 19.3. Python: preview сохраняется ПОСЛЕ _add_entry
+
+**Проблема:** `_save_thumbnail(image, entry_id)` требует `entry_id`, но `entry_id`
+создаётся внутри `_add_entry()`. Нельзя вызвать `_save_thumbnail` до `_add_entry`.
+
+**Решение:** сначала `_add_entry` возвращает `entry_id`, потом `_save_thumbnail`
+сохраняет превью, потом patch обновляет поле `preview` в записи.
+
+## 19.4. JS: sort comparator возвращает 0 при равенстве
+
+**Проблема:** Компараторы `old`, `used`, `new` возвращали только `-1` или `1`,
+никогда `0` при равных таймстемпах → недетерминированный порядок (merцание списка).
+
+**Решение:**
+```js
+ts(a.created_at) < ts(b.created_at) ? -1 : ts(a.created_at) > ts(b.created_at) ? 1 : 0
+```
+
+## 19.5. JS: console.log → console.debug
+
+**Проблема:** Debug-лог `[PromptLibrary] build 20260915-audit` в production-коде
+засорял консоль.
+
+**Решение:** заменён на `console.debug`.
+
+## 19.6. Оставлено без изменений (осознанно)
+
+- **Race condition `_load_db()`** — нет file-locking, но `os.replace` атомарен.
+  При параллельных HTTP-запросах возможна потеря данных. Приоритет: низкий
+  (один пользователь, последовательные запросы).
+- **`reload()` молча глотает ошибки** — по design: не спамить toast при старте.
+- **Double render в `onConfigure`** — `reload()` + `.then()` вызывают render
+  дважды, но это корректно (данные обновляются между вызовами).
+- **`BASE_H=436`** — константа, пересчитывается при визуальных изменениях.
+- **`_pl_list` без кэша** — полное чтение JSON при каждом запросе. Для <500
+  записей приемлемо.
