@@ -169,28 +169,6 @@ app.registerExtension({
             };
             this._pl = st;
 
-            // ВРЕМЕННАЯ ДИАГНОСТИКА бесконечного растягивания: кто зовёт setSize.
-            // Убрать после выяснения причины.
-            try {
-                const origSetSize = this.setSize.bind(this);
-                let ssc = 0;
-                this.setSize = (size) => {
-                    try {
-                        ssc++;
-                        if (ssc <= 25) {
-                            // eslint-disable-next-line no-console
-                            console.log("[PL-DIAG] setSize #" + ssc,
-                                JSON.stringify(size),
-                                "from:", (new Error().stack || "").split("\n").slice(2, 6).join(" <- "));
-                        } else if (ssc === 26) {
-                            console.log("[PL-DIAG] ...дальше молчу, счётчик:", ssc);
-                        }
-                    } catch (e) {}
-                    return origSetSize(size);
-                };
-                st.setSizeCount = () => ssc;
-            } catch (e) { /* silent */ }
-
             st.enforceMinWidth = () => {
                 try {
                     if (this.size[0] < MIN_W) this.setSize([MIN_W, this.size[1]]);
@@ -743,8 +721,17 @@ app.registerExtension({
             try {
                 browserWidget.computeSize = (w) => {
                     try {
+                        // Считаем визуальную высоту через offsetHeight видимых элементов,
+                        // а НЕ через root.scrollHeight (он считает полный контент overflow:auto
+                        // списков — 1000 карточек × 200px = 200,000px → нода растёт бесконечно).
+                        let h = 0;
+                        for (const el of [saveDomBtn, toolbar, main, detail, hint]) {
+                            if (el && el.style.display !== "none") h += el.offsetHeight || 0;
+                        }
+                        h += 24; // gap: 5 промежутков × 6px ≈ 24px
+                        if (h < 100) h = 420; // fallback при пустом DOM
                         const s = plScale();
-                        return [w || this.size[0], (root.scrollHeight || 420) / s];
+                        return [w || this.size[0], h / s];
                     } catch (e) { return [w || 470, 420]; }
                 };
             } catch (e) { /* silent */ }
