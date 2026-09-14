@@ -480,7 +480,6 @@ app.registerExtension({
                             st.entries = st.entries.filter((x) => x.id !== e.id);
                             if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; }
                             renderTree(); render();
-                            st.syncNodeSize?.();
                         } catch (err) { /* silent */ }
                     };
 
@@ -508,7 +507,6 @@ app.registerExtension({
                         if (modeW) modeW.value = "📤 Выдача";
                         await this._pl?.ensureIssueSafe?.();
                         render();
-                        st.syncNodeSize?.();
                         this.graph?.setDirtyCanvas(true, true);
                     };
 
@@ -693,26 +691,9 @@ app.registerExtension({
                 getValue: () => null,
                 setValue: () => {},
             });
-            // Высота DOM-контента для layout-движка.
-            // Фиксированные значения из стейта виджета — никакого offsetHeight,
-            // никакой обратной связи с DOM. Нода не зависит от зума и layout-пересчётов.
-            const DETAIL_H = 160; // detail-панель: title + folder + textarea(5rows) + meta + buttons
-            const BASE_H = 436;   // saveDomBtn(30) + toolbar(30) + main(326) + hint(20) + gaps(30)
-            // Синхронизация размера ноды с computeSize (вызывать после смены detail).
-            st.syncNodeSize = () => {
-                try {
-                    const need = this.computeSize(this.size[0]);
-                    this.setSize([Math.max(this.size[0], need[0]), Math.max(this.size[1], need[1])]);
-                } catch (e) { /* silent */ }
-            };
-            try {
-                browserWidget.computeSize = (w) => {
-                    try {
-                        const showDetail = detail && detail.style.display !== "none";
-                        return [w || this.size[0], BASE_H + (showDetail ? DETAIL_H : 0)];
-                    } catch (e) { return [w || 470, BASE_H]; }
-                };
-            } catch (e) { /* silent */ }
+            // computeSize НЕ переопределяем: фронтенд 1.52 сам вычисляет высоту
+            // DOM-виджета (как для CLIP Text Encode и любого штатного multiline).
+            // Наше вмешательство создавало обратную связь при зуме/resize.
 
             reload();
             requestAnimationFrame(() => { st.enforceMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
