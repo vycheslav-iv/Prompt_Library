@@ -697,20 +697,21 @@ app.registerExtension({
             // Никакого offsetHeight (создавал обратную связь при зуме/resize).
             const DETAIL_H = 160;
             const BASE_H = 436;
+            const widgetComputeSize = (w) => {
+                try {
+                    const showDetail = detail && detail.style.display !== "none";
+                    return [w || this.size[0], BASE_H + (showDetail ? DETAIL_H : 0)];
+                } catch (e) { return [w || 470, BASE_H]; }
+            };
+            try {
+                browserWidget.computeSize = widgetComputeSize;
+            } catch (e) { /* silent */ }
             st.syncNodeSize = () => {
                 try {
-                    const need = this.computeSize(this.size[0]);
+                    const need = widgetComputeSize(this.size[0]);
                     this.setSize([Math.max(this.size[0], need[0]), Math.max(this.size[1], need[1])]);
                 } catch (e) { /* silent */ }
             };
-            try {
-                browserWidget.computeSize = (w) => {
-                    try {
-                        const showDetail = detail && detail.style.display !== "none";
-                        return [w || this.size[0], BASE_H + (showDetail ? DETAIL_H : 0)];
-                    } catch (e) { return [w || 470, BASE_H]; }
-                };
-            } catch (e) { /* silent */ }
 
             reload();
             requestAnimationFrame(() => { st.enforceMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
