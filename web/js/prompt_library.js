@@ -480,6 +480,7 @@ app.registerExtension({
                             st.entries = st.entries.filter((x) => x.id !== e.id);
                             if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; }
                             renderTree(); render();
+                            st.syncNodeSize?.();
                         } catch (err) { /* silent */ }
                     };
 
@@ -507,7 +508,7 @@ app.registerExtension({
                         if (modeW) modeW.value = "📤 Выдача";
                         await this._pl?.ensureIssueSafe?.();
                         render();
-                        // fitNode удалён.
+                        st.syncNodeSize?.();
                         this.graph?.setDirtyCanvas(true, true);
                     };
 
@@ -692,22 +693,24 @@ app.registerExtension({
                 getValue: () => null,
                 setValue: () => {},
             });
-            // Высота DOM-контента для layout-движка (единицы канваса).
+            // Высота DOM-контента для layout-движка.
+            // Фиксированные значения из стейта виджета — никакого offsetHeight,
+            // никакой обратной связи с DOM. Нода не зависит от зума и layout-пересчётов.
+            const DETAIL_H = 160; // detail-панель: title + folder + textarea(5rows) + meta + buttons
+            const BASE_H = 436;   // saveDomBtn(30) + toolbar(30) + main(326) + hint(20) + gaps(30)
+            // Синхронизация размера ноды с computeSize (вызывать после смены detail).
+            st.syncNodeSize = () => {
+                try {
+                    const need = this.computeSize(this.size[0]);
+                    this.setSize([Math.max(this.size[0], need[0]), Math.max(this.size[1], need[1])]);
+                } catch (e) { /* silent */ }
+            };
             try {
                 browserWidget.computeSize = (w) => {
                     try {
-                        // Визуальная высота через offsetHeight видимых элементов.
-                        // Без delenия на plScale: canvas-трансформация применяется фронтендом
-                        // к container div, DOM-контент — в CSS-пикселях. Деление на scale
-                        // создавало обратную связь при зуме (нода «плясала» вверх-вниз).
-                        let h = 0;
-                        for (const el of [saveDomBtn, toolbar, main, detail, hint]) {
-                            if (el && el.style.display !== "none") h += el.offsetHeight || 0;
-                        }
-                        h += 24; // gap: 5 промежутков × 6px ≈ 24px
-                        if (h < 100) h = 420; // fallback при пустом DOM
-                        return [w || this.size[0], h];
-                    } catch (e) { return [w || 470, 420]; }
+                        const showDetail = detail && detail.style.display !== "none";
+                        return [w || this.size[0], BASE_H + (showDetail ? DETAIL_H : 0)];
+                    } catch (e) { return [w || 470, BASE_H]; }
                 };
             } catch (e) { /* silent */ }
 
