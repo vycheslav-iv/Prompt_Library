@@ -1,11 +1,5 @@
 const { app } = window.comfyAPI.app;
 
-function setWidgetDisabled(w, val) {
-    if (!w) return;
-    if (w.options) w.options.disabled = val;
-    try { w.disabled = val; } catch (e) {}
-}
-
 // Лёгкая проекция серверной записи для списка
 function plMap(e) {
     return {
@@ -29,28 +23,22 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const ret = origOnNodeCreated?.apply(this, arguments);
 
-            // Скрыть технический selected (он управляется кликами по списку)
+            // Скрыть технические selected/save_folder (ими управляет дерево и список)
             const selWidget = this.widgets?.find((w) => w.name === "selected");
             if (selWidget) {
                 selWidget.hidden = true;
                 selWidget.computeSize = () => [0, -4];
             }
+            const saveFolderW = this.widgets?.find((w) => w.name === "save_folder");
+            if (saveFolderW) {
+                saveFolderW.hidden = true;
+                saveFolderW.computeSize = () => [0, -4];
+            }
+
 
             // --- DOM: библиотека ---
             const root = document.createElement("div");
             root.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:340px;";
-
-            // Плашка входящего промпта
-            const incomingWrap = document.createElement("div");
-            incomingWrap.style.cssText = "display:none;flex-direction:column;gap:2px;border:1px solid #333;border-radius:4px;padding:4px 6px;background:#1a1a1a;";
-            const incomingLabel = document.createElement("div");
-            incomingLabel.style.cssText = "color:#888;font-size:10px;";
-            incomingLabel.textContent = "Входящий промпт (будет записан):";
-            const incomingText = document.createElement("div");
-            incomingText.style.cssText = "color:#ddd;font-size:11px;max-height:72px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;resize:vertical;";
-            incomingText.textContent = "—";
-            incomingWrap.appendChild(incomingLabel);
-            incomingWrap.appendChild(incomingText);
 
             // Тулбар: поиск + сортировка (как картотека)
             const toolbar = document.createElement("div");
@@ -59,7 +47,7 @@ app.registerExtension({
             search.placeholder = "Поиск по названию и тексту...";
             search.style.cssText = "flex:1;min-width:0;background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px 6px;";
             const sortSel = document.createElement("select");
-            sortSel.title = "Порядок полки";
+            sortSel.title = "Порядок категории";
             sortSel.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px;max-width:150px;";
             sortSel.innerHTML = `
                 <option value="new">Сначала новые</option>
@@ -88,15 +76,15 @@ app.registerExtension({
             main.style.cssText = "display:flex;gap:6px;min-height:0;";
 
             const treeBox = document.createElement("div");
-            treeBox.style.cssText = "width:38%;min-width:120px;display:flex;flex-direction:column;gap:4px;";
+            treeBox.style.cssText = "width:34%;min-width:110px;display:flex;flex-direction:column;gap:4px;flex-shrink:0;";
             const treeHead = document.createElement("div");
             treeHead.style.cssText = "display:flex;align-items:center;justify-content:space-between;";
             const treeTitle = document.createElement("div");
             treeTitle.style.cssText = "color:#888;font-size:11px;font-weight:bold;";
-            treeTitle.textContent = "📁 Полки";
+            treeTitle.textContent = "📁 Категории";
             const newFolderBtn = document.createElement("button");
-            newFolderBtn.textContent = "+ Полка";
-            newFolderBtn.title = "Создать папку (в текущей — подпапку)";
+            newFolderBtn.textContent = "+ Категория";
+            newFolderBtn.title = "Создать категорию (в текущей — подкатегорию)";
             newFolderBtn.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;";
             treeHead.appendChild(treeTitle);
             treeHead.appendChild(newFolderBtn);
@@ -108,8 +96,9 @@ app.registerExtension({
             const list = document.createElement("div");
             list.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;max-height:336px;overflow-y:auto;";
 
-            main.appendChild(treeBox);
+            // Слева список книг, справа проводник категорий
             main.appendChild(list);
+            main.appendChild(treeBox);
 
             const hint = document.createElement("div");
             hint.style.cssText = "color:#888;font-size:11px;";
@@ -124,7 +113,7 @@ app.registerExtension({
             dTitle.readOnly = true;
             dTitle.style.cssText = "background:#111;color:#fff;border:1px solid #444;border-radius:4px;padding:4px 6px;font-size:12px;font-weight:bold;";
             const dFolder = document.createElement("input");
-            dFolder.placeholder = "Полка: Фото/Портреты";
+            dFolder.placeholder = "Категория: Фото/Портреты";
             dFolder.readOnly = true;
             dFolder.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px 6px;font-size:11px;";
             const dText = document.createElement("textarea");
@@ -143,7 +132,7 @@ app.registerExtension({
                 return b;
             };
             const bCopy = mkBtn("📋 Копировать", "Скопировать полный текст в буфер обмена");
-            const bEdit = mkBtn("✏️ Редактировать", "Изменить название, полку и текст");
+            const bEdit = mkBtn("✏️ Редактировать", "Изменить название, категорию и текст");
             const bSave = mkBtn("💾 Сохранить", "Сохранить изменения");
             bSave.style.display = "none";
             dBtns.appendChild(bCopy);
@@ -156,7 +145,6 @@ app.registerExtension({
             detail.appendChild(dMeta);
             detail.appendChild(dBtns);
 
-            root.appendChild(incomingWrap);
             root.appendChild(toolbar);
             root.appendChild(main);
             root.appendChild(detail);
@@ -165,11 +153,18 @@ app.registerExtension({
             const st = {
                 root, search, sortSel, viewSel, tree, list, hint, detail,
                 dTitle, dFolder, dText, dMeta, bSave,
-                incomingWrap, incomingText,
                 entries: [], folders: [], full: new Map(),
                 detailId: null, selFolder: "__all",
             };
             this._pl = st;
+
+            // Папка сохранения = выбранная в дереве; персистится через скрытый save_folder
+            st.syncSaveFolder = () => {
+                try {
+                    const v = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
+                    if (saveFolderW && saveFolderW.value !== v) saveFolderW.value = v;
+                } catch (e) { /* silent */ }
+            };
 
             const reload = async () => {
                 try {
@@ -184,6 +179,53 @@ app.registerExtension({
             };
             st.reload = reload;
 
+            // --- Drag & Drop: книги → на категории, категории → в другие категории (или в корень) ---
+            st.plDrop = async (d, target) => {
+                if (!d) return;
+                try {
+                    if (d.kind === "entry") {
+                        const dest = target && !target.startsWith("__") ? target : (target === "__root" ? "" : null);
+                        if (dest === null) return;
+                        const e = st.entries.find((x) => x.id === d.id);
+                        if (!e || e.folder === dest) return;
+                        await fetch("/prompt_library/update", {
+                            method: "POST", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ id: d.id, folder: dest }),
+                        });
+                        st.full.delete(d.id);
+                        await reload();
+                    } else if (d.kind === "folder") {
+                        const src = d.path;
+                        const dest = (!target || target === "__all" || target === "__root")
+                            ? src.split("/").pop()
+                            : target + "/" + src.split("/").pop();
+                        if (dest === src || dest.startsWith(src + "/")) return;
+                        const r = await fetch("/prompt_library/folder_rename", {
+                            method: "POST", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ old: src, new: dest }),
+                        });
+                        if (r.ok) {
+                            if (st.selFolder === src || st.selFolder.startsWith(src + "/")) {
+                                st.selFolder = dest + st.selFolder.slice(src.length);
+                            }
+                            st.syncSaveFolder();
+                            await reload();
+                        }
+                    }
+                } catch (e) { /* silent */ }
+            };
+
+            // Фон списка — тоже дроп-зона: книга переезжает в открытую полку
+            list.ondragover = (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = "move"; };
+            list.ondrop = async (ev) => {
+                ev.preventDefault();
+                let d = null;
+                try { d = JSON.parse(ev.dataTransfer.getData("text/plain")); } catch (e) { /* silent */ }
+                if (d && d.kind === "entry" && st.selFolder && !st.selFolder.startsWith("__")) {
+                    await st.plDrop(d, st.selFolder);
+                }
+            };
+
             // --- Дерево полок ---
             const folderRow = (key, label, depth, isFolder) => {
                 const row = document.createElement("div");
@@ -194,14 +236,37 @@ app.registerExtension({
                 name.textContent = label;
                 name.title = isFolder ? key : label;
                 row.appendChild(name);
+                // Папки можно таскать; любая строка — дроп-зона
+                row.draggable = isFolder;
+                if (isFolder) {
+                    row.ondragstart = (ev) => {
+                        ev.dataTransfer.setData("text/plain", JSON.stringify({ kind: "folder", path: key }));
+                        ev.dataTransfer.effectAllowed = "move";
+                        ev.stopPropagation();
+                    };
+                }
+                row.ondragover = (ev) => {
+                    ev.preventDefault();
+                    ev.dataTransfer.dropEffect = "move";
+                    row.style.outline = "1px dashed #4a9eff";
+                };
+                row.ondragleave = () => { row.style.outline = ""; };
+                row.ondrop = async (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    row.style.outline = "";
+                    let d = null;
+                    try { d = JSON.parse(ev.dataTransfer.getData("text/plain")); } catch (e) { /* silent */ }
+                    await st.plDrop(d, key);
+                };
                 if (isFolder) {
                     const rn = document.createElement("button");
-                    rn.textContent = "✏️"; rn.title = "Переименовать полку";
+                    rn.textContent = "✏️"; rn.title = "Переименовать категорию";
                     rn.style.cssText = "background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;";
                     rn.onclick = async (ev) => {
                         ev.stopPropagation();
                         const leaf = key.split("/").pop();
-                        const next = prompt("Новое название полки:", leaf);
+                        const next = prompt("Новое название категории:", leaf);
                         if (!next || !next.trim() || next.trim() === leaf) return;
                         const parent = key.split("/").slice(0, -1).join("/");
                         const newPath = parent ? `${parent}/${next.trim()}` : next.trim();
@@ -212,16 +277,17 @@ app.registerExtension({
                             });
                             if (r.ok) {
                                 if (st.selFolder === key) st.selFolder = newPath;
+                                st.syncSaveFolder();
                                 await reload();
                             } else alert("Не удалось переименовать.");
                         } catch (e) { alert("Не удалось переименовать."); }
                     };
                     const del = document.createElement("button");
-                    del.textContent = "🗑"; del.title = "Удалить полку (книги переедут в корень)";
+                    del.textContent = "🗑"; del.title = "Удалить категорию (записи переедут в корень)";
                     del.style.cssText = "background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;";
                     del.onclick = async (ev) => {
                         ev.stopPropagation();
-                        if (!confirm(`Удалить полку «${key}» с подполками? Книги не пропадут — переедут в корень.`)) return;
+                        if (!confirm(`Удалить категорию «${key}» с подкатегориями? Записи не пропадут — переедут в корень.`)) return;
                         try {
                             const r = await fetch("/prompt_library/folder_delete", {
                                 method: "POST", headers: { "Content-Type": "application/json" },
@@ -229,6 +295,7 @@ app.registerExtension({
                             });
                             if (r.ok) {
                                 if (st.selFolder === key || st.selFolder.startsWith(key + "/")) st.selFolder = "__all";
+                                st.syncSaveFolder();
                                 await reload();
                             }
                         } catch (e) { /* silent */ }
@@ -236,7 +303,7 @@ app.registerExtension({
                     row.appendChild(rn);
                     row.appendChild(del);
                 }
-                row.onclick = () => { st.selFolder = key; renderTree(); render(); };
+                row.onclick = () => { st.selFolder = key; st.syncSaveFolder(); renderTree(); render(); };
                 return row;
             };
 
@@ -244,7 +311,7 @@ app.registerExtension({
                 st.tree.innerHTML = "";
                 st.tree.appendChild(folderRow("__all", "📚 Всё", 0, false));
                 st.tree.appendChild(folderRow("__fav", "★ Избранное", 0, false));
-                st.tree.appendChild(folderRow("__root", "📥 Без полки", 0, false));
+                st.tree.appendChild(folderRow("__root", "📥 Без категории", 0, false));
                 const all = [...new Set([...st.folders, ...st.entries.map((e) => e.folder).filter(Boolean)])].sort();
                 const kids = new Map(); // parent -> [childPath]
                 for (const f of all) {
@@ -260,10 +327,11 @@ app.registerExtension({
                 };
                 walk("", 0);
             };
+            st.renderTree = renderTree;
 
             newFolderBtn.onclick = async () => {
                 const parent = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
-                const name = prompt(parent ? `Новая подполка в «${parent}»: ` : "Новая полка:");
+                const name = prompt(parent ? `Новая подкатегория в «${parent}»: ` : "Новая категория:");
                 if (!name || !name.trim()) return;
                 try {
                     const r = await fetch("/prompt_library/folder_create", {
@@ -273,6 +341,7 @@ app.registerExtension({
                     if (r.ok) {
                         const data = await r.json();
                         st.selFolder = data.path;
+                        st.syncSaveFolder();
                         await reload();
                     }
                 } catch (e) { /* silent */ }
@@ -300,7 +369,7 @@ app.registerExtension({
             const render = () => {
                 const mode = st.viewSel.value || "large";
                 const grid = mode !== "list";
-                const imgSize = mode === "large" ? 192 : mode === "medium" ? 128 : 96;
+                const imgSize = mode === "large" ? 163 : mode === "medium" ? 109 : 82;
                 st.list.style.flexDirection = grid ? "row" : "column";
                 st.list.style.flexWrap = grid ? "wrap" : "nowrap";
                 st.list.style.alignContent = grid ? "flex-start" : "";
@@ -309,6 +378,11 @@ app.registerExtension({
                 let shown = 0;
                 for (const e of sortedFiltered()) {
                     const card = document.createElement("div");
+                    card.draggable = true;
+                    card.ondragstart = (ev) => {
+                        ev.dataTransfer.setData("text/plain", JSON.stringify({ kind: "entry", id: e.id }));
+                        ev.dataTransfer.effectAllowed = "move";
+                    };
                     card.style.cssText = grid
                         ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${e.id === selVal ? "#4a9eff" : "#333"};background:${e.id === selVal ? "#1e2c44" : "#1e1e1e"};flex-shrink:0;`
                         : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${e.id === selVal ? "#4a9eff" : "#333"};background:${e.id === selVal ? "#1e2c44" : "#1e1e1e"};`;
@@ -334,8 +408,8 @@ app.registerExtension({
                     const meta = document.createElement("div");
                     meta.style.cssText = "color:#888;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
                     meta.textContent = grid
-                        ? (e.folder || "Без полки")
-                        : `${e.folder || "Без полки"} · ${e.created_at || ""}${e.last_used ? " · выдана " + e.last_used : ""}`;
+                        ? (e.folder || "Без категории")
+                        : `${e.folder || "Без категории"} · ${e.created_at || ""}${e.last_used ? " · выдана " + e.last_used : ""}`;
                     body.appendChild(meta);
 
                     const fav = document.createElement("button");
@@ -350,6 +424,25 @@ app.registerExtension({
                                 body: JSON.stringify({ id: e.id, favorite: !e.favorite }),
                             });
                             e.favorite = !e.favorite;
+                            render();
+                        } catch (err) { /* silent */ }
+                    };
+
+                    const rn = document.createElement("button");
+                    rn.textContent = "✏️";
+                    rn.title = "Переименовать";
+                    rn.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;flex-shrink:0;";
+                    rn.onclick = async (ev) => {
+                        ev.stopPropagation();
+                        const next = prompt("Новое название:", e.title || e.head || "");
+                        if (!next || !next.trim() || next.trim() === (e.title || "")) return;
+                        try {
+                            await fetch("/prompt_library/update", {
+                                method: "POST", headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ id: e.id, title: next.trim() }),
+                            });
+                            e.title = next.trim();
+                            st.full.delete(e.id);
                             render();
                         } catch (err) { /* silent */ }
                     };
@@ -389,11 +482,12 @@ app.registerExtension({
                                 st.bSave.style.display = "none";
                                 st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}`;
                                 st.detail.style.display = "flex";
-                                st.hint.textContent = "Включите «Выдавать выбранный» для подачи текста в CLIP.";
+                                st.hint.textContent = "Режим «📤 Выдача» включён — текст пойдёт в CLIP при Queue.";
                             }
                         } catch (err) { /* silent */ }
-                        const useSel = this.widgets?.find((w) => w.name === "use_selected");
-                        if (useSel) { useSel.value = true; setWidgetDisabled(useSel, false); }
+                        const modeW = this.widgets?.find((w) => w.name === "mode");
+                        if (modeW) modeW.value = "📤 Выдача";
+                        await this._pl?.ensureIssueSafe?.();
                         render();
                         this.graph?.setDirtyCanvas(true, true);
                     };
@@ -402,6 +496,7 @@ app.registerExtension({
                     const actions = document.createElement("div");
                     actions.style.cssText = grid ? "display:flex;gap:2px;justify-content:center;" : "display:contents;";
                     actions.appendChild(fav);
+                    actions.appendChild(rn);
                     actions.appendChild(del);
                     card.appendChild(img);
                     card.appendChild(body);
@@ -409,7 +504,7 @@ app.registerExtension({
                     st.list.appendChild(card);
                     shown++;
                 }
-                if (!st.detailId) st.hint.textContent = shown ? `Книг на полке: ${shown}` : "Пусто. Запустите Queue или нажмите «Сохранить промпт».";
+                if (!st.detailId) st.hint.textContent = shown ? `Записей в категории: ${shown}` : "Пусто. Запустите Queue или нажмите «Сохранить промпт».";
             };
             st.render = render;
             search.oninput = render;
@@ -451,26 +546,109 @@ app.registerExtension({
                 } catch (err) { /* silent */ }
             };
 
-            // Окно промпта: регулируемая высота через виджет prompt_height
-            const promptWidget = this.widgets?.find((w) => w.name === "prompt");
-            const heightWidget = this.widgets?.find((w) => w.name === "prompt_height");
-            const applyPromptHeight = () => {
+            // Окно промпта — единственное поле (штатный виджет, ничего не прячем).
+            // Провод, брошенный на окно, подключается к нему штатно (как в CLIP Text Encode).
+
+            // --- Сторож цикла: IMAGE подключён + выход куда-то идёт = кольцо в графе ---
+            const checkCycle = () => {
                 try {
-                    const h = Math.max(40, Math.min(400, Number(heightWidget?.value) || 84));
-                    if (promptWidget) promptWidget.computeSize = (w) => [w || 300, h];
-                    this.setSize([this.size[0], this.computeSize()[1]]);
+                    const imgLinked = (this.inputs?.find((i) => i.name === "image")?.link ?? null) != null;
+                    const outLinked = (this.outputs?.[0]?.links?.length || 0) > 0;
+                    const bad = imgLinked && outLinked;
+                    if (bad && !st.cycleWarned) {
+                        st.cycleWarned = true;
+                        if (st.origBg === undefined) st.origBg = this.bgcolor;
+                        this.bgcolor = "#5a2323";
+                        try {
+                            app.extensionManager.toast.add({
+                                severity: "warn",
+                                summary: "Prompt Library: кольцо в графе!",
+                                detail: "IMAGE подключён и выход идёт вверх по потоку — Queue упадёт. Отключи IMAGE-провод.",
+                                life: 6000,
+                            });
+                        } catch (e) { /* silent */ }
+                    } else if (!bad && st.cycleWarned) {
+                        st.cycleWarned = false;
+                        try { this.bgcolor = st.origBg; } catch (e) { /* silent */ }
+                    }
                     this.graph?.setDirtyCanvas(true, true);
                 } catch (e) { /* silent */ }
             };
-            if (heightWidget) heightWidget.callback = () => applyPromptHeight();
-            st.applyPromptHeight = applyPromptHeight;
-            requestAnimationFrame(() => applyPromptHeight());
+            st.checkCycle = checkCycle;
+
+            // Фикс высоты окна: фронтенд рисует multiline как DOM-textarea
+            // (textarea.comfy-multiline-input), computeSize он игнорирует.
+            // Поднимаемся от нашего DOM-виджета до контейнера ноды (первый предок
+            // ровно с одним textarea — чтобы не задеть чужие ноды) и фиксируем высоту.
+            st.fixTextarea = () => {
+                try {
+                    let el = root.parentElement, depth = 0;
+                    while (el && depth < 12) {
+                        const tas = el.querySelectorAll
+                            ? el.querySelectorAll("textarea.comfy-multiline-input") : [];
+                        if (tas.length === 1) {
+                            tas[0].style.maxHeight = "160px";
+                            tas[0].style.overflowY = "auto";
+                            tas[0].style.resize = "vertical";
+                            break;
+                        }
+                        if (tas.length > 1) break;
+                        el = el.parentElement; depth++;
+                    }
+                } catch (e) { /* silent */ }
+            };
+            requestAnimationFrame(() => { st.fixTextarea(); });
+
+            // Автосокеты виджетов: фронтенд 1.52 создаёт сокет каждому виджету
+            // (getWidgetConfig, тип `*` по умолчанию). У окна промпта он лишний —
+            // вход у нас подписанный (`source`), а вторая точка рядом путает.
+            // Удаляем автосокеты технических виджетов и окна (только неподключённые).
+            st.dropAutoSockets = () => {
+                try {
+                    if (typeof this.removeInput !== "function" || !this.inputs) return;
+                    for (const n of ["prompt", "selected", "save_folder"]) {
+                        const idx = this.inputs.findIndex((i) => i.widget && i.widget.name === n);
+                        if (idx >= 0 && this.inputs[idx].link == null) this.removeInput(idx);
+                    }
+                } catch (e) { /* silent */ }
+            };
+            st.dropAutoSockets();
+            requestAnimationFrame(() => { st.dropAutoSockets(); });
+
+            // Безопасный переход в выдачу: предложить отключить IMAGE-провод
+            st.ensureIssueSafe = async () => {
+                try {
+                    const idx = this.inputs?.findIndex((i) => i.name === "image");
+                    if (idx !== undefined && idx >= 0 && this.inputs[idx].link != null) {
+                        let ok = false;
+                        try {
+                            ok = await app.extensionManager.dialog.confirm({
+                                title: "Режим «📤 Выдача»",
+                                message: "IMAGE-провод вместе с выходом в CLIP создаст цикл и Queue упадёт. Отключить IMAGE-провод?",
+                            });
+                        } catch (e) {
+                            ok = confirm("IMAGE-провод вместе с выходом в CLIP создаст цикл. Отключить IMAGE-провод?");
+                        }
+                        if (ok) this.disconnectInput(idx);
+                    }
+                } catch (e) { /* silent */ }
+                checkCycle();
+            };
+
+            const modeW = this.widgets?.find((w) => w.name === "mode");
+            if (modeW) {
+                modeW.callback = async (val) => {
+                    if (val === "📤 Выдача") await st.ensureIssueSafe();
+                    else checkCycle();
+                };
+            }
 
             // Нативная кнопка «Сохранить» — ручное сохранение без запуска Queue
             try {
                 const saveBtn = this.addWidget("button", "save_now", null, async () => {
                     const pw = this.widgets?.find((w) => w.name === "prompt");
-                    const fw = this.widgets?.find((w) => w.name === "folder") || this.widgets?.find((w) => w.name === "category");
+                    // Сохраняем в открытую в дереве категорию (корень — если выбрано «Всё»)
+                    const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
                     const text = (pw?.value || "").trim();
                     if (!text) {
                         saveBtn.label = "⚠️ Пусто — нечего сохранять";
@@ -481,7 +659,7 @@ app.registerExtension({
                     try {
                         const r = await fetch("/prompt_library/add", {
                             method: "POST", headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ prompt: text, folder: (fw?.value || "").trim() }),
+                            body: JSON.stringify({ prompt: text, folder: dest }),
                         });
                         if (r.ok) { await reload(); saveBtn.label = "✅ Сохранено"; }
                         else saveBtn.label = "❌ Ошибка";
@@ -489,23 +667,18 @@ app.registerExtension({
                     setTimeout(() => { saveBtn.label = "💾 Сохранить промпт"; }, 1500);
                 }, { serialize: false, canvasOnly: true });
                 saveBtn.label = "💾 Сохранить промпт";
+                // Поставить сразу после окна (бывший prompt). С гардами: при ненайденных
+                // индексах ничего не трогаем — порядок по умолчанию лучше битого.
                 const arr = this.widgets;
-                arr.splice(arr.indexOf(saveBtn), 1);
-                const fIdx = arr.findIndex((w) => w.name === "folder" || w.name === "category");
-                arr.splice(fIdx >= 0 ? fIdx + 1 : arr.length, 0, saveBtn);
+                const btnIdx = arr.indexOf(saveBtn);
+                if (btnIdx >= 0) {
+                    arr.splice(btnIdx, 1);
+                    const pIdx = arr.findIndex((w) => w.name === "prompt");
+                    arr.splice(pIdx >= 0 ? pIdx + 1 : arr.length, 0, saveBtn);
+                }
             } catch (e) { /* silent */ }
 
-            const syncPromptVisibility = () => {
-                try {
-                    const linked = this.inputs?.find((i) => i.name === "source")?.link != null;
-                    st.incomingWrap.style.display = linked ? "flex" : "none";
-                    if (linked && promptWidget?.value) st.incomingText.textContent = promptWidget.value;
-                    this.setSize([this.size[0], this.computeSize()[1]]);
-                    this.graph?.setDirtyCanvas(true, true);
-                } catch (e) { /* silent */ }
-            };
-            st.syncPromptVisibility = syncPromptVisibility;
-            requestAnimationFrame(() => syncPromptVisibility());
+            requestAnimationFrame(() => { st.checkCycle?.(); });
 
             this.addDOMWidget("pl_browser", "custom", root, {
                 serialize: false,
@@ -521,7 +694,9 @@ app.registerExtension({
         const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function () {
             const ret = origOnConnectionsChange?.apply(this, arguments);
-            try { this._pl?.syncPromptVisibility?.(); } catch (e) { /* silent */ }
+            try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
+            try { this._pl?.fixTextarea?.(); } catch (e) { /* silent */ }
+            try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
             return ret;
         };
 
@@ -534,7 +709,8 @@ app.registerExtension({
                     if (promptWidget && message.text[0] !== promptWidget.value) {
                         promptWidget.value = message.text[0];
                     }
-                    if (this._pl?.incomingText) this._pl.incomingText.textContent = message.text[0] || "—";
+                    // Vue может перерисовать textarea при смене значения — фиксируем заново
+                    try { this._pl?.fixTextarea?.(); } catch (e) { /* silent */ }
                 }
                 if (message?.entries && this._pl) {
                     // Полное обновление списка и дерева (renderTree живёт в замыкании onNodeCreated)
@@ -552,8 +728,22 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function (info) {
             const ret = origOnConfigure?.apply(this, arguments);
             requestAnimationFrame(() => {
-                try { this._pl?.applyPromptHeight?.(); } catch (e) { /* silent */ }
-                try { this._pl?.reload?.(); } catch (e) { /* silent */ }
+                try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
+                try { this._pl?.fixTextarea?.(); } catch (e) { /* silent */ }
+                try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
+                try {
+                    this._pl?.reload?.().then(() => {
+                        // Восстановить открытую категорию из персистентного save_folder
+                        const st = this._pl;
+                        const sf = this.widgets?.find((w) => w.name === "save_folder");
+                        if (st && sf?.value && st.folders.includes(sf.value)) {
+                            st.selFolder = sf.value;
+                            st.syncSaveFolder?.();
+                            st.renderTree?.();
+                            st.render?.();
+                        }
+                    }).catch(() => {});
+                } catch (e) { /* silent */ }
             });
             return ret;
         };

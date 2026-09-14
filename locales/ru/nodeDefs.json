@@ -2,12 +2,10 @@
   "PromptLibrary": {
     "inputs": {
       "prompt": { "name": "Промпт" },
-      "folder": { "name": "Папка" },
-      "auto_save": { "name": "Автосохранение" },
-      "use_selected": { "name": "Выдавать выбранный" },
-      "prompt_height": { "name": "Высота окна" },
-      "selected": { "name": "Выбрано" },
       "source": { "name": "Промт (вход)" },
+      "mode": { "name": "Режим" },
+      "selected": { "name": "Выбрано" },
+      "save_folder": { "name": "Папка сохранения" },
       "image": { "name": "Изображение (превью)" }
     },
     "outputs": {

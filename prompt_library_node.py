@@ -133,10 +133,11 @@ def _save_thumbnail(image, entry_id):
         import numpy as np
         arr = (np.asarray(arr) * 255).clip(0, 255).astype("uint8")
         img = Image.fromarray(arr)
-        img.thumbnail((256, 256))
+        # Запас под крупный показ: исходник 512px, даунскейл только в браузере
+        img.thumbnail((512, 512), Image.LANCZOS)
         root = _ensure_dirs()
         name = f"{entry_id}.jpg"
-        img.convert("RGB").save(root / "previews" / name, "JPEG", quality=80)
+        img.convert("RGB").save(root / "previews" / name, "JPEG", quality=90)
         return name
     except Exception as e:
         print(f"[PromptLibrary] thumbnail failed: {e}", flush=True)
@@ -169,18 +170,19 @@ def _add_entry(entries, prompt, folder, preview=None, title=""):
 
 
 class PromptLibrary:
-    DESCRIPTION = "Библиотека промптов: папки, имена, автосохранение с превью, поиск и выдача."
+    DESCRIPTION = "Библиотека промптов: категории, имена, автосохранение с превью, поиск и выдача."
+
+    MODE_WRITE = "📥 Запись"
+    MODE_ISSUE = "📤 Выдача"
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "prompt": ("STRING", {"multiline": True, "default": "", "dynamicPrompts": False}),
-                "folder": ("STRING", {"multiline": False, "default": ""}),
-                "auto_save": ("BOOLEAN", {"default": True, "label_on": "Автосохранение вкл", "label_off": "Автосохранение выкл"}),
-                "use_selected": ("BOOLEAN", {"default": False, "label_on": "Выдавать выбранный", "label_off": "Сквозной режим"}),
-                "prompt_height": ("INT", {"default": 84, "min": 40, "max": 400, "step": 4}),
+                "mode": ([cls.MODE_WRITE, cls.MODE_ISSUE], {"default": cls.MODE_WRITE}),
                 "selected": ("STRING", {"multiline": False, "default": ""}),
+                "save_folder": ("STRING", {"multiline": False, "default": ""}),
             },
             "optional": {
                 "source": ("*", {}),
@@ -198,12 +200,22 @@ class PromptLibrary:
     CATEGORY = "My_custom_nodes/Prompts"
     OUTPUT_NODE = True
 
-    def execute(self, prompt="", folder="", auto_save=True, use_selected=False,
-                prompt_height=84, selected="", source=None, image=None,
+    @classmethod
+    def VALIDATE_INPUTS(cls, input_types=None, **kwargs):
+        # Вход source — ANY (*): принимаем любой тип без проверки
+        return True
+
+    def execute(self, prompt="", mode="", selected="", save_folder="", source=None, image=None,
                 extra_pnginfo=None, unique_id=None, **kwargs):
-        # Совместимость со старыми workflow: виджет назывался category
-        if not folder and "category" in kwargs:
-            folder = kwargs["category"]
+        # Папка сохранения = выбранная в дереве (скрытый save_folder, пишет JS).
+        # Совместимость: старые workflow несли folder/category виджетом
+        folder = save_folder or kwargs.get("folder", "") or kwargs.get("category", "")
+        if not mode:
+            if kwargs.get("use_selected"):
+                mode = self.MODE_ISSUE
+            else:
+                mode = self.MODE_WRITE
+        issue = (mode == self.MODE_ISSUE)
         entries, folders = _load_db()
 
         # Входящий текст: провод source приоритетнее виджета (паттерн Prompt Keeper).
@@ -214,7 +226,7 @@ class PromptLibrary:
         out_text = incoming
         sel = (selected or "").strip()
         dirty = False
-        if use_selected and sel:
+        if issue and sel:
             for e in entries:
                 if e.get("id") == sel:
                     out_text = e.get("prompt", "")
@@ -222,9 +234,9 @@ class PromptLibrary:
                     dirty = True
                     break
 
-        # 2. Автосохранение входящего промпта в папку из виджета
+        # 2. Автосохранение входящего промпта в папку из виджета (только в режиме записи)
         fld = _norm_folder(folder)
-        if auto_save and incoming:
+        if not issue and incoming:
             h = _dedup_hash(incoming, fld)
             if not any(e.get("hash") == h for e in entries):
                 entry_id = _new_id(h)
@@ -259,7 +271,7 @@ class PromptLibrary:
                 if workflow and "nodes" in workflow:
                     for node_data in workflow["nodes"]:
                         if str(node_data.get("id")) == str(unique_id):
-                            node_data["widgets_values"] = [display, fld, auto_save, use_selected, prompt_height, selected]
+                            node_data["widgets_values"] = [display, mode, selected, save_folder]
                             break
             except Exception:
                 pass
