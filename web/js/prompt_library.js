@@ -712,6 +712,17 @@ app.registerExtension({
                     this.setSize([Math.max(this.size[0], need[0]), Math.max(this.size[1], need[1])]);
                 } catch (e) { /* silent */ }
             };
+            // При ручном resize ноды — синхронизировать DOM-контейнер.
+            // computeSize вызывается только при создании, при resize ноды — нет.
+            try {
+                const ro = new ResizeObserver(() => {
+                    try {
+                        root.style.height = this.size[1] + "px";
+                        this.graph?.setDirtyCanvas(true, true);
+                    } catch (e) { /* silent */ }
+                });
+                ro.observe(this.element);
+            } catch (e) { /* silent */ }
 
             reload();
             requestAnimationFrame(() => { st.enforceMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
