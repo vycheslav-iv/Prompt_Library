@@ -389,7 +389,28 @@ browserWidget.computeSize = (w) => {
 **BASE_H** = 30 + 30 + 326 + 20 + 30 = **436px** (без detail)
 **С detail** = 436 + 160 = **596px**
 
-## 18.5. Паттерн для других DOM-виджетов ComfyUI
+## 18.5. Методология: как решать проблемы с фронтендом
+
+**Правило: не гадать, а читать исходники.**
+
+Источник знаний — минифицированный JS фронтенда:
+```
+D:\ComfyUI_windows_portable\python_embeded\Lib\site-packages\
+comfyui_frontend_package\static\assets\core-*.js
+```
+
+Алгоритм:
+1. Найти ключевой метод через grep (`computeSize`, `_finalizeWidget`, `addDOMWidget`)
+2. Найти штатные примеры (`RerouteNode.computeSize`, CLIP Text Encode, LoadImage)
+3. Понять механику ДО написания кода (что возвращает, когда вызывается, как влияет CSS)
+4. Применить базовые знания CSS (`flex:1` vs `height`, `overflow:auto` vs `scrollHeight`)
+5. Проверить прогоном (Python headless + JS syntax check), а не визуально
+
+Почему другие ИИ не смогли: пробовали решения наугад (CSS-инъекции, таймеры,
+наблюдатели), каждый «фикс» добавлял обратную связь → новая проблема.
+Правильный ответ был в `RerouteNode.computeSize()` — две константы `[75, 26]`.
+
+## 18.6. Паттерн для других DOM-виджетов ComfyUI
 
 При создании DOM-виджета с `addDOMWidget`:
 
