@@ -38,7 +38,7 @@ app.registerExtension({
 
             // --- DOM: библиотека ---
             const root = document.createElement("div");
-            root.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:400px;";
+            root.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:400px;height:100%;box-sizing:border-box;";
             // Ноду нельзя сжать уже контента, иначе дерево вылезает за границу.
             // (Само присвоение — ниже, после this._pl = st, иначе TDZ-ошибка.)
             const MIN_W = 470;
@@ -83,7 +83,7 @@ app.registerExtension({
 
             // Ряд: дерево папок | список книг
             const main = document.createElement("div");
-            main.style.cssText = "display:flex;gap:6px;min-height:0;";
+            main.style.cssText = "display:flex;gap:6px;flex:1;min-height:0;overflow:hidden;";
 
             const treeBox = document.createElement("div");
             treeBox.style.cssText = "width:34%;min-width:110px;display:flex;flex-direction:column;gap:4px;flex-shrink:0;";
@@ -116,7 +116,7 @@ app.registerExtension({
 
             // --- Панель книги: название, полка, полный текст ---
             const detail = document.createElement("div");
-            detail.style.cssText = "display:none;flex-direction:column;gap:4px;border:1px solid #4a9eff;border-radius:4px;padding:6px;background:#16202f;";
+            detail.style.cssText = "display:none;flex-direction:column;gap:4px;border:1px solid #4a9eff;border-radius:4px;padding:6px;background:#16202f;flex-shrink:0;";
 
             const dTitle = document.createElement("input");
             dTitle.placeholder = "Название";
@@ -697,23 +697,18 @@ app.registerExtension({
             // Никакого offsetHeight (создавал обратную связь при зуме/resize).
             const DETAIL_H = 160;
             const BASE_H = 436;
-            // Фронтенд ComfyUI вызывает this.computeSize() (метод НОДЫ), а не
-            // browserWidget.computeSize. Поэтому перезаписываем computeSize на
-            // самой ноде — иначе detail-панель не расширяет ноду.
-            const prevComputeSize = this.computeSize;
-            this.computeSize = (w) => {
+            // Высота ноды определяется фронтендом через computeSize на виджете.
+            // Не перезаписываем computeSize на ноде — это ломает layout.
+            browserWidget.computeSize = (w) => {
                 try {
-                    const base = prevComputeSize ? prevComputeSize.call(this, w) : [w || 470, 200];
                     const showDetail = detail && detail.style.display !== "none";
-                    const needH = BASE_H + (showDetail ? DETAIL_H : 0);
-                    return [Math.max(base[0], w || 470), Math.max(base[1], needH)];
+                    return [w || this.size[0], BASE_H + (showDetail ? DETAIL_H : 0)];
                 } catch (e) { return [w || 470, BASE_H]; }
             };
             st.syncNodeSize = () => {
                 try {
-                    const [w, h] = this.computeSize(this.size[0]);
-                    this.setSize([Math.max(this.size[0], w), Math.max(this.size[1], h)]);
-                    this.graph?.setDirtyCanvas(true, true);
+                    const need = browserWidget.computeSize(this.size[0]);
+                    this.setSize([Math.max(this.size[0], need[0]), Math.max(this.size[1], need[1])]);
                 } catch (e) { /* silent */ }
             };
 
