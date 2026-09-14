@@ -115,7 +115,7 @@ ComfyUI/user/prompt_library/
 | `extra_pnginfo` | EXTRA_PNGINFO | hidden | Для патча workflow (как в Keeper) |
 | `unique_id` | UNIQUE_ID | hidden | Для патча workflow (как в Keeper) |
 
-Нативная кнопка `💾 Сохранить промпт` (`addWidget("button", ..., {serialize: false, canvasOnly: true})`, скил `comfyui-native-button`) стоит после окна: сохраняет текст из окна + открытую категорию через POST `/prompt_library/add` без запуска Queue. Совместимость с Keeper — проводом Keeper → `source`.
+Кнопка `💾 Сохранить промпт в открытую категорию` — в нашем DOM (первый ряд библиотеки): сохраняет текст из окна + открытую категорию через POST `/prompt_library/add` без запуска Queue. Нативную кнопку не используем сознательно: связка «DOM-окно + нативная кнопка» даёт щель при ресайзе (апстрим issue #7942). Совместимость с Keeper — проводом Keeper → `source`.
 
 ---
 

@@ -74,6 +74,13 @@ app.registerExtension({
             toolbar.appendChild(sortSel);
             toolbar.appendChild(viewSel);
 
+            // Кнопка сохранения — внутри нашего DOM (не нативная): пара
+            // «DOM-окно + нативная кнопка» даёт щель при ресайзе (апстрим issue #7942).
+            const saveDomBtn = document.createElement("button");
+            saveDomBtn.textContent = "💾 Сохранить промпт в открытую категорию";
+            saveDomBtn.title = "Сохранить без запуска Queue";
+            saveDomBtn.style.cssText = "width:100%;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px;cursor:pointer;font-size:12px;";
+
             // Ряд: дерево папок | список книг
             const main = document.createElement("div");
             main.style.cssText = "display:flex;gap:6px;min-height:0;";
@@ -148,6 +155,7 @@ app.registerExtension({
             detail.appendChild(dMeta);
             detail.appendChild(dBtns);
 
+            root.appendChild(saveDomBtn);
             root.appendChild(toolbar);
             root.appendChild(main);
             root.appendChild(detail);
@@ -595,7 +603,7 @@ app.registerExtension({
             // Всё через публичный API; единицы экранные делим на зум канваса.
             st.HEAD_CHARS = 300;
             st.lastFullText = "";
-            try { console.log("[PromptLibrary] build 20260914-noloop"); } catch (e) {}
+            try { console.log("[PromptLibrary] build 20260915-audit"); } catch (e) {}
             // Высота окна инлайн-стилем строго на своём элементе (ни классов, ни
             // таблиц стилей — протечь на другие ноды нечему). Переприменяется,
             // т.к. Vue может подменить элемент.
@@ -636,7 +644,7 @@ app.registerExtension({
                     st.autoSizing = false;
                 } catch (e) { try { st.autoSizing = false; } catch (_) {} }
             };
-            requestAnimationFrame(() => { st.rebaseMain(); });
+            requestAnimationFrame(() => { st.fitNode?.(); });
 
             // Автосокеты виджетов: фронтенд 1.52 создаёт сокет каждому виджету
             // (getWidgetConfig, тип `*` по умолчанию). У окна промпта он лишний —
@@ -682,42 +690,29 @@ app.registerExtension({
                 };
             }
 
-            // Нативная кнопка «Сохранить» — ручное сохранение без запуска Queue
-            try {
-                const saveBtn = this.addWidget("button", "save_now", null, async () => {
-                    const pw = this.widgets?.find((w) => w.name === "prompt");
-                    // Сохраняем в открытую в дереве категорию (корень — если выбрано «Всё»)
-                    const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
-                    // При проводе в окне голова текста — берём полный из последнего выполнения
-                    const linked = (this.inputs?.find((i) => i.name === "source")?.link ?? null) != null;
-                    const text = ((linked && st.lastFullText ? st.lastFullText : (pw?.value || "")).trim());
-                    if (!text) {
-                        saveBtn.label = "⚠️ Пусто — нечего сохранять";
-                        setTimeout(() => { saveBtn.label = "💾 Сохранить промпт"; }, 1500);
-                        return;
-                    }
-                    saveBtn.label = "⏳ Сохраняю...";
-                    try {
-                        const r = await fetch("/prompt_library/add", {
-                            method: "POST", headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ prompt: text, folder: dest }),
-                        });
-                        if (r.ok) { await reload(); saveBtn.label = "✅ Сохранено"; }
-                        else saveBtn.label = "❌ Ошибка";
-                    } catch (err) { saveBtn.label = "❌ Ошибка"; }
-                    setTimeout(() => { saveBtn.label = "💾 Сохранить промпт"; }, 1500);
-                }, { serialize: false, canvasOnly: true });
-                saveBtn.label = "💾 Сохранить промпт";
-                // Поставить сразу после окна (бывший prompt). С гардами: при ненайденных
-                // индексах ничего не трогаем — порядок по умолчанию лучше битого.
-                const arr = this.widgets;
-                const btnIdx = arr.indexOf(saveBtn);
-                if (btnIdx >= 0) {
-                    arr.splice(btnIdx, 1);
-                    const pIdx = arr.findIndex((w) => w.name === "prompt");
-                    arr.splice(pIdx >= 0 ? pIdx + 1 : arr.length, 0, saveBtn);
+            // Сохранение без запуска Queue — та же логика, кнопка теперь в DOM.
+            saveDomBtn.onclick = async () => {
+                const pw = this.widgets?.find((w) => w.name === "prompt");
+                const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
+                const linked = (this.inputs?.find((i) => i.name === "source")?.link ?? null) != null;
+                const text = ((linked && st.lastFullText ? st.lastFullText : (pw?.value || "")).trim());
+                const base = "💾 Сохранить промпт в открытую категорию";
+                if (!text) {
+                    saveDomBtn.textContent = "⚠️ Пусто — нечего сохранять";
+                    setTimeout(() => { saveDomBtn.textContent = base; }, 1500);
+                    return;
                 }
-            } catch (e) { /* silent */ }
+                saveDomBtn.textContent = "⏳ Сохраняю...";
+                try {
+                    const r = await fetch("/prompt_library/add", {
+                        method: "POST", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ prompt: text, folder: dest }),
+                    });
+                    if (r.ok) { await reload(); saveDomBtn.textContent = "✅ Сохранено"; }
+                    else saveDomBtn.textContent = "❌ Ошибка";
+                } catch (err) { saveDomBtn.textContent = "❌ Ошибка"; }
+                setTimeout(() => { saveDomBtn.textContent = base; }, 1500);
+            };
 
             requestAnimationFrame(() => { st.checkCycle?.(); });
 
@@ -775,13 +770,6 @@ app.registerExtension({
                     if (w && message.selected) w.value = message.selected;
                 }
             } catch (e) { /* silent */ }
-            return ret;
-        };
-
-        const origOnRemoved = nodeType.prototype.onRemoved;
-        nodeType.prototype.onRemoved = function () {
-            const ret = origOnRemoved?.apply(this, arguments);
-            try { if (this._pl?.pinTimer) { clearInterval(this._pl.pinTimer); this._pl.pinTimer = null; } } catch (e) {}
             return ret;
         };
 
