@@ -605,10 +605,7 @@ app.registerExtension({
             try { console.log("[PromptLibrary] build 20260915-audit"); } catch (e) {}
             // Высоту окна держим контентом (голова текста при проводе, см. onExecuted).
             // computeSize отдаёт визуальную высоту — фронтенд сам управляет размером ноды.
-            const plScale = () => {
-                try { return (app.canvas && app.canvas.ds && app.canvas.ds.scale) || 1; }
-                catch (e) { return 1; }
-            };
+            // plScale удалён: computeSize отдаёт CSS-пиксели, canvas-трансформация — фронтенду.
             // Минимальная ширина: ноду нельзя сжать уже контента.
             try {
                 const prevOnResize = this.onResize ? this.onResize.bind(this) : null;
@@ -699,17 +696,17 @@ app.registerExtension({
             try {
                 browserWidget.computeSize = (w) => {
                     try {
-                        // Считаем визуальную высоту через offsetHeight видимых элементов,
-                        // а НЕ через root.scrollHeight (он считает полный контент overflow:auto
-                        // списков — 1000 карточек × 200px = 200,000px → нода растёт бесконечно).
+                        // Визуальная высота через offsetHeight видимых элементов.
+                        // Без delenия на plScale: canvas-трансформация применяется фронтендом
+                        // к container div, DOM-контент — в CSS-пикселях. Деление на scale
+                        // создавало обратную связь при зуме (нода «плясала» вверх-вниз).
                         let h = 0;
                         for (const el of [saveDomBtn, toolbar, main, detail, hint]) {
                             if (el && el.style.display !== "none") h += el.offsetHeight || 0;
                         }
                         h += 24; // gap: 5 промежутков × 6px ≈ 24px
                         if (h < 100) h = 420; // fallback при пустом DOM
-                        const s = plScale();
-                        return [w || this.size[0], h / s];
+                        return [w || this.size[0], h];
                     } catch (e) { return [w || 470, 420]; }
                 };
             } catch (e) { /* silent */ }
