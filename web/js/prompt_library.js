@@ -169,6 +169,28 @@ app.registerExtension({
             };
             this._pl = st;
 
+            // ВРЕМЕННАЯ ДИАГНОСТИКА бесконечного растягивания: кто зовёт setSize.
+            // Убрать после выяснения причины.
+            try {
+                const origSetSize = this.setSize.bind(this);
+                let ssc = 0;
+                this.setSize = (size) => {
+                    try {
+                        ssc++;
+                        if (ssc <= 25) {
+                            // eslint-disable-next-line no-console
+                            console.log("[PL-DIAG] setSize #" + ssc,
+                                JSON.stringify(size),
+                                "from:", (new Error().stack || "").split("\n").slice(2, 6).join(" <- "));
+                        } else if (ssc === 26) {
+                            console.log("[PL-DIAG] ...дальше молчу, счётчик:", ssc);
+                        }
+                    } catch (e) {}
+                    return origSetSize(size);
+                };
+                st.setSizeCount = () => ssc;
+            } catch (e) { /* silent */ }
+
             st.enforceMinWidth = () => {
                 try {
                     if (this.size[0] < MIN_W) this.setSize([MIN_W, this.size[1]]);
