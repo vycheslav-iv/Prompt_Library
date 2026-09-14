@@ -1,6 +1,6 @@
 # Техническое задание (ТЗ) — Prompt Library для ComfyUI
 
-**Версия:** v1.2 (sizing решён — §18; audit — §19; скил `comfyui-dom-widget-sizing`)
+**Версия:** v1.3 (sizing — §18; audit — §19; detail layout — §20)
 **Связь:** продолжение серии Prompt Keeper (v1.0 — «последний промпт», Library — «база промптов»)
 
 ## Модель «как в реальной библиотеке»
@@ -484,3 +484,68 @@ ts(a.created_at) < ts(b.created_at) ? -1 : ts(a.created_at) > ts(b.created_at) ?
 - **`BASE_H=436`** — константа, пересчитывается при визуальных изменениях.
 - **`_pl_list` без кэша** — полное чтение JSON при каждом запросе. Для <500
   записей приемлемо.
+
+---
+
+# 20. Detail layout: проблема и решение
+
+## 20.1. Проблема
+
+При клике на карточку detail-панель появлялась **поверх** списка карточек и дерева
+категорий, перекрывая их. При ручном resize ноды detail расширялся **вверх**, ещё
+больше перекрывая контент.
+
+## 20.2. Корень проблемы
+
+Три отдельных бага:
+
+1. **`syncNodeSize` вызывала `this.computeSize`** (метод **ноды**), а не
+   `browserWidget.computeSize` (метод **виджета**). Нода не знала про detail →
+   `setSize` устанавливала неправильную высоту.
+
+2. **`root` не заполнял контейнер виджета** — `root` был flex column без `height`,
+   его высота определялась контентом. Контейнер виджета (из `computeSize`) был
+   больше → detail перекрывал list/tree.
+
+3. **`main` не имел `flex:1`** — секция list+tree не делила оставшееся пространство
+   с detail.
+
+## 20.3. Решение
+
+```css
+/* root заполняет контейнер виджета */
+root: height:100%; box-sizing:border-box;
+
+/* main делят оставшееся пространство */
+main: flex:1; overflow:hidden;
+
+/* detail не сжимается flex'ом */
+detail: flex-shrink:0;
+
+/* list и tree — фиксированные высоты с overflow */
+list: height:320px; overflow-y:auto;
+tree: height:320px; overflow-y:auto;
+```
+
+Результат: root = 100% виджета, main = остаток после search/toolbar/save/detail/hint,
+list/tree скроллятся если не влезают, detail под списком без перекрытия.
+
+## 20.4. Что НЕ работает (для будущих агентов)
+
+| Попытка | Почему не работает |
+|---------|-------------------|
+| `this.computeSize = ...` (override на ноде) | Фронтенд использует `node.computeSize()` для определения размера ноды. Override возвращает другую высоту → нода становится слишком tall/short, content не совпадает с border |
+| `ResizeObserver` на `this.element` | Нода и виджет — разные DOM-элементы. ResizeObserver на ноде не влияет на виджет |
+| `root.style.height = this.size[1] + "px"` | `this.size` = canvas units, не CSS pixels. Прямое присвоение создаёт mismatch |
+| `offsetHeight` в `computeSize` | Создаёт обратную связь при zoom/resize (подробно — §18) |
+| `scrollHeight` в `computeSize` | Считает скрытый overflow → бесконечный рост |
+
+## 20.5. Паттерн для detail-панелей в DOM-виджетах
+
+1. Detail **внутри root** (flex column), после основного контента
+2. Root = `height:100%; box-sizing:border-box`
+3. Основной контейнер = `flex:1; overflow:hidden`
+4. List/tree внутри основного = `height:Npx; overflow-y:auto`
+5. Detail = `flex-shrink:0` (не сжимается)
+6. `computeSize` = фиксированные константы (BASE_H + DETAIL_H)
+7. **Никогда** не перезаписывайте `this.computeSize` на ноде
