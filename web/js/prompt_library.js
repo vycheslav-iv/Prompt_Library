@@ -104,7 +104,15 @@ app.registerExtension({
             treeBox.appendChild(tree);
 
             const list = document.createElement("div");
-            list.style.cssText = "min-width:0;display:flex;flex-direction:column;gap:4px;height:320px;overflow-y:auto;";
+            list.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;flex-shrink:0;";
+            // Заголовок списка (пустой, для выравнивания с treeHead)
+            const listHead = document.createElement("div");
+            listHead.style.cssText = "display:flex;align-items:center;height:22px;";
+            list.appendChild(listHead);
+            // Контент списка (скроллируемый)
+            const listContent = document.createElement("div");
+            listContent.style.cssText = "display:flex;flex-direction:column;gap:4px;height:320px;overflow-y:auto;";
+            list.appendChild(listContent);
 
             // Слева список книг, справа проводник категорий
             main.appendChild(list);
@@ -162,7 +170,7 @@ app.registerExtension({
             root.appendChild(hint);
 
             const st = {
-                root, search, sortSel, viewSel, tree, list, hint, detail,
+                root, search, sortSel, viewSel, tree, list: listContent, hint, detail,
                 dTitle, dFolder, dText, dMeta, bSave,
                 entries: [], folders: [], full: new Map(),
                 detailId: null, selFolder: "__all",
