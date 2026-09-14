@@ -480,6 +480,7 @@ app.registerExtension({
                             st.entries = st.entries.filter((x) => x.id !== e.id);
                             if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; }
                             renderTree(); render();
+                            st.syncNodeSize?.();
                         } catch (err) { /* silent */ }
                     };
 
@@ -507,6 +508,7 @@ app.registerExtension({
                         if (modeW) modeW.value = "📤 Выдача";
                         await this._pl?.ensureIssueSafe?.();
                         render();
+                        st.syncNodeSize?.();
                         this.graph?.setDirtyCanvas(true, true);
                     };
 
@@ -691,9 +693,24 @@ app.registerExtension({
                 getValue: () => null,
                 setValue: () => {},
             });
-            // computeSize НЕ переопределяем: фронтенд 1.52 сам вычисляет высоту
-            // DOM-виджета (как для CLIP Text Encode и любого штатного multiline).
-            // Наше вмешательство создавало обратную связь при зуме/resize.
+            // Высота DOM-контента: фиксированные константы из стейта виджета.
+            // Никакого offsetHeight (создавал обратную связь при зуме/resize).
+            const DETAIL_H = 160;
+            const BASE_H = 436;
+            st.syncNodeSize = () => {
+                try {
+                    const need = this.computeSize(this.size[0]);
+                    this.setSize([Math.max(this.size[0], need[0]), Math.max(this.size[1], need[1])]);
+                } catch (e) { /* silent */ }
+            };
+            try {
+                browserWidget.computeSize = (w) => {
+                    try {
+                        const showDetail = detail && detail.style.display !== "none";
+                        return [w || this.size[0], BASE_H + (showDetail ? DETAIL_H : 0)];
+                    } catch (e) { return [w || 470, BASE_H]; }
+                };
+            } catch (e) { /* silent */ }
 
             reload();
             requestAnimationFrame(() => { st.enforceMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
