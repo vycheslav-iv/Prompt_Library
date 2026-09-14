@@ -192,7 +192,7 @@ app.registerExtension({
                     st.folders = data.folders || [];
                     renderTree();
                     render();
-                    try { st.fitNode?.(); } catch (e) { /* silent */ }
+                    // fitNode удалён: computeSize отдаёт высоту, фронтенд сам управляет размером.
                 } catch (e) { /* silent */ }
             };
             st.reload = reload;
@@ -507,7 +507,7 @@ app.registerExtension({
                         if (modeW) modeW.value = "📤 Выдача";
                         await this._pl?.ensureIssueSafe?.();
                         render();
-                        try { this._pl?.fitNode?.(); } catch (e) { /* silent */ }
+                        // fitNode удалён.
                         this.graph?.setDirtyCanvas(true, true);
                     };
 
@@ -531,7 +531,7 @@ app.registerExtension({
             viewSel.onchange = () => {
                 try { localStorage.setItem("promptLibrary.view", viewSel.value); } catch (e) { /* silent */ }
                 render();
-                try { st.fitNode?.(); } catch (e) { /* silent */ }
+                // fitNode удалён.
                 this.graph?.setDirtyCanvas(true, true);
             };
 
@@ -599,48 +599,26 @@ app.registerExtension({
             // Высота ноды: в окне при проводе только голова текста (стабильно ~5 строк),
             // полный текст — в базе и панели книги. Только публичный widget.value.
             // Списки фиксированы (320px, внутренний скролл); рамка обнимает контент
-            // один раз через fitNode. Никаких подгонок под ресайз, CSS и таймеров.
+            // Никаких подгонок под ресайз, CSS и таймеров.
             st.HEAD_CHARS = 300;
             st.lastFullText = "";
             try { console.log("[PromptLibrary] build 20260915-audit"); } catch (e) {}
-            // Высоту окна держим контентом (голова текста при проводе, см. onExecuted),
-            // а не стилями/наблюдателями: фронтенд их перерисовками сносит.
+            // Высоту окна держим контентом (голова текста при проводе, см. onExecuted).
+            // computeSize отдаёт визуальную высоту — фронтенд сам управляет размером ноды.
             const plScale = () => {
                 try { return (app.canvas && app.canvas.ds && app.canvas.ds.scale) || 1; }
                 catch (e) { return 1; }
             };
-            // Угол тянет только рамку; списки фиксированы (320px, внутренний скролл).
-            // Никакой подгонки контента под ресайз — именно она давала петлю
-            // с автофитом фронтенда (бесконечное вытягивание вниз).
+            // Минимальная ширина: ноду нельзя сжать уже контента.
             try {
                 const prevOnResize = this.onResize ? this.onResize.bind(this) : null;
                 this.onResize = (size) => {
                     try { if (prevOnResize) prevOnResize(size); } catch (e) { /* silent */ }
-                    // Свой программный ресайз не обрабатываем — иначе петля.
-                    if (st.autoSizing) return;
                     try {
-                        // Уже контента не сжимаем: иначе дерево и панель вылезают за границу.
-                        // Однократная коррекция — второй вызов уже видит норму, петли нет.
                         if (this.size[0] < MIN_W) this.setSize([MIN_W, this.size[1]]);
                     } catch (e) { /* silent */ }
                 };
             } catch (e) { /* silent */ }
-            // Рамка обнимает контент: DOM-виджет отдаёт свою высоту в computeSize,
-            // fitNode подгоняет ноду (только наружу). Флаг autoSizing гасит эхо в onResize.
-            st.fitNode = () => {
-                try {
-                    if (typeof this.computeSize !== "function") return;
-                    const need = this.computeSize(this.size[0]);
-                    if (!need || need.length < 2) return;
-                    const targetW = Math.max(this.size[0], MIN_W, need[0] || 0);
-                    const targetH = Math.max(this.size[1], need[1] || 0);
-                    if (Math.abs(targetW - this.size[0]) < 2 && Math.abs(targetH - this.size[1]) < 2) return;
-                    st.autoSizing = true;
-                    this.setSize([targetW, targetH]);
-                    st.autoSizing = false;
-                } catch (e) { try { st.autoSizing = false; } catch (_) {} }
-            };
-            requestAnimationFrame(() => { st.fitNode?.(); });
 
             // Автосокеты виджетов: фронтенд 1.52 создаёт сокет каждому виджету
             // (getWidgetConfig, тип `*` по умолчанию). У окна промпта он лишний —
@@ -737,7 +715,7 @@ app.registerExtension({
             } catch (e) { /* silent */ }
 
             reload();
-            requestAnimationFrame(() => { st.enforceMinWidth?.(); st.fitNode?.(); this.graph?.setDirtyCanvas(true, true); });
+            requestAnimationFrame(() => { st.enforceMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
             return ret;
         };
 
@@ -783,7 +761,7 @@ app.registerExtension({
             const ret = origOnConfigure?.apply(this, arguments);
             requestAnimationFrame(() => {
                 try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
-                try { this._pl?.fitNode?.(); } catch (e) { /* silent */ }
+                // fitNode удалён.
                 try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
                 try {
                     this._pl?.reload?.().then(() => {
