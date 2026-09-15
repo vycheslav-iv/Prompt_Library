@@ -332,7 +332,6 @@ app.registerExtension({
                 row.onclick = () => {
                     st.selFolder = key;
                     st.syncSaveFolder();
-                    // Скрыть detail-панель и сбросить выбор при переключении папки
                     st.detailId = null;
                     if (selWidget) selWidget.value = "";
                     st.detail.style.display = "none";
@@ -454,14 +453,16 @@ app.registerExtension({
                     fav.style.cssText = "background:none;border:none;color:#e8c33a;cursor:pointer;font-size:14px;flex-shrink:0;";
                     fav.onclick = async (ev) => {
                         ev.stopPropagation();
+                        const prev = e.favorite;
+                        e.favorite = !prev;
+                        render();
                         try {
-                            await fetch("/prompt_library/favorite", {
+                            const r = await fetch("/prompt_library/favorite", {
                                 method: "POST", headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ id: e.id, favorite: !e.favorite }),
+                                body: JSON.stringify({ id: e.id, favorite: e.favorite }),
                             });
-                            e.favorite = !e.favorite;
-                            render();
-                        } catch (err) { /* silent */ }
+                            if (!r.ok) { e.favorite = prev; render(); }
+                        } catch (err) { e.favorite = prev; render(); }
                     };
 
                     const rn = document.createElement("button");
@@ -593,7 +594,7 @@ app.registerExtension({
                     const bad = imgLinked && outLinked;
                     if (bad && !st.cycleWarned) {
                         st.cycleWarned = true;
-                        if (st.origBg === undefined) st.origBg = this.bgcolor;
+                        if (st.origBg === undefined) st.origBg = this.bgcolor || null;
                         this.bgcolor = "#5a2323";
                         try {
                             app.extensionManager.toast.add({
@@ -605,7 +606,7 @@ app.registerExtension({
                         } catch (e) { /* silent */ }
                     } else if (!bad && st.cycleWarned) {
                         st.cycleWarned = false;
-                        try { this.bgcolor = st.origBg; } catch (e) { /* silent */ }
+                        this.bgcolor = st.origBg || null;
                     }
                     this.graph?.setDirtyCanvas(true, true);
                 } catch (e) { /* silent */ }
@@ -618,7 +619,6 @@ app.registerExtension({
             // Никаких подгонок под ресайз, CSS и таймеров.
             st.HEAD_CHARS = 300;
             st.lastFullText = "";
-            try { console.debug("[PromptLibrary] build 20260915-audit"); } catch (e) {}
             // Высоту окна держим контентом (голова текста при проводе, см. onExecuted).
             // computeSize отдаёт визуальную высоту — фронтенд сам управляет размером ноды.
             // plScale удалён: computeSize отдаёт CSS-пиксели, canvas-трансформация — фронтенду.
@@ -636,15 +636,26 @@ app.registerExtension({
             // Автосокеты виджетов: фронтенд 1.52 создаёт сокет каждому виджету
             // (getWidgetConfig, тип `*` по умолчанию). У окна промпта он лишний —
             // вход у нас подписанный (`source`), а вторая точка рядом путает.
-            // Удаляем автосокеты технических виджетов и окна (только неподключённые).
+            // Удаляем автосокеты технических виджетов (только неподключённые).
+            // prompt НЕ удаляем — пользователь подключает к нему провод промта.
             st.dropAutoSockets = () => {
                 try {
                     if (typeof this.removeInput !== "function" || !this.inputs) return;
-                    for (const n of ["prompt", "selected", "save_folder"]) {
+                    for (const n of ["selected", "save_folder"]) {
                         const idx = this.inputs.findIndex((i) => i.widget && i.widget.name === n);
                         if (idx >= 0 && this.inputs[idx].link == null) this.removeInput(idx);
                     }
                 } catch (e) { /* silent */ }
+                // Если провод source подключён — очищаем виджет prompt,
+                // чтобы Python взял текст из провода, а не из виджета.
+                try {
+                    const srcInput = this.inputs?.find((i) => i.name === "source");
+                    const pw = this.widgets?.find((w) => w.name === "prompt");
+                    if (srcInput && srcInput.link != null && pw && pw.value) {
+                        pw.value = "";
+                    }
+                } catch (e) { /* silent */ }
+                try { st.checkCycle?.(); } catch (e) { /* silent */ }
             };
             st.dropAutoSockets();
             requestAnimationFrame(() => { st.dropAutoSockets(); });
@@ -689,12 +700,12 @@ app.registerExtension({
                 };
             }
 
-            // Сохранение без запуска Queue — та же логика, кнопка теперь в DOM.
+            // Сохранение без запуска Queue — кнопка в DOM.
+            // Всегда берёт текст из виджета prompt, независимо от проводов.
             saveDomBtn.onclick = async () => {
                 const pw = this.widgets?.find((w) => w.name === "prompt");
                 const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
-                const linked = (this.inputs?.find((i) => i.name === "source")?.link ?? null) != null;
-                const text = ((pw?.value || st.lastFullText || "")).trim();
+                const text = (pw?.value || "").trim();
                 const base = "💾 Сохранить промпт в открытую категорию";
                 if (!text) {
                     saveDomBtn.textContent = "⚠️ Пусто — нечего сохранять";
@@ -760,18 +771,9 @@ app.registerExtension({
                     const full = message.text[0] || "";
                     const st = this._pl;
                     if (st) st.lastFullText = full;
-                    const promptWidget = this.widgets?.find((w) => w.name === "prompt");
-                    if (promptWidget) {
-                        if (full !== promptWidget.value) promptWidget.value = full;
-                    }
                 }
                 if (message?.entries && this._pl) {
-                    // Полное обновление списка и дерева (renderTree живёт в замыкании onNodeCreated)
                     this._pl.reload?.();
-                }
-                if (message?.selected !== undefined) {
-                    const w = this.widgets?.find((w) => w.name === "selected");
-                    if (w && message.selected) w.value = message.selected;
                 }
             } catch (e) { /* silent */ }
             return ret;
@@ -782,7 +784,6 @@ app.registerExtension({
             const ret = origOnConfigure?.apply(this, arguments);
             requestAnimationFrame(() => {
                 try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
-                // fitNode удалён.
                 try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
                 try {
                     this._pl?.reload?.().then(() => {
@@ -793,12 +794,23 @@ app.registerExtension({
                             st.selFolder = sf.value;
                             st.syncSaveFolder?.();
                             st.renderTree?.();
-                            st.render?.();
                         }
                     }).catch(() => {});
                 } catch (e) { /* silent */ }
             });
             return ret;
+        };
+
+        const origOnDrawForeground = nodeType.prototype.onDrawForeground;
+        nodeType.prototype.onDrawForeground = function () {
+            try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
+            return origOnDrawForeground?.apply(this, arguments);
+        };
+
+        const origOnRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function () {
+            try { this._pl?.full?.clear?.(); } catch (e) { /* silent */ }
+            return origOnRemoved?.apply(this, arguments);
         };
     },
 });

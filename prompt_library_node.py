@@ -180,11 +180,11 @@ class PromptLibrary:
         return {
             "required": {
                 "mode": ([cls.MODE_WRITE, cls.MODE_ISSUE], {"default": cls.MODE_WRITE}),
-                "prompt": ("STRING", {"multiline": True, "default": "", "dynamicPrompts": False}),
                 "selected": ("STRING", {"multiline": False, "default": ""}),
                 "save_folder": ("STRING", {"multiline": False, "default": ""}),
             },
             "optional": {
+                "prompt": ("STRING", {"multiline": True, "default": "", "dynamicPrompts": False}),
                 "source": ("*", {}),
                 "image": ("IMAGE", {}),
             },
@@ -205,7 +205,7 @@ class PromptLibrary:
         # Вход source — ANY (*): принимаем любой тип без проверки
         return True
 
-    def execute(self, prompt="", mode="", selected="", save_folder="", source=None, image=None,
+    def execute(self, mode="", selected="", save_folder="", prompt="", source=None, image=None,
                 extra_pnginfo=None, unique_id=None, **kwargs):
         # Папка сохранения = выбранная в дереве (скрытый save_folder, пишет JS).
         # Совместимость: старые workflow несли folder/category виджетом
@@ -218,10 +218,12 @@ class PromptLibrary:
         issue = (mode == self.MODE_ISSUE)
         entries, folders = _load_db()
 
-        # Входящий текст: виджет приоритетнее провода source.
+        # Входящий текст: провод source приоритетнее виджета prompt.
+        # Если провод шлёт непустую строку — берём её.
+        # Если провода нет или он пустой — берём виджет (ручной ввод).
         # Защита: source — ANY-тип, нужно фильтровать не-строки (IMAGE, LATENT и т.д.).
         incoming = (prompt or "").strip()
-        if not incoming and source is not None and isinstance(source, str):
+        if not incoming and source is not None and isinstance(source, str) and source.strip():
             incoming = source.strip()
         display = incoming
 
@@ -248,11 +250,11 @@ class PromptLibrary:
                         if e.get("id") == entry_id:
                             e["preview"] = f"previews/{preview}"
                             break
-                entries = entries[:MAX_ENTRIES]
                 if fld and fld not in folders:
                     folders.append(fld)
                     folders = sorted(set(folders) | set(_parent_folders(fld)))
                 dirty = True
+            entries = entries[:MAX_ENTRIES]
         if dirty:
             try:
                 _save_db(entries, folders)
@@ -266,7 +268,8 @@ class PromptLibrary:
                 if workflow and "nodes" in workflow:
                     for node_data in workflow["nodes"]:
                         if str(node_data.get("id")) == str(unique_id):
-                            node_data["widgets_values"] = [display, mode, selected, save_folder]
+                            # Порядок = порядок INPUT_TYPES: mode, selected, save_folder, prompt
+                            node_data["widgets_values"] = [mode, selected, save_folder, prompt]
                             break
             except Exception:
                 pass
@@ -349,11 +352,14 @@ try:
             body = {}
         entry_id = body.get("id", "")
         entries, folders = _load_db()
+        found = False
         for e in entries:
             if e.get("id") == entry_id:
+                found = True
                 e["favorite"] = bool(body.get("favorite", not e.get("favorite", False)))
                 break
-        _save_db(entries, folders)
+        if found:
+            _save_db(entries, folders)
         return web.json_response({"ok": True})
 
     @routes.post("/prompt_library/update")
@@ -364,8 +370,10 @@ try:
             body = {}
         entry_id = body.get("id", "")
         entries, folders = _load_db()
+        found = False
         for e in entries:
             if e.get("id") == entry_id:
+                found = True
                 if "prompt" in body and str(body["prompt"]).strip():
                     e["prompt"] = str(body["prompt"])
                 if "title" in body:
@@ -377,7 +385,8 @@ try:
                 if e["folder"]:
                     folders = sorted(set(folders) | {e["folder"]} | set(_parent_folders(e["folder"])))
                 break
-        _save_db(entries, folders)
+        if found:
+            _save_db(entries, folders)
         return web.json_response({"ok": True})
 
     @routes.post("/prompt_library/delete")
@@ -388,12 +397,13 @@ try:
             body = {}
         entry_id = body.get("id", "")
         entries, folders = _load_db()
-        entries = [e for e in entries if e.get("id") != entry_id]
-        _save_db(entries, folders)
-        try:
-            (_ensure_dirs() / "previews" / f"{re.sub(r'[^a-zA-Z0-9]', '', entry_id)}.jpg").unlink(missing_ok=True)
-        except Exception:
-            pass
+        new_entries = [e for e in entries if e.get("id") != entry_id]
+        if len(new_entries) < len(entries):
+            _save_db(new_entries, folders)
+            try:
+                (_ensure_dirs() / "previews" / f"{re.sub(r'[^a-zA-Z0-9]', '', entry_id)}.jpg").unlink(missing_ok=True)
+            except Exception:
+                pass
         return web.json_response({"ok": True})
 
     @routes.post("/prompt_library/folder_create")
