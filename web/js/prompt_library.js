@@ -124,7 +124,7 @@ app.registerExtension({
 
             // --- Панель книги: название, полка, полный текст ---
             const detail = document.createElement("div");
-            detail.style.cssText = "display:none;flex-direction:column;gap:4px;border:1px solid #4a9eff;border-radius:4px;padding:6px;background:#16202f;flex-shrink:0;max-height:200px;overflow-y:auto;";
+            detail.style.cssText = "display:none;flex-direction:column;gap:4px;border:1px solid #4a9eff;border-radius:4px;padding:6px;background:#16202f;flex-shrink:0;max-height:320px;overflow-y:auto;";
 
             const dTitle = document.createElement("input");
             dTitle.placeholder = "Название";
@@ -136,8 +136,8 @@ app.registerExtension({
             dFolder.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px 6px;font-size:11px;";
             const dText = document.createElement("textarea");
             dText.readOnly = true;
-            dText.rows = 5;
-            dText.style.cssText = "width:100%;box-sizing:border-box;background:#111;color:#eee;border:1px solid #444;border-radius:4px;padding:4px;font-size:11px;overflow-y:auto;max-height:120px;";
+            dText.rows = 10;
+            dText.style.cssText = "width:100%;box-sizing:border-box;background:#111;color:#eee;border:1px solid #444;border-radius:4px;padding:4px;font-size:11px;overflow-y:auto;resize:none;";
             const dMeta = document.createElement("div");
             dMeta.style.cssText = "color:#777;font-size:10px;";
 
@@ -703,7 +703,7 @@ app.registerExtension({
             });
             // Высота DOM-контента: фиксированные константы из стейта виджета.
             // Никакого offsetHeight (создавал обратную связь при зуме/resize).
-            const DETAIL_H = 160;
+            const DETAIL_H = 280;
             const BASE_H = 436;
             st.syncNodeSize = () => {
                 try {

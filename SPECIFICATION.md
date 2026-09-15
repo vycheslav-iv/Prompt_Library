@@ -1,6 +1,6 @@
 # Техническое задание (ТЗ) — Prompt Library для ComfyUI
 
-**Версия:** v1.5 (list/tree alignment + flex stretch)
+**Версия:** v1.6 (textarea fix: rows=10, resize:none, detail max-height=320px)
 **Связь:** продолжение серии Prompt Keeper (v1.0 — «последний промпт», Library — «база промптов»)
 
 ## Модель «как в реальной библиотеке»
@@ -521,8 +521,9 @@ ts(a.created_at) < ts(b.created_at) ? -1 : ts(a.created_at) > ts(b.created_at) ?
 
 Откат к коммиту `68c5ea8` (SPECIFICATION.md v1.2: §19 аудит) + фиксы:
 
-- **detail**: `max-height:200px`, `overflow-y:auto`, `flex-shrink:0`
-- **dText**: `overflow-y:auto`, `max-height:120px` вместо `resize:vertical`
+- **detail**: `max-height:320px`, `overflow-y:auto`, `flex-shrink:0`
+- **dText**: `rows=10`, `resize:none` (убран уголок ресайза), `overflow-y:auto`
+- **computeSize**: `DETAIL_H=280` (высота detail-панели при открытии)
 - **list/tree выравнивание**: одинаковая структура (header + scrollable 320px)
   - `list` = `listHead`(22px) + `listContent`(320px, `flex:1`)
   - `treeBox` = `treeHead`(22px) + `tree`(320px, `width:34%`)
