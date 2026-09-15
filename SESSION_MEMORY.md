@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (2026-09-15, textarea fix)
+# Память сессии — Prompt Library (2026-09-15, skills update)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,41 +7,33 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- Убран уголок ресайза textarea в detail-панели (`resize:none`)
-- Увеличена высота textarea с 5 до 10 строк
-- Увеличен detail max-height до 320px (был 200px)
-- Обновлена константа `DETAIL_H` до 280 (была 160)
-- Закоммичено и запушено: `87bc380`
+- Обновлён скил `comfyui-dom-widget-sizing`: 3 новых паттерна + 1 запрещённый подход
+- Обновлена SPECIFICATION.md §18.6: дополнительные паттерны из Prompt Library
+- Закоммичено и запушено: `87caf62`
 
-## 2. Итоговое состояние кода
+## 2. Добавленные паттерны в скил
 
-- `web/js/prompt_library.js:137-140` — `dText`: `rows=10`, `resize:none`, `overflow-y:auto`
-- `web/js/prompt_library.js:127` — `detail`: `max-height:320px`, `overflow-y:auto`
-- `web/js/prompt_library.js:706` — `DETAIL_H=280`, `BASE_H=436`
+- **List/tree alignment** — одинаковая структура (header 22px + scrollable 320px)
+- **Flex stretch** — `flex:1` + `width:34%; flex-shrink:0` (растяжение при ресайзе)
+- **Textarea в detail** — `resize:none; rows=10; overflow-y:auto`
+- **Запрещено**: override `this.computeSize` на ноде (ломает border/resize)
 
-## 3. Что важно не сломать
+## 3. Итоговое состояние кода
 
-- `dText`: `resize:none` (без уголка), `rows=10` (фиксированная высота)
-- `detail`: `max-height:320px` (вмещает textarea + title + folder + meta + buttons)
-- `computeSize`: `DETAIL_H=280` (высота detail при открытии)
-- `list` = `flex:1` (растягивается), `treeBox` = `width:34%` (фиксированная доля)
-- `listHead` и `treeHead` = 22px (выравнивание верхних границ)
-- `listContent` и `tree` = 320px (выравнивание нижних границ)
-- `computeSize` — на виджете (`browserWidget.computeSize`), НЕ на ноде
-- `D:\ComfyUI_windows_portable_old\` — архив
-- Исходник → `python sync.py Prompt_Library` → рестарт + Ctrl+F5
-- gh: `vycheslav-iv`. Запрещено: PowerShell, `rm -rf .git`
+- `comfyui-dom-widget-sizing/SKILL.md` — 220 строк, 8 паттернов + 8 запрещённых подходов
+- Скил синхронизирован в `.opencode`, `.kilo`, `.agents`
+- `SPECIFICATION.md` v1.6: §18.6 дополнен новыми паттернами
 
-## 4. Следующие шаги (по решению пользователя)
+## 4. Следующие шаги
 
-1. **SPLIT на две ноды**: Prompt Library (дерево/поиск/выдача) + Prompt Saver (пассивная)
+1. **SPLIT на две ноды**: Prompt Library + Prompt Saver
 2. **Постраничность** (~20 записей на страницу)
-3. **Детальный анализ фронтенда** — прочитать `core-*.js` вокруг `computeSize` чтобы понять
-   КАК фронтенд реально вызывает его для DOM-виджетов (обязательно перед любым sizing fix)
+3. **Детальный анализ фронтенда** — прочитать `core-*.js` вокруг `computeSize`
 
 ## 5. Связанные файлы
 
-- `SPECIFICATION.md` (v1.6: textarea fix)
-- `SESSION_MEMORY-history/2026-09-15-1600.md` — снапшот до textarea fix
-- Рабочая копия: `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library\`
-- Скилы: `comfyui-cycle-guard`, `comfyui-dom-widget-sizing`
+- `.opencode/skills/comfyui-dom-widget-sizing/SKILL.md`
+- `.kilo/skills/comfyui-dom-widget-sizing/SKILL.md`
+- `.agents/skills/comfyui-dom-widget-sizing/SKILL.md`
+- `SPECIFICATION.md` (v1.6)
+- `SESSION_MEMORY-history/2026-09-15-1700.md`

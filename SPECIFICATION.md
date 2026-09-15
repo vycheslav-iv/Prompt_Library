@@ -366,7 +366,7 @@ Prompt_Library/
 ## 18.3. Текущее решение: фиксированные константы + detail max-height
 
 ```js
-const DETAIL_H = 160; // detail-панель: title + folder + textarea(5rows) + meta + buttons
+const DETAIL_H = 280; // detail-панель: title + folder + textarea(10rows) + meta + buttons
 const BASE_H = 436;   // saveDomBtn(30) + toolbar(30) + main(326) + hint(20) + gaps(30)
 
 browserWidget.computeSize = (w) => {
@@ -391,12 +391,12 @@ browserWidget.computeSize = (w) => {
 | `saveDomBtn` | 30px | padding:5px × 2 + font:12px + border:1px × 2 ≈ 30px |
 | `toolbar` | 30px | padding:4px × 2 + font:12px + border:1px × 2 ≈ 30px |
 | `main` | 326px | list(320px) + gap(6px); tree(320px) в treeBox |
-| `detail` | 160px | title(28) + folder(28) + textarea(100) + meta(14) + buttons(28) + gaps |
+| `detail` | 280px | title(28) + folder(28) + textarea(170) + meta(14) + buttons(28) + gaps |
 | `hint` | 20px | font:11px + line-height ≈ 20px |
 | gaps (5 шт) | 30px | 5 × 6px = 30px |
 
 **BASE_H** = 30 + 30 + 326 + 20 + 30 = **436px** (без detail)
-**С detail** = 436 + 160 = **596px**
+**С detail** = 436 + 280 = **716px**
 
 ## 18.5. Методология: как решать проблемы с фронтендом
 
@@ -556,9 +556,9 @@ ts(a.created_at) < ts(b.created_at) ? -1 : ts(a.created_at) > ts(b.created_at) ?
 ## 20.5. Паттерн для detail-панелей в DOM-виджетах
 
 1. Detail **внутри root** (flex column), после основного контента
-2. Root = `height:100%; box-sizing:border-box` (ЕСЛИ фронтенд поддерживает)
-3. Основной контейнер = `flex:1; overflow:hidden`
-4. List/tree внутри основного = `height:Npx; overflow-y:auto`
-5. Detail = `flex-shrink:0; max-height:200px; overflow-y:auto` (не сжимается, прокручивается)
-6. `computeSize` = фиксированные константы (BASE_H + DETAIL_H)
-7. **Никогда** не перезаписывайте `this.computeSize` на ноде — это ломает border/resize
+2. Основной контейнер = `flex:1; overflow:hidden` (растягивается при ресайзе)
+3. List/tree внутри основного = `height:Npx; overflow-y:auto` (фиксированная высота)
+4. Detail = `flex-shrink:0; max-height:320px; overflow-y:auto` (не сжимается, прокручивается)
+5. `computeSize` = фиксированные константы (BASE_H + DETAIL_H)
+6. **Никогда** не перезаписывайте `this.computeSize` на ноде — это ломает border/resize
+7. **Никогда** не используй `root height:100%` — только `flex:1` на дочерних элементах
