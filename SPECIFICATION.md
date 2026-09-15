@@ -424,9 +424,21 @@ comfyui_frontend_package\static\assets\core-*.js
 3. **Не используй** `fitNode`, таймеры, наблюдатели, CSS-инъекции для sizing
 4. **Вызывай `setSize`** только при изменении visible состояния (показ/скрытие панелей)
 5. **Не дели на `plScale()`** — canvas-трансформация применяется фронтендом к container div
+6. **Не перезаписывай `this.computeSize` на ноде** — ломает border/resize (проверено)
 
 Если контент динамический (список растёт) — используй `overflow:auto` с фиксированной
 высотой на контейнере, `computeSize` считай по контейнеру, а не по содержимому.
+
+### Дополнительные паттерны (из Prompt Library)
+
+**Две колонки (list + tree):** одинаковая структура (header 22px + scrollable 320px),
+`st.list = listContent` (скроллируемая область, а не обёртка).
+
+**Flex stretch:** `flex:1` на основном контенте + `width:34%; flex-shrink:0` на sidebar.
+При пустом main он всё ещё занимает место → sidebar не «улетает».
+
+**Textarea в detail:** `resize:none; rows=10; overflow-y:auto`. Уголок ресайза — нет.
+Ограничение высоты через `max-height` на родителе (detail), а не на textarea.
 
 ---
 
