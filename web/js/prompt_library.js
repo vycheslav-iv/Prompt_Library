@@ -74,12 +74,58 @@ app.registerExtension({
             toolbar.appendChild(sortSel);
             toolbar.appendChild(search);
 
-            // Кнопка сохранения — внутри нашего DOM (не нативная): пара
-            // «DOM-окно + нативная кнопка» даёт щель при ресайзе (апстрим issue #7942).
-            const saveDomBtn = document.createElement("button");
-            saveDomBtn.textContent = "💾 Сохранить промпт в открытую категорию";
-            saveDomBtn.title = "Сохранить без запуска Queue";
-            saveDomBtn.style.cssText = "width:100%;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px;cursor:pointer;font-size:12px;";
+            // Кнопка-тогл ручного ввода + область ввода
+            const inputToggle = document.createElement("button");
+            inputToggle.textContent = "➕ Добавить промпт";
+            inputToggle.title = "Показать/скрыть окно ручного ввода промпта";
+            inputToggle.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;flex-shrink:0;";
+
+            const inputArea = document.createElement("div");
+            inputArea.style.cssText = "display:none;flex-direction:column;gap:4px;border:1px solid #4a9eff;border-radius:4px;padding:6px;background:#16202f;";
+            const inputText = document.createElement("textarea");
+            inputText.rows = 4;
+            inputText.placeholder = "Введите промпт...";
+            inputText.style.cssText = "width:100%;box-sizing:border-box;background:#111;color:#eee;border:1px solid #444;border-radius:4px;padding:4px;font-size:11px;resize:vertical;max-height:300px;overflow-y:auto;";
+            const inputSaveBtn = document.createElement("button");
+            inputSaveBtn.textContent = "💾 Сохранить промпт";
+            inputSaveBtn.title = "Сохранить в текущую категорию";
+            inputSaveBtn.style.cssText = "width:100%;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px;cursor:pointer;font-size:12px;";
+            inputArea.appendChild(inputText);
+            inputArea.appendChild(inputSaveBtn);
+
+            let inputVisible = false;
+            inputToggle.onclick = () => {
+                inputVisible = !inputVisible;
+                inputArea.style.display = inputVisible ? "flex" : "none";
+                inputToggle.style.background = inputVisible ? "#2c4a73" : "#2a2a2a";
+                st.syncNodeSize?.();
+            };
+
+            inputSaveBtn.onclick = async () => {
+                const text = inputText.value.trim();
+                const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
+                const base = "💾 Сохранить промпт";
+                if (!text) {
+                    inputSaveBtn.textContent = "⚠️ Пусто — нечего сохранять";
+                    setTimeout(() => { inputSaveBtn.textContent = base; }, 1500);
+                    return;
+                }
+                inputSaveBtn.textContent = "⏳ Сохраняю...";
+                try {
+                    const r = await fetch("/prompt_library/add", {
+                        method: "POST", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ prompt: text, folder: dest }),
+                    });
+                    if (r.ok) {
+                        await reload();
+                        inputSaveBtn.textContent = "✅ Сохранено";
+                        inputText.value = "";
+                    } else {
+                        inputSaveBtn.textContent = "❌ Ошибка";
+                    }
+                } catch (err) { inputSaveBtn.textContent = "❌ Ошибка"; }
+                setTimeout(() => { inputSaveBtn.textContent = base; }, 1500);
+            };
 
             // Ряд: дерево папок | список книг
             const main = document.createElement("div");
@@ -163,7 +209,8 @@ app.registerExtension({
             detail.appendChild(dMeta);
             detail.appendChild(dBtns);
 
-            root.appendChild(saveDomBtn);
+            root.appendChild(inputToggle);
+            root.appendChild(inputArea);
             root.appendChild(toolbar);
             root.appendChild(main);
             root.appendChild(detail);
@@ -646,15 +693,6 @@ app.registerExtension({
                         if (idx >= 0 && this.inputs[idx].link == null) this.removeInput(idx);
                     }
                 } catch (e) { /* silent */ }
-                // Если провод source подключён — очищаем виджет prompt,
-                // чтобы Python взял текст из провода, а не из виджета.
-                try {
-                    const srcInput = this.inputs?.find((i) => i.name === "source");
-                    const pw = this.widgets?.find((w) => w.name === "prompt");
-                    if (srcInput && srcInput.link != null && pw && pw.value) {
-                        pw.value = "";
-                    }
-                } catch (e) { /* silent */ }
                 try { st.checkCycle?.(); } catch (e) { /* silent */ }
             };
             st.dropAutoSockets();
@@ -699,30 +737,6 @@ app.registerExtension({
                     }
                 };
             }
-
-            // Сохранение без запуска Queue — кнопка в DOM.
-            // Всегда берёт текст из виджета prompt, независимо от проводов.
-            saveDomBtn.onclick = async () => {
-                const pw = this.widgets?.find((w) => w.name === "prompt");
-                const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
-                const text = (pw?.value || "").trim();
-                const base = "💾 Сохранить промпт в открытую категорию";
-                if (!text) {
-                    saveDomBtn.textContent = "⚠️ Пусто — нечего сохранять";
-                    setTimeout(() => { saveDomBtn.textContent = base; }, 1500);
-                    return;
-                }
-                saveDomBtn.textContent = "⏳ Сохраняю...";
-                try {
-                    const r = await fetch("/prompt_library/add", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ prompt: text, folder: dest }),
-                    });
-                    if (r.ok) { await reload(); saveDomBtn.textContent = "✅ Сохранено"; }
-                    else saveDomBtn.textContent = "❌ Ошибка";
-                } catch (err) { saveDomBtn.textContent = "❌ Ошибка"; }
-                setTimeout(() => { saveDomBtn.textContent = base; }, 1500);
-            };
 
             requestAnimationFrame(() => { st.checkCycle?.(); });
 

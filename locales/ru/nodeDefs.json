@@ -1,7 +1,6 @@
 {
   "PromptLibrary": {
     "inputs": {
-      "prompt": { "name": "Промпт" },
       "source": { "name": "Промт (вход)" },
       "mode": { "name": "Режим" },
       "selected": { "name": "Выбрано" },

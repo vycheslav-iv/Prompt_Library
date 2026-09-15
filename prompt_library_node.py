@@ -184,7 +184,6 @@ class PromptLibrary:
                 "save_folder": ("STRING", {"multiline": False, "default": ""}),
             },
             "optional": {
-                "prompt": ("STRING", {"multiline": True, "default": "", "dynamicPrompts": False}),
                 "source": ("*", {}),
                 "image": ("IMAGE", {}),
             },
@@ -205,7 +204,7 @@ class PromptLibrary:
         # Вход source — ANY (*): принимаем любой тип без проверки
         return True
 
-    def execute(self, mode="", selected="", save_folder="", prompt="", source=None, image=None,
+    def execute(self, mode="", selected="", save_folder="", source=None, image=None,
                 extra_pnginfo=None, unique_id=None, **kwargs):
         # Папка сохранения = выбранная в дереве (скрытый save_folder, пишет JS).
         # Совместимость: старые workflow несли folder/category виджетом
@@ -218,12 +217,10 @@ class PromptLibrary:
         issue = (mode == self.MODE_ISSUE)
         entries, folders = _load_db()
 
-        # Входящий текст: провод source приоритетнее виджета prompt.
-        # Если провод шлёт непустую строку — берём её.
-        # Если провода нет или он пустой — берём виджет (ручной ввод).
+        # Входящий текст: провод source.
         # Защита: source — ANY-тип, нужно фильтровать не-строки (IMAGE, LATENT и т.д.).
-        incoming = (prompt or "").strip()
-        if not incoming and source is not None and isinstance(source, str) and source.strip():
+        incoming = ""
+        if source is not None and isinstance(source, str) and source.strip():
             incoming = source.strip()
         display = incoming
 
