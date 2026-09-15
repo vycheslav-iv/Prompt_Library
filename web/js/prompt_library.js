@@ -99,7 +99,7 @@ app.registerExtension({
             treeHead.appendChild(treeTitle);
             treeHead.appendChild(newFolderBtn);
             const tree = document.createElement("div");
-            tree.style.cssText = "display:flex;flex-direction:column;gap:2px;height:320px;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:4px;background:#191919;";
+            tree.style.cssText = "display:flex;flex-direction:column;gap:2px;height:480px;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:4px;background:#191919;";
             treeBox.appendChild(treeHead);
             treeBox.appendChild(tree);
 
@@ -111,7 +111,7 @@ app.registerExtension({
             list.appendChild(listHead);
             // Контент списка (скроллируемый)
             const listContent = document.createElement("div");
-            listContent.style.cssText = "display:flex;flex-direction:column;gap:4px;height:320px;overflow-y:auto;";
+            listContent.style.cssText = "display:flex;flex-direction:column;gap:4px;height:480px;overflow-y:auto;";
             list.appendChild(listContent);
 
             // Слева список книг, справа проводник категорий
@@ -334,6 +334,7 @@ app.registerExtension({
                     st.syncSaveFolder();
                     // Скрыть detail-панель и сбросить выбор при переключении папки
                     st.detailId = null;
+                    if (selWidget) selWidget.value = "";
                     st.detail.style.display = "none";
                     st.hint.textContent = "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
                     renderTree();
@@ -693,7 +694,7 @@ app.registerExtension({
                 const pw = this.widgets?.find((w) => w.name === "prompt");
                 const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
                 const linked = (this.inputs?.find((i) => i.name === "source")?.link ?? null) != null;
-                const text = ((linked && st.lastFullText ? st.lastFullText : (pw?.value || "")).trim());
+                const text = ((pw?.value || st.lastFullText || "")).trim();
                 const base = "💾 Сохранить промпт в открытую категорию";
                 if (!text) {
                     saveDomBtn.textContent = "⚠️ Пусто — нечего сохранять";
@@ -722,7 +723,7 @@ app.registerExtension({
             // Высота DOM-контента: фиксированные константы из стейта виджета.
             // Никакого offsetHeight (создавал обратную связь при зуме/resize).
             const DETAIL_H = 280;
-            const BASE_H = 436;
+            const BASE_H = 596;
             st.syncNodeSize = () => {
                 try {
                     const need = this.computeSize(this.size[0]);

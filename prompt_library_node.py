@@ -179,8 +179,8 @@ class PromptLibrary:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt": ("STRING", {"multiline": True, "default": "", "dynamicPrompts": False}),
                 "mode": ([cls.MODE_WRITE, cls.MODE_ISSUE], {"default": cls.MODE_WRITE}),
+                "prompt": ("STRING", {"multiline": True, "default": "", "dynamicPrompts": False}),
                 "selected": ("STRING", {"multiline": False, "default": ""}),
                 "save_folder": ("STRING", {"multiline": False, "default": ""}),
             },
@@ -218,12 +218,11 @@ class PromptLibrary:
         issue = (mode == self.MODE_ISSUE)
         entries, folders = _load_db()
 
-        # Входящий текст: провод source приоритетнее виджета (паттерн Prompt Keeper).
+        # Входящий текст: виджет приоритетнее провода source.
         # Защита: source — ANY-тип, нужно фильтровать не-строки (IMAGE, LATENT и т.д.).
-        if source is not None and isinstance(source, str):
+        incoming = (prompt or "").strip()
+        if not incoming and source is not None and isinstance(source, str):
             incoming = source.strip()
-        else:
-            incoming = (prompt or "").strip()
         display = incoming
 
         # 1. Исходящий текст (выдача книги с полки — фиксируем дату)

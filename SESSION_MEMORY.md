@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (2026-09-15,清理 false info)
+# Память сессии — Prompt Library (2026-09-16, mode revert + SPEC cleanup)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,22 +7,18 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- Удалил из скила `comfyui-dom-widget-sizing` ложный раздел «фиксированный размер ноды»
-  (отказанный подход: `resizable=false`, `requestAnimationFrame` textarea)
-- Исправил SPECIFICATION.md: `DETAIL_H` 160→280, `detail` 160px→280px, `total` 596→716px
-- Исправил §20.5: убрал `root height:100%` (отказанный подход)
-- Закоммичено и запушено: `6549441`
+- Исправил логику переключения режима: при отмене IMAGE-wire disconnect диалога
+  режим возвращается на «📥 Запись» (вместо застревания на «📤 Выдача»)
+- `ensureIssueSafe()` теперь возвращает `true`/`false` (был void)
+- Обновил SPECIFICATION.md: убрал ложное (truncation 300 chars, autoSizing, mode-on-click)
+- Закоммичено и запушено: `f33e9a2`
 
-## 2. Найденные и исправленные ложные данные
+## 2. Итоговое состояние кода
 
-| Файл | Было (ложное) | Стало (правильное) |
-|------|---------------|---------------------|
-| SKILL.md | «фиксированный размер ноды — самый надёжный» | Удалён (отказанный подход) |
-| SKILL.md | `DETAIL_H = 160` | `DETAIL_H = 280` |
-| §18.3 | `DETAIL_H = 160; textarea(5rows)` | `DETAIL_H = 280; textarea(10rows)` |
-| §18.4 | `detail: 160px`, `total: 596px` | `detail: 280px`, `total: 716px` |
-| §20.5 | `Root = height:100%` | Удалён (используем `flex:1` на дочерних) |
-| §20.5 | `max-height:200px` | `max-height:320px` |
+- `prompt_library.js:671-684` — `modeW.callback` — откат режима при отмене
+- `prompt_library.js:647-669` — `ensureIssueSafe()` — возвращает bool
+- `prompt_library.js:724-725` — `DETAIL_H=280`, `BASE_H=436`
+- SPECIFICATION.md v1.6 — toolbar order: вид → порядок → поиск
 
 ## 3. Что важно не сломать
 
@@ -30,6 +26,7 @@
 - `list` = `flex:1`, `treeBox` = `width:34%`
 - `dText`: `resize:none; rows=10`
 - `detail`: `max-height:320px; overflow-y:auto`
+- `ensureIssueSafe()` возвращает `true`/`false` — не терять этот контракт
 - Не перезаписывать `this.computeSize` на ноде
 - Не использовать `root height:100%`
 
@@ -41,6 +38,8 @@
 
 ## 5. Связанные файлы
 
-- `.opencode/skills/comfyui-dom-widget-sizing/SKILL.md` (очищен)
-- `SPECIFICATION.md` (v1.6, исправлены ложные данные)
-- `SESSION_MEMORY-history/2026-09-15-1730.md`
+- `prompt_library.js` — JS DOM widget (актуальная версия)
+- `prompt_library_node.py` — Python node (стабильный)
+- `SPECIFICATION.md` v1.6 — полная документация
+- `.opencode/skills/comfyui-dom-widget-sizing/SKILL.md` — sizing skill
+- `SESSION_MEMORY-history/2026-09-16.md` — снапшот перед перезаписью

@@ -1,6 +1,6 @@
 # Техническое задание (ТЗ) — Prompt Library для ComfyUI
 
-**Версия:** v1.6 (textarea fix: rows=10, resize:none, detail max-height=320px)
+**Версия:** v1.6 (list/tree 480px, mode revert on cancel, save priority: widget>wire, mode before prompt)
 **Связь:** продолжение серии Prompt Keeper (v1.0 — «последний промпт», Library — «база промптов»)
 
 ## Модель «как в реальной библиотеке»
@@ -109,7 +109,7 @@ ComfyUI/user/prompt_library/
 | `prompt` | STRING (multiline) | required | Окно ручного ввода + после выполнения показывает записанный текст |
 | `save_folder` | STRING (скрытый виджет, схлопнут) | required | Категория сохранения = выбранная в дереве (пишет JS при каждом клике; персистится через `extra_pnginfo`; `onConfigure` восстанавливает открытую категорию). Пусто = корень. Видимого виджета нет — решение пользователя: куда смотрит дерево, туда и сохраняет |
 | `mode` | COMBO `📥 Запись` / `📤 Выдача` | required | Один переключатель вместо бывшей пары `auto_save`/`use_selected` (старые workflow: `use_selected=True` → Выдача). Запись = сквозной выход + автосейв; Выдача = выход текстом выбранной книги, записи нет |
-| `source` | `*` (ANY) | optional | Подписанный вход «Промт (вход)» — провод от LLM / Keeper / др. нод, приоритетнее виджета, `str()`-конверсия (паттерн Prompt Keeper). Возвращён по требованию пользователя как единственный ясный путь подачи текста проводом |
+| `source` | `*` (ANY) | optional | Подписанный вход «Промт (вход)» — провод от LLM / Keeper / др. нод. **Виджет приоритетнее провода** — `source` используется только как fallback, если виджет `prompt` пуст. |
 | `image` | IMAGE | optional | Провод для превью. Не создаёт виджета, только коннектор |
 | `selected` | STRING (hidden-виджет) | hidden/display | id выбранной записи. Пишется из JS, персистится через `extra_pnginfo` |
 | `extra_pnginfo` | EXTRA_PNGINFO | hidden | Для патча workflow (как в Keeper) |
@@ -170,14 +170,13 @@ POST `add` (ручное сохранение с кнопки) / `favorite` / `u
 
 ## 8.1. Компоновка (сверху вниз)
 
-Поле промпта одно — нативное окно виджета `prompt` (штатно, ничего не прячем: этот фронтенд игнорирует `computeSize`/`hidden` у multiline — проверено в бандле 1.52.7). В окне **всегда полный текст** (без обрезки). Кнопка «Сохранить» при проводе берёт полный текст из `lastFullText`. Только публичный `widget.value`. Списки/дерево — фиксированная высота 320px с внутренним скроллом; мин. ширина ноды 470 (иначе контент вылезает за рамку).
-нативная кнопка `💾 Сохранить промпт` (сразу после окна), `mode` (📥 Запись / 📤 Выдача), скрытые `selected` + `save_folder`. Клик по карточке **не переключает** режим — только показывает панель книги. Переключение на «📤 Выдача» с предупреждением IMAGE-цикла: при отмене режим возвращается на «📥 Запись». Кнопка и автосейв пишут в открытую в дереве категорию (корень — если «Всё»).
+Нативные виджеты ComfyUI (сверху вниз): `mode` (📥 Запись / 📤 Выдача), `prompt` (multiline, штатное окно), скрытые `selected` + `save_folder`. Кнопка `💾 Сохранить промпт` — в DOM-тулбаре (ниже prompt). В окне **всегда полный текст** (без обрезки). Сохранение: **виджет приоритетнее провода** (`pw.value` → `st.lastFullText` только если виджет пуст). Клик по карточке **не переключает** режим — только показывает панель книги. Переключение на «📤 Выдача» с предупреждением IMAGE-цикла: при отмене режим возвращается на «📥 Запись». Переключение папки сбрасывает выделение карточки. Кнопка и автосейв пишут в открытую в дереве категорию (корень — если «Всё»).
 
 DOM-библиотека (`addDOMWidget`, сериализация выключена):
 - тулбар: вид (🖼 Крупные / 🎞 Средние / 📋 Список) → порядок категории (новые / А–Я / старые / недавно выданные) → поиск (название + текст, клиентский);
 - ряд: слева список книг (`list`, `flex:1`) | справа дерево категорий (`treeBox`, `width:34%`):
-  - `list` = flex column: `listHead`(22px, пустой спейсер) + `listContent`(320px, скролл, карточки)
-  - `treeBox` = flex column: `treeHead`(22px, "Категории" + "+ Категория") + `tree`(320px, скролл)
+  - `list` = flex column: `listHead`(22px, пустой спейсер) + `listContent`(480px, скролл, карточки)
+  - `treeBox` = flex column: `treeHead`(22px, "Категории" + "+ Категория") + `tree`(480px, скролл)
   - Оба контейнера начинаются и заканчиваются на одном уровне (одинаковая структура)
   - `list` растягивается при ресайзе ноды (`flex:1`), `treeBox` — фиксированная доля (`34%`)
   - Категории: 📚 Всё, ★ Избранное, 📥 Без категории + вложенные 📁 с отступом; ✏️ переименовать, 🗑 удалить с переездом книг в корень; `+ Категория` создаёт категорию, в текущей — подкатегорию);
@@ -192,8 +191,8 @@ DOM-библиотека (`addDOMWidget`, сериализация выключ�
 - `onConfigure` — `reload()` + восстановление открытой категории из `save_folder` (дополняет `extra_pnginfo`-патч).
 - `onConnectionsChange` — только сторож цикла.
 - Поиск/фильтр/сортировка — чистый JS по `entries`.
-- Клик по карточке → `selected = id` + автовключение `mode = 📤 Выдача` + панель книги (GET `entry` с кэшем).
-- Защита от кольца (JS, без участия Python — цикл виден только по проводам): переход в Выдачу (вручную или кликом) при подключённом `image` показывает confirm «отключить IMAGE-провод?» (`disconnectInput` только с согласия); сторож `checkCycle` (`onConnectionsChange`/`onConfigure`/`onNodeCreated`) красит ноду в красный + toast, если `image` подключён И выход куда-то ведёт; снимается сам при исправлении. Провода не рвутся молча.
+- Клик по карточке → `selected = id` + панель книги (GET `entry` с кэшем). Режим **не** переключается автоматически.
+- Защита от кольца (JS, без участия Python — цикл виден только по проводам): переход в Выдачу при подключённом `image` показывает confirm «отключить IMAGE-провод?»; при отмене `mode` возвращается на «📥 Запись» (`ensureIssueSafe()` возвращает bool). Сторож `checkCycle` (`onConnectionsChange`/`onConfigure`/`onNodeCreated`) красит ноду в красный + toast, если `image` подключён И выход куда-то ведёт; снимается сам при исправлении. Переключение папки сбрасывает `detailId`, `selWidget.value` и скрывает detail-панель.
 - Автосокеты (фронтенд 1.52 даёт сокет каждому виджету, `getWidgetConfig`, тип `*` — проверено в установленном бандле): у `prompt`/`selected`/`save_folder` автосокеты удаляются (`dropAutoSockets` через `removeInput`, только неподключённые). Остаются ровно два подписанных входа: `source`, `image`. Подключённые не трогаем.
 - ★/🗑 записи и ✏️/🗑 папок — прямые POST на endpoints + `reload()`; удаления через `confirm()`.
 
@@ -219,7 +218,7 @@ DOM-библиотека (`addDOMWidget`, сериализация выключ�
 Проблема Keeper сохраняется: workflow JSON захватывается до выполнения → виджеты пусты в PNG.
 
 - Решение то же: патч `extra_pnginfo['workflow'].nodes[unique_id].widgets_values` на стороне Python.
-- Персистим: `[display, mode, selected, save_folder]` (порядок = порядок INPUT_TYPES).
+- Персистим: `[mode, display, selected, save_folder]` (порядок = порядок INPUT_TYPES).
 - Сама база (`library.json`) в PNG не дублируется — только выбор и настройки.
 - Билингва виджетов — через `locales/{lang}/nodeDefs.json` (скилы `comfyui-localization`, `comfyui-bilingual-node`), паттерн — из Keeper.
 
@@ -294,7 +293,7 @@ Prompt_Library/
 1. ✅ Python-каркас + JSON + автосейв + превью + `extra_pnginfo`-патч.
 2. ✅ JS: список + выбор + выдача + поиск + ★/🗑.
 3. ✅ Вход `source` (ANY) возвращён как подписанный «Промт (вход)» — единственный ясный путь провода (был удалён по ошибке, возвращён по требованию).
-4. ✅ Нативная кнопка `💾 Сохранить промпт`; `prompt_height`, плашка, CSS-инъекции, таймеры и наблюдатели высоты — удалены. Окно держится контентом (голова 300 символов при проводе), списки фиксированы 320px.
+4. ✅ Нативная кнопка `💾 Сохранить промпт`; `prompt_height`, плашка, CSS-инъекции, таймеры и наблюдатели высоты — удалены. Окно держится контентом (голова 300 символов при проводе), списки фиксированы 480px.
 5. ✅ Категории/подкатегории (создать/переименовать/удалить, DnD), имена записей, сортировка, виды как в Windows, `last_used`. Термин «полки» убран — везде «категории».
 6. ✅ `git init` + `gh repo create` + push (2026-09-14).
 
@@ -303,7 +302,7 @@ Prompt_Library/
 1. Путь: `folder_paths.get_user_directory()` с фолбэком на `__file__`-родственников. ✅
 2. Превью: endpoint `GET /prompt_library/preview?id=`. ✅
 3. ★/🗑/папки: прямые POST-endpoints + `reload()`. ✅
-4. `widgets_values` = `[display, mode, selected, save_folder]` (`source` — сокет, в патч не входит; убраны `prompt_height`, старая пара флажков). ✅
+4. `widgets_values` = `[mode, display, selected, save_folder]` (`source` — сокет, в патч не входит; `mode` теперь перед `prompt`). ✅
 5. Фронтенд 1.52 игнорирует `computeSize`/`hidden` у multiline-виджетов (проверено на машине пользователя) — больше не боремся, только штатные механизмы. ✅
 5. Второй выход не нужен — счётчик в hint. ✅
 
@@ -335,7 +334,7 @@ Prompt_Library/
 ### Проблема 1: Бесконечное вытягивание вниз
 **Симптом:** нода растёт без остановки при создании/загрузке.
 **Корень:** `computeSize` использовал `root.scrollHeight` — полную высоту DOM-дерева.
-У `list` и `tree` стоит `overflow:auto` (визуально 320px), но `scrollHeight`
+У `list` и `tree` стоит `overflow:auto` (визуально 480px), но `scrollHeight`
 считает **все** строки: 100 карточек × 200px = 20,000px → нода растягивается.
 **Решение:** `computeSize` возвращает фиксированные константы из стейта виджета.
 
@@ -367,7 +366,7 @@ Prompt_Library/
 
 ```js
 const DETAIL_H = 280; // detail-панель: title + folder + textarea(10rows) + meta + buttons
-const BASE_H = 436;   // saveDomBtn(30) + toolbar(30) + main(326) + hint(20) + gaps(30)
+const BASE_H = 596;   // saveDomBtn(30) + toolbar(30) + main(486) + hint(20) + gaps(30)
 
 browserWidget.computeSize = (w) => {
     const showDetail = detail && detail.style.display !== "none";
@@ -390,13 +389,13 @@ browserWidget.computeSize = (w) => {
 |---------|--------|---------------|
 | `saveDomBtn` | 30px | padding:5px × 2 + font:12px + border:1px × 2 ≈ 30px |
 | `toolbar` | 30px | padding:4px × 2 + font:12px + border:1px × 2 ≈ 30px |
-| `main` | 326px | list(320px) + gap(6px); tree(320px) в treeBox |
+| `main` | 486px | list(480px) + gap(6px); tree(480px) в treeBox |
 | `detail` | 280px | title(28) + folder(28) + textarea(170) + meta(14) + buttons(28) + gaps |
 | `hint` | 20px | font:11px + line-height ≈ 20px |
 | gaps (5 шт) | 30px | 5 × 6px = 30px |
 
-**BASE_H** = 30 + 30 + 326 + 20 + 30 = **436px** (без detail)
-**С detail** = 436 + 280 = **716px**
+**BASE_H** = 30 + 30 + 486 + 20 + 30 = **596px** (без detail)
+**С detail** = 596 + 280 = **876px**
 
 ## 18.5. Методология: как решать проблемы с фронтендом
 
@@ -431,7 +430,7 @@ comfyui_frontend_package\static\assets\core-*.js
 
 ### Дополнительные паттерны (из Prompt Library)
 
-**Две колонки (list + tree):** одинаковая структура (header 22px + scrollable 320px),
+**Две колонки (list + tree):** одинаковая структура (header 22px + scrollable 480px),
 `st.list = listContent` (скроллируемая область, а не обёртка).
 
 **Flex stretch:** `flex:1` на основном контенте + `width:34%; flex-shrink:0` на sidebar.
@@ -535,12 +534,16 @@ ts(a.created_at) < ts(b.created_at) ? -1 : ts(a.created_at) > ts(b.created_at) ?
 
 - **detail**: `max-height:320px`, `overflow-y:auto`, `flex-shrink:0`
 - **dText**: `rows=10`, `resize:none` (убран уголок ресайза), `overflow-y:auto`
-- **computeSize**: `DETAIL_H=280` (высота detail-панели при открытии)
-- **list/tree выравнивание**: одинаковая структура (header + scrollable 320px)
-  - `list` = `listHead`(22px) + `listContent`(320px, `flex:1`)
-  - `treeBox` = `treeHead`(22px) + `tree`(320px, `width:34%`)
+- **computeSize**: `BASE_H=596`, `DETAIL_H=280`
+- **list/tree выравнивание**: одинаковая структура (header + scrollable 480px)
+  - `list` = `listHead`(22px) + `listContent`(480px, `flex:1`)
+  - `treeBox` = `treeHead`(22px) + `tree`(480px, `width:34%`)
 - **list растяжение**: `flex:1` вместо фиксированной ширины (растягивается при ресайзе)
 - **treeBox**: `width:34%; min-width:110px; flex-shrink:0` (не сжимается)
+- **mode revert**: при отмене IMAGE-wire disconnect диалога режим возвращается на «📥 Запись»
+- **save priority**: виджет `prompt` приоритетнее провода `source` (fallback только если виджет пуст)
+- **mode before prompt**: `mode` перед `prompt` в `INPUT_TYPES` (виджет режима над окном промпта)
+- **folder switch**: сброс `detailId`, `selWidget.value` и скрытие detail-панели при переключении папки
 
 ## 20.4. Что НЕ работает (для будущих агентов)
 
