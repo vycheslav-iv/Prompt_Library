@@ -43,7 +43,7 @@ app.registerExtension({
             // (Само присвоение — ниже, после this._pl = st, иначе TDZ-ошибка.)
             const MIN_W = 470;
 
-            // Тулбар: поиск + сортировка (как картотека)
+            // Тулбар: вид → порядок → поиск (название + текст)
             const toolbar = document.createElement("div");
             toolbar.style.cssText = "display:flex;gap:6px;";
             const search = document.createElement("input");
@@ -70,9 +70,9 @@ app.registerExtension({
                 if (savedView) viewSel.value = savedView;
             } catch (e) { /* silent */ }
             if (!["large", "medium", "list"].includes(viewSel.value)) viewSel.value = "large";
-            toolbar.appendChild(search);
-            toolbar.appendChild(sortSel);
             toolbar.appendChild(viewSel);
+            toolbar.appendChild(sortSel);
+            toolbar.appendChild(search);
 
             // Кнопка сохранения — внутри нашего DOM (не нативная): пара
             // «DOM-окно + нативная кнопка» даёт щель при ресайзе (апстрим issue #7942).
@@ -329,7 +329,16 @@ app.registerExtension({
                     row.appendChild(rn);
                     row.appendChild(del);
                 }
-                row.onclick = () => { st.selFolder = key; st.syncSaveFolder(); renderTree(); render(); };
+                row.onclick = () => {
+                    st.selFolder = key;
+                    st.syncSaveFolder();
+                    // Скрыть detail-панель и сбросить выбор при переключении папки
+                    st.detailId = null;
+                    st.detail.style.display = "none";
+                    st.hint.textContent = "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
+                    renderTree();
+                    render();
+                };
                 return row;
             };
 
@@ -509,12 +518,9 @@ app.registerExtension({
                                 st.bSave.style.display = "none";
                                 st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}`;
                                 st.detail.style.display = "flex";
-                                st.hint.textContent = "Режим «📤 Выдача» включён — текст пойдёт в CLIP при Queue.";
+                                st.hint.textContent = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача».";
                             }
                         } catch (err) { /* silent */ }
-                        const modeW = this.widgets?.find((w) => w.name === "mode");
-                        if (modeW) modeW.value = "📤 Выдача";
-                        await this._pl?.ensureIssueSafe?.();
                         render();
                         st.syncNodeSize?.();
                         this.graph?.setDirtyCanvas(true, true);
@@ -643,6 +649,7 @@ app.registerExtension({
             requestAnimationFrame(() => { st.dropAutoSockets(); });
 
             // Безопасный переход в выдачу: предложить отключить IMAGE-провод
+            // Возвращает true если переход разрешён, false если отменён
             st.ensureIssueSafe = async () => {
                 try {
                     const idx = this.inputs?.findIndex((i) => i.name === "image");
@@ -656,17 +663,28 @@ app.registerExtension({
                         } catch (e) {
                             ok = confirm("IMAGE-провод вместе с выходом в CLIP создаст цикл. Отключить IMAGE-провод?");
                         }
-                        if (ok) this.disconnectInput(idx);
+                        if (ok) {
+                            this.disconnectInput(idx);
+                        } else {
+                            return false;
+                        }
                     }
                 } catch (e) { /* silent */ }
                 checkCycle();
+                return true;
             };
 
             const modeW = this.widgets?.find((w) => w.name === "mode");
             if (modeW) {
                 modeW.callback = async (val) => {
-                    if (val === "📤 Выдача") await st.ensureIssueSafe();
-                    else checkCycle();
+                    if (val === "📤 Выдача") {
+                        const ok = await st.ensureIssueSafe();
+                        if (!ok) {
+                            modeW.value = "📥 Запись";
+                        }
+                    } else {
+                        checkCycle();
+                    }
                 };
             }
 
@@ -743,11 +761,7 @@ app.registerExtension({
                     if (st) st.lastFullText = full;
                     const promptWidget = this.widgets?.find((w) => w.name === "prompt");
                     if (promptWidget) {
-                        const linked = (this.inputs?.find((i) => i.name === "source")?.link ?? null) != null;
-                        const head = (linked && full.length > (st?.HEAD_CHARS || 300))
-                            ? full.slice(0, st.HEAD_CHARS) + "\n…(полный текст — в панели книги)"
-                            : full;
-                        if (head !== promptWidget.value) promptWidget.value = head;
+                        if (full !== promptWidget.value) promptWidget.value = full;
                     }
                 }
                 if (message?.entries && this._pl) {
