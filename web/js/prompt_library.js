@@ -11,6 +11,7 @@ function plMap(e) {
         created_at: e.created_at || "",
         last_used: e.last_used || null,
         has_preview: !!e.preview,
+        has_workflow: !!e.has_workflow,
     };
 }
 
@@ -206,9 +207,13 @@ app.registerExtension({
             const bEdit = mkBtn("✏️ Редактировать", "Изменить название, категорию и текст");
             const bSave = mkBtn("💾 Сохранить", "Сохранить изменения");
             bSave.style.display = "none";
+            const bWorkflow = mkBtn("📥 Воркфлоу", "Открыть сохранённый воркфлоу на канвасе (текущий будет заменён)");
+            bWorkflow.style.display = "none";
             dBtns.appendChild(bCopy);
             dBtns.appendChild(bEdit);
             dBtns.appendChild(bSave);
+            dBtns.appendChild(bWorkflow);
+            bWorkflow.onclick = () => { try { st.openWorkflow?.(st.detailId); } catch (e) { /* silent */ } };
 
             detail.appendChild(dTitle);
             detail.appendChild(dFolder);
@@ -225,11 +230,86 @@ app.registerExtension({
 
             const st = {
                 root, search, sortSel, viewSel, tree, list: listContent, hint, detail,
-                dTitle, dFolder, dText, dMeta, bSave,
+                dTitle, dFolder, dText, dMeta, bSave, bWorkflow,
                 entries: [], folders: [], full: new Map(),
                 detailId: null, selFolder: "__all",
             };
             this._pl = st;
+
+            st.toast = (severity, summary, detail) => {
+                try {
+                    app.extensionManager.toast.add({ severity, summary, detail, life: 6000 });
+                } catch (e) { /* silent */ }
+            };
+
+            // Открыть воркфлоу записи на канвасе (как дроп PNG с workflow).
+            // Деструктивно (заменяет текущий граф) — всегда через confirm.
+            st.openWorkflow = async (id) => {
+                if (!id) return;
+                try {
+                    let full = st.full.get(id);
+                    if (!full || !full.workflow) {
+                        const r = await fetch(`/prompt_library/entry?id=${encodeURIComponent(id)}`);
+                        if (!r.ok) { st.toast("warn", "Prompt Library", "Не удалось прочитать запись."); return; }
+                        full = await r.json();
+                        st.full.set(id, full);
+                    }
+                    if (!full || !full.workflow) {
+                        st.toast("warn", "Prompt Library: нет воркфлоу",
+                            "У записи нет сохранённого воркфлоу (сохранена вручную или старой версией). Прогони Queue с этим промптом — воркфлоу прикрепится.");
+                        return;
+                    }
+                    let ok = false;
+                    try {
+                        ok = await app.extensionManager.dialog.confirm({
+                            title: "Открыть воркфлоу",
+                            message: "Загрузить воркфлоу из записи? Текущий воркфлоу на канвасе будет заменён.",
+                        });
+                    } catch (e) {
+                        ok = confirm("Загрузить воркфлоу из записи? Текущий воркфлоу будет заменён.");
+                    }
+                    if (!ok) return;
+                    if (typeof app.loadGraphData !== "function") {
+                        st.toast("error", "Prompt Library", "Фронтенд не даёт loadGraphData.");
+                        return;
+                    }
+                    await app.loadGraphData(full.workflow);
+                } catch (err) { st.toast("error", "Prompt Library", "Не удалось открыть воркфлоу."); }
+            };
+
+            // Drop карточки на канвас: кастомный MIME-тип (файлов нет, файловый
+            // хендлер ComfyUI нас игнорирует). Слушатели — capture на canvas:
+            // наш тип забираем себе (stopImmediatePropagation), чужое не трогаем.
+            st.hookCanvasDrop = () => {
+                try {
+                    if (window.__plCanvasDropHooked) return;
+                    const cv = app.canvas && app.canvas.canvas;
+                    if (!cv || typeof cv.addEventListener !== "function") return;
+                    cv.addEventListener("dragover", (ev) => {
+                        try {
+                            const t = (ev.dataTransfer && ev.dataTransfer.types) || [];
+                            if (Array.prototype.includes.call(t, "application/x-pl-entry")) {
+                                ev.preventDefault();
+                                ev.dataTransfer.dropEffect = "copy";
+                            }
+                        } catch (e) { /* silent */ }
+                    }, true);
+                    cv.addEventListener("drop", async (ev) => {
+                        let id = null;
+                        try {
+                            const t = (ev.dataTransfer && ev.dataTransfer.types) || [];
+                            if (!Array.prototype.includes.call(t, "application/x-pl-entry")) return;
+                            id = ev.dataTransfer.getData("application/x-pl-entry") || null;
+                        } catch (e) { return; }
+                        if (!id) return;
+                        ev.preventDefault();
+                        if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+                        await st.openWorkflow(id);
+                    }, true);
+                    window.__plCanvasDropHooked = true;
+                } catch (e) { /* silent */ }
+            };
+            st.hookCanvasDrop();
 
             st.enforceMinWidth = () => {
                 try {
@@ -475,9 +555,15 @@ app.registerExtension({
                 for (const e of sortedFiltered()) {
                     const card = document.createElement("div");
                     card.draggable = true;
+                    card.title = e.has_workflow
+                        ? "Тяни на канвас — открыть сохранённый воркфлоу"
+                        : "Воркфлоу нет (ручная запись) — прогони Queue, и воркфлоу прикрепится";
                     card.ondragstart = (ev) => {
                         ev.dataTransfer.setData("text/plain", JSON.stringify({ kind: "entry", id: e.id }));
-                        ev.dataTransfer.effectAllowed = "move";
+                        try { ev.dataTransfer.setData("application/x-pl-entry", e.id); } catch (err) { /* silent */ }
+                        // copyMove: на папку — move, на канвас — copy (dropEffect обязан
+                        // входить в effectAllowed, иначе браузер показывает запрет и блочит drop)
+                        ev.dataTransfer.effectAllowed = "copyMove";
                     };
                     card.style.cssText = grid
                         ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${e.id === selVal ? "#4a9eff" : "#333"};background:${e.id === selVal ? "#1e2c44" : "#1e1e1e"};flex-shrink:0;`
@@ -485,7 +571,11 @@ app.registerExtension({
 
                     const img = document.createElement("img");
                     img.style.cssText = `width:${imgSize}px;height:${imgSize}px;object-fit:cover;border-radius:3px;background:#222;flex-shrink:0;`;
-                    if (e.has_preview) img.src = `/prompt_library/preview?id=${encodeURIComponent(e.id)}&t=${Date.now()}`;
+                    img.loading = "lazy";
+                    // Стабильный t=: превью неизменно для записи (апгрейд jpg→png
+                    // виден через Last-Modified → дешёвый 304, а не перезакачка).
+                    // Date.now() тут был бы DDoS на 85 картинок при каждом рендере.
+                    if (e.has_preview) img.src = `/prompt_library/preview?id=${encodeURIComponent(e.id)}&t=${encodeURIComponent(e.created_at || e.id)}`;
                     else img.style.display = "none";
 
                     const body = document.createElement("div");
@@ -558,6 +648,7 @@ app.registerExtension({
                                 body: JSON.stringify({ id: e.id }),
                             });
                             st.entries = st.entries.filter((x) => x.id !== e.id);
+                            st.full.delete(e.id);
                             if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; }
                             renderTree(); render();
                             st.syncNodeSize?.();
@@ -579,6 +670,7 @@ app.registerExtension({
                                 st.dText.value = full.prompt || "";
                                 for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
                                 st.bSave.style.display = "none";
+                                st.bWorkflow.style.display = full.workflow ? "" : "none";
                                 st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}`;
                                 st.detail.style.display = "flex";
                                 st.hint.textContent = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача».";
@@ -793,7 +885,7 @@ app.registerExtension({
             } catch (e) { /* silent */ }
 
             reload();
-            requestAnimationFrame(() => { st.enforceMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
+            requestAnimationFrame(() => { st.hookCanvasDrop?.(); st.enforceMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
             return ret;
         };
 

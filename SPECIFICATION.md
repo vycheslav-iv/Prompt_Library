@@ -1,6 +1,6 @@
 # Техническое задание (ТЗ) — Prompt Library для ComfyUI
 
-**Версия:** v1.9.1 (плюс персистентность служебных веток __fav/__root — проверено живьём)
+**Версия:** v1.10 (воркфлоу в карточке + lazy-превью — проверено живьём)
 **Связь:** продолжение серии Prompt Keeper (v1.0 — «последний промпт», Library — «база промптов»)
 
 ## Модель «как в реальной библиотеке»
@@ -65,7 +65,7 @@ VAE Decode / SaveImage
 ComfyUI/user/prompt_library/
 ├── library.json
 └── previews/
-    └── {id}.jpg
+    └── {id}.png (legacy: {id}.jpg без метаданных)
 ```
 
 - `user/` переживает обновление ноды и ComfyUI — выбрано сознательно.
@@ -85,7 +85,7 @@ ComfyUI/user/prompt_library/
   "favorite": false,
   "created_at": "2026-09-13T12:00:00",
   "last_used": "2026-09-14T09:00:00",
-  "preview": "previews/a3f9c1e2.jpg"
+  "preview": "previews/a3f9c1e2.png"
 }
 ```
 
@@ -97,7 +97,7 @@ ComfyUI/user/prompt_library/
 - Дедупликация: хеш MD5(`prompt + \n + folder`) уже есть в базе → не сохраняем повторно (возвращаем существующий id).
 - `title` — имя книги; авто: первая строка текста до 60 символов; правится в панели книги.
 - Лимит: 500 последних записей, новые вставляются в начало.
-- Превью: JPEG-тамбнейл, длинная сторона 512px (с запасом под крупный показ; в карточках даунскейлит браузер), ресемплинг LANCZOS, quality 90. Если вход `image` не подключён или пуст — запись без превью (`preview: null`). Старые превью 256px остаются как есть (оригинала уже нет, не из чего перегенерировать).
+- Превью: PNG-тамбнейл, длинная сторона 512px (с запасом под крупный показ; в карточках даунскейлит браузер), ресемплинг LANCZOS, со встроенным чанком `workflow` (PngInfo — как у SaveImage; compact-JSON). Если вход `image` не подключён или пуст — запись без превью (`preview: null`). Старые JPG остаются как есть, при backfill'е workflow one-time апгрейдятся в PNG (§24.3).
 - `category` оставлен дублем `folder` в записи — legacy-совместимость.
 
 ---
@@ -158,9 +158,12 @@ ComfyUI/user/prompt_library/
 - Пустой `folder` = корень (`""`), без `"Без категории"`.
 - `**kwargs["category"]` — совместимость со старыми workflow (виджет раньше назывался `category`).
 
-Endpoints (`server.PromptServer`): GET `list` (`{entries, folders}`) / `entry?id` / `preview?id` (санитизация id);
-POST `add` (ручное сохранение с кнопки) / `favorite` / `update` (title+prompt+folder, пересчёт hash) /
-`delete` (+ файл превью) / `folder_create` / `folder_rename` (движет префикс) / `folder_delete`
+Endpoints (`server.PromptServer`): GET `list` (`{entries` без `workflow`, но с
+`has_workflow`, `folders}`) / `entry?id` (полная запись, включая `workflow`) /
+`preview?id` (файл из записи, guard `previews/` + jpg|png, legacy-фолбэк);
+POST `add` (ручное сохранение с кнопки, без workflow) / `favorite` / `update`
+(title+prompt+folder, пересчёт hash) / `delete` (+ файл превью из записи) /
+`folder_create` / `folder_rename` (движет префикс) / `folder_delete`
 (записи переезжают в корень, не теряются).
 
 ---
@@ -203,7 +206,7 @@ DOM-библиотека (`addDOMWidget`, сериализация выключ�
 
 ## 8.3. Стиль
 
-Тёмная тема под ComfyUI. Дерево и список со своим скроллом (max-height ~300–336px). Превью отдаёт endpoint `GET /prompt_library/preview?id=` (файлы лежат в `user/`, вне статики ComfyUI).
+Тёмная тема под ComfyUI. Дерево и список со своим скроллом (max-height ~300–336px). Превью отдаёт endpoint `GET /prompt_library/preview?id=` напрямую файлом (без чтения базы: `png → jpg`; `Last-Modified` → дешёвые 304). В JS стабильный `t=created_at` (не `Date.now()` — иначе перезакачка всех превью при каждом рендере) + `loading="lazy"`.
 
 ---
 
@@ -292,6 +295,8 @@ Prompt_Library/
 | RU-локализация | ✅ |
 | Вертикальный stretch: контент тянется с нодой вниз, без пустоты (v1.8) | ✅ проверено живьём 2026-09-17 |
 | Папка восстанавливается при reopen/переключении вкладок без мигания (v1.9) | ✅ проверено живьём 2026-09-17 |
+| Drag карточки на канвас / 📥 открывает сохранённый граф через confirm (v1.10) | ✅ проверено живьём 2026-09-17 |
+| Lazy-превью: без базы, кэш + 304, без мелькания при рендерах (v1.10) | ✅ проверено живьём 2026-09-17 |
 
 ---
 
@@ -327,6 +332,9 @@ Prompt_Library/
   reconcile (§23); промежуточный retry удалён.
 - v1.9.1: служебные ветки `__fav`/`__root` персистятся как есть (§23.4);
   `execute()` режет `__*` в корень.
+- v1.10: воркфлоу в карточке (§24) — PNG-превью с чанком workflow + снапшот
+  в записи (compact-JSON, кап 2МБ), drag на канвас и кнопка 📥 через confirm;
+  lazy-превью (отдача без базы, стабильный кэш-ключ, 304).
 - `computeLayoutSize`: `BASE_H=596`, `DETAIL_H=280`, `INPUT_H=130` как минимумы.
 - Detail-панель: `max-height:320px`, `overflow-y:auto`.
 
@@ -752,3 +760,47 @@ Vue-обёртка `WidgetDOM` (`flex flex-col *:flex-1`) и так растяг
 
 Проверено живьём пользователем 2026-09-17: Избранное и Без категории держатся
 при переключении вкладок; Queue из этих режимов пишет в корень. Принято.
+
+---
+
+# 24. Воркфлоу в карточке: drag на канвас открывает граф (v1.10, проверено живьём)
+
+## 24.1. Замысел
+
+ComfyUI сохраняет изображение вместе с воркфлоу и настройками — превью в Library
+несёт то же самое: карточка = промпт + превью + воркфлоу, который её создал.
+Потянул карточку на канвас (или «📥 Воркфлоу» в панели книги) — открылся граф,
+как при дропе PNG с workflow. Искать файлы не нужно: тут и база промптов, и воркфлоу.
+
+## 24.2. Два слоя (оба)
+
+1. **Превью-файл самодостаточен**: PNG 512px с чанком `workflow` (PngInfo) —
+   как у SaveImage. Drag из проводника открывает воркфлоу нативно, без нашего кода.
+2. **Воркфлоу в записи** (`library.json`): для drag'а с карточки и кнопки —
+   без файлового round-trip. В `/list` и UI-пакете вырезан (тяжёлый), отдаётся
+   флаг `has_workflow`; полный — только в `/entry` по клику.
+
+## 24.3. Захват (Python, `prompt_library_node.py`)
+
+- `execute()`: `_snapshot_workflow(extra_pnginfo)` — deep-copy (json round-trip)
+  + кап 2МБ от патологических графов. Снапшот — pre-patch (как было на Queue).
+- Минификация (вариант 1+3): `separators=(",", ":")` в снапшоте и чанке —
+  данные идентичны (round-trip проверен), экономия ~4% на большом реальном
+  графе (352→339 КБ), на pretty-JSON до ~20%. Старые записи — как есть.
+- Новая запись: workflow в запись + `_save_thumbnail(..., workflow)` →
+  `previews/{id}.png` с чанком.
+- Дедуп-хит без workflow: backfill + one-time апгрейд JPG→PNG с метаданными
+  (`_upgrade_preview_to_png`; старые JPG без workflow остаются как есть —
+  не из чего восстановить).
+- Ручное сохранение (`/add`) — без workflow (`has_workflow=false`).
+
+## 24.4. Открытие (JS, `prompt_library.js`)
+
+- `app.loadGraphData(workflow)` — штатный API замены графа (проверен в
+  `settingStore-*.js`), всегда через confirm (деструктивно).
+- Drag: `dragstart` ставит `application/x-pl-entry` (+ `text/plain` для папок);
+  capture-хуки `dragover`/`drop` на `app.canvas.canvas`, один раз
+  (`window.__plCanvasDropHooked`); чужое не трогаем (проверка типа, иначе return;
+  свой — `stopImmediatePropagation`, чтобы файловый хендлер не сработал).
+- Кнопка «📥 Воркфлоу» в панели книги (видна при `full.workflow`);
+  title-подсказки на карточках; без workflow — warn-toast с объяснением.

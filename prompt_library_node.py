@@ -122,8 +122,26 @@ def _new_id(*parts):
     return hashlib.md5(base.encode("utf-8")).hexdigest()[:10]
 
 
-def _save_thumbnail(image, entry_id):
-    """Сохранить первый кадр IMAGE-тензора как JPEG-превью. Возвращает имя или None."""
+def _workflow_pnginfo(workflow):
+    """PngInfo с чанком workflow — как у SaveImage: файл самодостаточен,
+    drag превью из проводника открывает воркфлоу нативно."""
+    try:
+        from PIL.PngImagePlugin import PngInfo
+    except Exception:
+        return None
+    if not isinstance(workflow, dict):
+        return None
+    try:
+        info = PngInfo()
+        info.add_text("workflow", json.dumps(workflow, ensure_ascii=False, separators=(",", ":")))
+        return info
+    except Exception:
+        return None
+
+
+def _save_thumbnail(image, entry_id, workflow=None):
+    """Первый кадр IMAGE-тензора как PNG-превью 512px со встроенным workflow
+    (как SaveImage). Возвращает относительный путь 'previews/{id}.png' или None."""
     try:
         from PIL import Image
     except Exception:
@@ -136,19 +154,85 @@ def _save_thumbnail(image, entry_id):
         # Запас под крупный показ: исходник 512px, даунскейл только в браузере
         img.thumbnail((512, 512), Image.LANCZOS)
         root = _ensure_dirs()
-        name = f"{entry_id}.jpg"
-        img.convert("RGB").save(root / "previews" / name, "JPEG", quality=90)
-        return name
+        name = f"{entry_id}.png"
+        pnginfo = _workflow_pnginfo(workflow)
+        kw = {"pnginfo": pnginfo} if pnginfo is not None else {}
+        img.convert("RGB").save(root / "previews" / name, "PNG", **kw)
+        return f"previews/{name}"
     except Exception as e:
         print(f"[PromptLibrary] thumbnail failed: {e}", flush=True)
         return None
+
+
+def _upgrade_preview_to_png(entry, workflow):
+    """Старый JPG без метаданных -> PNG со встроенным workflow (one-time,
+    вызывается только при backfill'е workflow в запись)."""
+    try:
+        from PIL import Image
+    except Exception:
+        return False
+    try:
+        old = entry.get("preview") or ""
+        entry_id = entry.get("id") or ""
+        pnginfo = _workflow_pnginfo(workflow)
+        if not old.endswith(".jpg") or pnginfo is None:
+            return False
+        if not re.fullmatch(r"[a-zA-Z0-9]+", entry_id):
+            return False
+        root = _ensure_dirs()
+        src = root / old
+        # guard: файл обязан лежать прямо в previews/
+        if src.parent != root / "previews" or not src.exists():
+            return False
+        with Image.open(src) as img:
+            img.convert("RGB").save(root / "previews" / f"{entry_id}.png", "PNG", pnginfo=pnginfo)
+        entry["preview"] = f"previews/{entry_id}.png"
+        try:
+            src.unlink()
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print(f"[PromptLibrary] preview upgrade failed: {e}", flush=True)
+        return False
 
 
 def _now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
-def _add_entry(entries, prompt, folder, preview=None, title=""):
+def _preview_path(entry_id):
+    """Файл превью по id — напрямую, без чтения базы (записи для отдачи
+    байтов не нужны). id уже санитизирован (alnum) — traversal невозможен.
+    Порядок: png (новый формат) → jpg (legacy)."""
+    root = _ensure_dirs()
+    for ext in (".png", ".jpg"):
+        f = root / "previews" / f"{entry_id}{ext}"
+        if f.exists():
+            return f
+    return None
+
+
+def _snapshot_workflow(extra_pnginfo, cap=2_000_000):
+    """Снапшот воркфлоу для записи: deep-copy + проверка сериализуемости + кап.
+    Возвращает dict или None (нет данных / слишком большой / ошибка)."""
+    try:
+        wf = (extra_pnginfo or {}).get("workflow")
+        if not isinstance(wf, dict) or not isinstance(wf.get("nodes"), list):
+            return None
+        # Компактная форма (без пробелов): workflow дублируется в запись и в PNG,
+        # экономим ~10-20% на каждой копии. Данные идентичны, ComfyUI пробелы не нужны.
+        dump = json.dumps(wf, ensure_ascii=False, separators=(",", ":"))
+        if len(dump) > cap:
+            print(f"[PromptLibrary] workflow too large ({len(dump)}), skipped", flush=True)
+            return None
+        return json.loads(dump)
+    except Exception as e:
+        print(f"[PromptLibrary] workflow snapshot failed: {e}", flush=True)
+        return None
+
+
+def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None):
     h = _dedup_hash(prompt, folder)
     for e in entries:
         if e.get("hash") == h:
@@ -164,7 +248,8 @@ def _add_entry(entries, prompt, folder, preview=None, title=""):
         "favorite": False,
         "created_at": _now(),
         "last_used": None,  # дата последней выдачи (как в библиотеке)
-        "preview": f"previews/{preview}" if preview else None,
+        "preview": preview,  # уже относительный путь 'previews/{id}.png' или None
+        "workflow": workflow,  # снапшот воркфлоу (открытие с канваса); None = нет
     })
     return entry_id, True
 
@@ -241,19 +326,32 @@ class PromptLibrary:
                     break
 
         # 2. Автосохранение входящего промпта в папку из виджета (только в режиме записи)
+        # Снапшот воркфлоу — в запись и в PNG-превью (как SaveImage): карточка
+        # самодостаточна, drag на канвас открывает воркфлоу
+        wf_copy = _snapshot_workflow(extra_pnginfo)
         fld = _norm_folder(folder)
         if not issue and incoming:
-            entry_id, added = _add_entry(entries, incoming, fld)
+            entry_id, added = _add_entry(entries, incoming, fld, workflow=wf_copy)
             if added:
-                preview = _save_thumbnail(image, entry_id) if image is not None else None
+                preview = _save_thumbnail(image, entry_id, wf_copy) if image is not None else None
                 if preview:
                     for e in entries:
                         if e.get("id") == entry_id:
-                            e["preview"] = f"previews/{preview}"
+                            e["preview"] = preview
                             break
-                if fld and fld not in folders:
-                    folders.append(fld)
-                    folders = sorted(set(folders) | set(_parent_folders(fld)))
+                dirty = True  # новая запись — сохраняем всегда
+            elif wf_copy:
+                # Backfill: у старых записей (и ручных) workflow не было —
+                # прикрепляем при первом же прогоне того же промпта
+                for e in entries:
+                    if e.get("id") == entry_id and not e.get("workflow"):
+                        e["workflow"] = wf_copy
+                        _upgrade_preview_to_png(e, wf_copy)
+                        dirty = True
+                        break
+            if fld and fld not in folders:
+                folders.append(fld)
+                folders = sorted(set(folders) | set(_parent_folders(fld)))
                 dirty = True
             entries = entries[:MAX_ENTRIES]
         if dirty:
@@ -287,6 +385,7 @@ class PromptLibrary:
                 "created_at": e.get("created_at", ""),
                 "last_used": e.get("last_used"),
                 "has_preview": bool(e.get("preview")),
+                "has_workflow": bool(e.get("workflow")),
             }
             for e in entries[:200]
         ]
@@ -302,10 +401,17 @@ try:
 
     routes = PromptServer.instance.routes
 
+    def _strip_entry(e):
+        """Лёгкая проекция для списка: без workflow (тяжёлый), но с флагами."""
+        c = {k: v for k, v in e.items() if k != "workflow"}
+        c["has_workflow"] = bool(e.get("workflow"))
+        return c
+
     @routes.get("/prompt_library/list")
     async def _pl_list(request):
         entries, folders = _load_db()
-        return web.json_response({"entries": entries[:MAX_ENTRIES], "folders": folders})
+        return web.json_response({"entries": [_strip_entry(e) for e in entries[:MAX_ENTRIES]],
+                                  "folders": folders})
 
     @routes.get("/prompt_library/entry")
     async def _pl_entry(request):
@@ -319,10 +425,11 @@ try:
     @routes.get("/prompt_library/preview")
     async def _pl_preview(request):
         entry_id = re.sub(r"[^a-zA-Z0-9]", "", request.query.get("id", ""))
-        root = _ensure_dirs()
-        f = root / "previews" / f"{entry_id}.jpg"
-        if not f.exists():
+        f = _preview_path(entry_id)
+        if f is None:
             return web.Response(status=404)
+        # FileResponse отдаёт Last-Modified → повторные запросы закрываются
+        # дешёвым 304 (см. стабильный t= в JS)
         return web.FileResponse(str(f))
 
     @routes.post("/prompt_library/add")
@@ -399,11 +506,21 @@ try:
             body = {}
         entry_id = body.get("id", "")
         entries, folders = _load_db()
+        victim = None
+        for e in entries:
+            if e.get("id") == entry_id:
+                victim = e.get("preview")
+                break
         new_entries = [e for e in entries if e.get("id") != entry_id]
         if len(new_entries) < len(entries):
             _save_db(new_entries, folders)
             try:
-                (_ensure_dirs() / "previews" / f"{re.sub(r'[^a-zA-Z0-9]', '', entry_id)}.jpg").unlink(missing_ok=True)
+                root = _ensure_dirs()
+                cand = root / (victim or "")
+                # guard: удаляем только файл прямо в previews/
+                if (victim and cand.parent == root / "previews"
+                        and cand.suffix.lower() in (".jpg", ".jpeg", ".png")):
+                    cand.unlink(missing_ok=True)
             except Exception:
                 pass
         return web.json_response({"ok": True})
