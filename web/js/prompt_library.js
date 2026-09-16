@@ -37,8 +37,12 @@ app.registerExtension({
 
 
             // --- DOM: библиотека ---
+            // Растяжение вниз: root заполняет высоту виджета (wrapper фронтенда —
+            // flex column с *:flex-1, высота виджета = computedHeight из layout),
+            // main забирает свободное место (flex:1), listContent/tree тянутся
+            // внутри (flex:1 + min-height floor). Без ресайза вид как раньше.
             const root = document.createElement("div");
-            root.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:400px;";
+            root.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:400px;height:100%;";
             // Ноду нельзя сжать уже контента, иначе дерево вылезает за границу.
             // (Само присвоение — ниже, после this._pl = st, иначе TDZ-ошибка.)
             const MIN_W = 470;
@@ -128,8 +132,9 @@ app.registerExtension({
             };
 
             // Ряд: дерево папок | список книг
+            // flex:1 — забирает всё свободное место root при ресайзе ноды вниз
             const main = document.createElement("div");
-            main.style.cssText = "display:flex;gap:6px;min-height:0;";
+            main.style.cssText = "display:flex;gap:6px;min-height:0;flex:1 1 auto;";
 
             const treeBox = document.createElement("div");
             treeBox.style.cssText = "width:34%;min-width:110px;display:flex;flex-direction:column;gap:4px;flex-shrink:0;";
@@ -145,7 +150,8 @@ app.registerExtension({
             treeHead.appendChild(treeTitle);
             treeHead.appendChild(newFolderBtn);
             const tree = document.createElement("div");
-            tree.style.cssText = "display:flex;flex-direction:column;gap:2px;height:480px;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:4px;background:#191919;";
+            // flex:1 тянется с нодой, min-height:480px — пол (= старый фикс. размер)
+            tree.style.cssText = "display:flex;flex-direction:column;gap:2px;flex:1 1 auto;min-height:480px;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:4px;background:#191919;";
             treeBox.appendChild(treeHead);
             treeBox.appendChild(tree);
 
@@ -156,8 +162,9 @@ app.registerExtension({
             listHead.style.cssText = "display:flex;align-items:center;height:22px;";
             list.appendChild(listHead);
             // Контент списка (скроллируемый)
+            // flex:1 тянется с нодой, min-height:480px — пол (= старый фикс. размер)
             const listContent = document.createElement("div");
-            listContent.style.cssText = "display:flex;flex-direction:column;gap:4px;height:480px;overflow-y:auto;";
+            listContent.style.cssText = "display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-height:480px;overflow-y:auto;";
             list.appendChild(listContent);
 
             // Слева список книг, справа проводник категорий
@@ -233,8 +240,32 @@ app.registerExtension({
             // Папка сохранения = выбранная в дереве; персистится через скрытый save_folder
             st.syncSaveFolder = () => {
                 try {
+                    const sf = this.widgets?.find((w) => w.name === "save_folder") || saveFolderW;
                     const v = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
-                    if (saveFolderW && saveFolderW.value !== v) saveFolderW.value = v;
+                    if (sf && sf.value !== v) sf.value = v;
+                } catch (e) { /* silent */ }
+            };
+
+            // Восстановление открытой папки из save_folder после загрузки workflow.
+            // Новый фронтенд применяет widget values асинхронно (store hydration),
+            // поэтому одна попытка может застать sf.value ещё пустым — повторяем
+            // с задержками, пока не сойдётся. Рекурсия только пока st.selFolder
+            // нетронут ("__all") и значение пустое: клик пользователя её останавливает.
+            st.restoreFolder = (left = 5) => {
+                try {
+                    const sf = this.widgets?.find((w) => w.name === "save_folder");
+                    const v = ((sf && sf.value) || "").trim();
+                    if (v && v === st.selFolder) return; // уже на месте
+                    if (v && st.folders.includes(v)) {
+                        st.selFolder = v;
+                        st.syncSaveFolder?.();
+                        st.renderTree?.();
+                        st.render?.();
+                        return;
+                    }
+                    if (!v && left > 0 && st.selFolder === "__all") {
+                        setTimeout(() => { try { st.restoreFolder(left - 1); } catch (e) { /* silent */ } }, 400);
+                    }
                 } catch (e) { /* silent */ }
             };
 
@@ -745,10 +776,20 @@ app.registerExtension({
                 getValue: () => null,
                 setValue: () => {},
             });
-            // Высота DOM-контента: фиксированные константы из стейта виджета.
-            // Никакого offsetHeight (создавал обратную связь при зуме/resize).
+            // options.serialize сюда не пробрасывается (в файле лишний 4-й value
+            // pl_browser:"") — ставим свойство явно, иначе позиционный маппинг
+            // widgets_values хрупок при добавлении виджетов.
+            try { browserWidget.serialize = false; } catch (e) { /* silent */ }
+            // Высота DOM-контента: новый layout API (computeLayoutSize) вместо
+            // legacy computeSize. Разница: computeSize = ТОЧНАЯ высота виджета
+            // (лишний рост ноды → пустота снизу), computeLayoutSize = МИНИМУМ
+            // (minHeight), а всё свободное место distributeSpace отдаёт нам —
+            // нода тянется вниз вместе с контентом. Читаем только boolean-стейт
+            // (display-флаги), НЕ размеры DOM — feedback loop из SPEC §21
+            // здесь невозможен по построению. Никакого offsetHeight/scrollHeight.
             const DETAIL_H = 280;
             const BASE_H = 596;
+            const INPUT_H = 130;
             st.syncNodeSize = () => {
                 try {
                     const need = this.computeSize(this.size[0]);
@@ -756,11 +797,16 @@ app.registerExtension({
                 } catch (e) { /* silent */ }
             };
             try {
-                browserWidget.computeSize = (w) => {
+                // ВАЖНО: legacy computeSize НЕ задаём — иначе фронтенд возьмёт
+                // точную высоту и stretch не сработает (_arrangeWidgets).
+                browserWidget.computeLayoutSize = () => {
                     try {
                         const showDetail = detail && detail.style.display !== "none";
-                        return [w || this.size[0], BASE_H + (showDetail ? DETAIL_H : 0)];
-                    } catch (e) { return [w || 470, BASE_H]; }
+                        return {
+                            minHeight: BASE_H + (showDetail ? DETAIL_H : 0) + (inputVisible ? INPUT_H : 0),
+                            minWidth: MIN_W,
+                        };
+                    } catch (e) { return { minHeight: BASE_H, minWidth: MIN_W }; }
                 };
             } catch (e) { /* silent */ }
 
@@ -800,16 +846,9 @@ app.registerExtension({
                 try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
                 try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
                 try {
-                    this._pl?.reload?.().then(() => {
-                        // Восстановить открытую категорию из персистентного save_folder
-                        const st = this._pl;
-                        const sf = this.widgets?.find((w) => w.name === "save_folder");
-                        if (st && sf?.value && st.folders.includes(sf.value)) {
-                            st.selFolder = sf.value;
-                            st.syncSaveFolder?.();
-                            st.renderTree?.();
-                        }
-                    }).catch(() => {});
+                    // restoreFolder сам повторяет попытки: значения виджетов
+                    // фронтенд применяет асинхронно, с первого раза их может не быть
+                    this._pl?.reload?.().then(() => { this._pl?.restoreFolder?.(); }).catch(() => {});
                 } catch (e) { /* silent */ }
             });
             return ret;

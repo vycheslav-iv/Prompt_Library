@@ -265,8 +265,9 @@ class PromptLibrary:
                 if workflow and "nodes" in workflow:
                     for node_data in workflow["nodes"]:
                         if str(node_data.get("id")) == str(unique_id):
-                            # Порядок = порядок INPUT_TYPES: mode, selected, save_folder, prompt
-                            node_data["widgets_values"] = [mode, selected, save_folder, prompt]
+                            # Порядок = порядок INPUT_TYPES required:
+                            # mode, selected, save_folder (prompt-виджет удалён в v1.7)
+                            node_data["widgets_values"] = [mode, selected, save_folder]
                             break
             except Exception:
                 pass

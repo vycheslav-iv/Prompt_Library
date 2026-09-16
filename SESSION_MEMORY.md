@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (2026-09-16, v1.7: prompt removed)
+# Память сессии — Prompt Library (2026-09-17, vertical stretch via computeLayoutSize)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,11 +7,25 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- Удалили виджет `prompt` из `INPUT_TYPES` — ручной ввод через DOM-кнопку
-- Кнопка `➕ Добавить промпт` → textarea + `💾 Сохранить промпт` (POST `/prompt_library/add`)
-- Вход `source` — единственный способ передать промпт проводом
-- Откатили неудачные эксперименты с flex stretch (§21 в SPEC)
-- Закоммичено и запушено: `b297b47` (v1.7)
+- v1.7 запушен (`b297b47` + docs `6d3d122`): prompt удалён, toggle input, layout stable
+- **Vertical stretch**: корень найден в исходниках фронтенда (`_arrangeWidgets`:
+  legacy `computeSize` = точная высота, `computeLayoutSize` = минимум + всё
+  свободное место через `distributeSpace`). Это НЕ повтор §21 — читаем только
+  boolean-стейт, не размеры DOM
+- `browserWidget.computeSize` → `computeLayoutSize` (+ починен пропуск INPUT_H)
+- CSS: `root height:100%` → `main flex:1` → `listContent`/`tree` flex:1 + min-height:480px
+- `node --check` OK, синхронизировано в рабочую копию через `sync.py`
+- SPEC §22 написан. НЕ коммичено, НЕ проверено живьём — нужен рестарт ComfyUI + drag-тест
+- **Аудит нашёл баг v1.7**: `widgets_values = [..., prompt]` с неопределённым
+  `prompt` → NameError глушился except'ом → персистентность была мертва.
+  Исправлено на `[mode, selected, save_folder]`, headless-тест PASSED, synced
+- **Папка не восстанавливалась**: save пишется (в файле `Fs/FAS` есть), restore
+  в `onConfigure` срабатывал раньше store hydration → retry `restoreFolder`
+  (5×400мс, только пока selFolder нетронут). Мигание «Всё→папка» — неустранимо
+  при любом подходе (первый рендер всегда до значений)
+- **Скилл `comfyui-dom-widget-sizing` обновлён** (все 3 копии): раздел про
+  `computeSize` vs `computeLayoutSize` + паттерн вертикального stretch +
+  `widget.serialize=false` свойством
 
 ## 2. Итоговое состояние кода
 
@@ -35,9 +49,10 @@
 
 ## 4. Следующие шаги
 
-1. **SPLIT на две ноды**: Prompt Library + Prompt Saver
-2. **Постраничность** (~20 записей на страницу)
-3. **Детальный анализ фронтенда** — прочитать `core-*.js` вокруг `computeSize`
+1. **Живой тест stretch**: рестарт ComfyUI → drag ноды вниз → открыть карточку → тогл input → зум. Ожидается: контент тянется, без пустоты и «плясок»
+2. Если тест ОК — закоммитить и запушить (v1.8)
+3. **SPLIT на две ноды**: Prompt Library + Prompt Saver
+4. **Постраничность** (~20 записей на страницу)
 
 ## 5. Связанные файлы
 
