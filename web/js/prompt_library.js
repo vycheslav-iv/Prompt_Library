@@ -246,28 +246,7 @@ app.registerExtension({
                 } catch (e) { /* silent */ }
             };
 
-            // Восстановление открытой папки из save_folder после загрузки workflow.
-            // Новый фронтенд применяет widget values асинхронно (store hydration),
-            // поэтому одна попытка может застать sf.value ещё пустым — повторяем
-            // с задержками, пока не сойдётся. Рекурсия только пока st.selFolder
-            // нетронут ("__all") и значение пустое: клик пользователя её останавливает.
-            st.restoreFolder = (left = 5) => {
-                try {
-                    const sf = this.widgets?.find((w) => w.name === "save_folder");
-                    const v = ((sf && sf.value) || "").trim();
-                    if (v && v === st.selFolder) return; // уже на месте
-                    if (v && st.folders.includes(v)) {
-                        st.selFolder = v;
-                        st.syncSaveFolder?.();
-                        st.renderTree?.();
-                        st.render?.();
-                        return;
-                    }
-                    if (!v && left > 0 && st.selFolder === "__all") {
-                        setTimeout(() => { try { st.restoreFolder(left - 1); } catch (e) { /* silent */ } }, 400);
-                    }
-                } catch (e) { /* silent */ }
-            };
+
 
             const reload = async () => {
                 try {
@@ -278,7 +257,8 @@ app.registerExtension({
                     st.folders = data.folders || [];
                     renderTree();
                     render();
-                    // fitNode удалён: computeSize отдаёт высоту, фронтенд сам управляет размером.
+                    // fitNode удалён: высоту отдаёт computeLayoutSize (минимум),
+                    // свободное место distributeSpace даёт нам, размер — у фронтенда.
                 } catch (e) { /* silent */ }
             };
             st.reload = reload;
@@ -697,9 +677,8 @@ app.registerExtension({
             // Никаких подгонок под ресайз, CSS и таймеров.
             st.HEAD_CHARS = 300;
             st.lastFullText = "";
-            // Высоту окна держим контентом (голова текста при проводе, см. onExecuted).
-            // computeSize отдаёт визуальную высоту — фронтенд сам управляет размером ноды.
-            // plScale удалён: computeSize отдаёт CSS-пиксели, canvas-трансформация — фронтенду.
+            // computeLayoutSize отдаёт минимальную высоту — фронтенд сам управляет
+            // размером ноды и растягивает виджет (никаких offsetHeight/scrollHeight/plScale).
             // Минимальная ширина: ноду нельзя сжать уже контента.
             try {
                 const prevOnResize = this.onResize ? this.onResize.bind(this) : null;
@@ -842,13 +821,54 @@ app.registerExtension({
         const origOnConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
             const ret = origOnConfigure?.apply(this, arguments);
+            // Синхронный restore папки из данных воркфлоу: info несёт
+            // widgets_values_named + widgets_values как в файле, ждать
+            // hydration виджетов не нужно. Первый рендер после fetch —
+            // уже правильная папка, кадра «Всё» нет.
+            try {
+                const st = this._pl;
+                if (st && info) {
+                    let v = null;
+                    const named = info.widgets_values_named;
+                    if (named && typeof named.save_folder === "string") v = named.save_folder;
+                    if (v == null && Array.isArray(info.widgets_values)) {
+                        // Позиционный фолбэк: порядок INPUT_TYPES required =
+                        // [mode, selected, save_folder] (SPEC §10). Совпадает
+                        // и со старыми 4-элементными массивами (prompt был 4-м).
+                        const pv = info.widgets_values[2];
+                        if (typeof pv === "string") v = pv;
+                    }
+                    if (v) st.selFolder = v;
+                }
+            } catch (e) { /* silent */ }
             requestAnimationFrame(() => {
                 try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
                 try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
                 try {
-                    // restoreFolder сам повторяет попытки: значения виджетов
-                    // фронтенд применяет асинхронно, с первого раза их может не быть
-                    this._pl?.reload?.().then(() => { this._pl?.restoreFolder?.(); }).catch(() => {});
+                    // Одноразовая сверка после загрузки базы (без таймеров):
+                    // виджет (если гидрация донесла) — свежий источник;
+                    // иначе держим sync-значение; мусор → корень.
+                    // Клики всегда синхронизируют виджет и selFolder, поэтому
+                    // эта сверка никогда не спорит с пользователем.
+                    this._pl?.reload?.().then(() => {
+                        try {
+                            const st = this._pl;
+                            if (!st) return;
+                            const sf = this.widgets?.find((w) => w.name === "save_folder");
+                            const wv = ((sf && sf.value) || "").trim();
+                            const ok = (f) => !!f && !f.startsWith("__") && st.folders.includes(f);
+                            let want = null;
+                            if (ok(wv)) want = wv;
+                            else if (ok(st.selFolder)) want = st.selFolder;
+                            else if (st.selFolder !== "__all") want = "__all";
+                            if (want !== null && want !== st.selFolder) {
+                                st.selFolder = want;
+                                st.syncSaveFolder?.();
+                                st.renderTree?.();
+                                st.render?.();
+                            }
+                        } catch (e) { /* silent */ }
+                    }).catch(() => {});
                 } catch (e) { /* silent */ }
             });
             return ret;
