@@ -209,6 +209,10 @@ class PromptLibrary:
         # Папка сохранения = выбранная в дереве (скрытый save_folder, пишет JS).
         # Совместимость: старые workflow несли folder/category виджетом
         folder = save_folder or kwargs.get("folder", "") or kwargs.get("category", "")
+        # Служебные ключи дерева (__all/__fav/__root) — не папки: виджет несёт их
+        # для round-trip выбора, но записи сохраняем в корень
+        if str(folder).startswith("__"):
+            folder = ""
         if not mode:
             if kwargs.get("use_selected"):
                 mode = self.MODE_ISSUE

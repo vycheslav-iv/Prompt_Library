@@ -237,11 +237,14 @@ app.registerExtension({
                 } catch (e) { /* silent */ }
             };
 
-            // Папка сохранения = выбранная в дереве; персистится через скрытый save_folder
+            // Выбор дерева персистится через скрытый save_folder как есть:
+            // "" = "Всё", "__fav"/"__root" = служебные ветки, иначе путь папки.
+            // Python на входе режет "__*" в корень (см. execute), поэтому записи
+            // в служебные имена не сохраняются — виджет безопасен для round-trip.
             st.syncSaveFolder = () => {
                 try {
                     const sf = this.widgets?.find((w) => w.name === "save_folder") || saveFolderW;
-                    const v = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
+                    const v = st.selFolder === "__all" ? "" : (st.selFolder || "");
                     if (sf && sf.value !== v) sf.value = v;
                 } catch (e) { /* silent */ }
             };
@@ -856,11 +859,12 @@ app.registerExtension({
                             if (!st) return;
                             const sf = this.widgets?.find((w) => w.name === "save_folder");
                             const wv = ((sf && sf.value) || "").trim();
-                            const ok = (f) => !!f && !f.startsWith("__") && st.folders.includes(f);
+                            // Валидны: служебные ветки + реальные папки из базы.
+                            // Виджет теперь тоже несёт __fav/__root (см. syncSaveFolder).
+                            const valid = (f) => !!f && (f === "__all" || f === "__fav" || f === "__root" || st.folders.includes(f));
                             let want = null;
-                            if (ok(wv)) want = wv;
-                            else if (ok(st.selFolder)) want = st.selFolder;
-                            else if (st.selFolder !== "__all") want = "__all";
+                            if (valid(wv)) want = wv;
+                            else if (st.selFolder !== "__all" && !valid(st.selFolder)) want = "__all";
                             if (want !== null && want !== st.selFolder) {
                                 st.selFolder = want;
                                 st.syncSaveFolder?.();
