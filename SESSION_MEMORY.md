@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (2026-09-16, save priority + mode reorder)
+# Память сессии — Prompt Library (2026-09-16, v1.7: prompt removed)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,32 +7,31 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- Сохранение: виджет `prompt` приоритетнее провода `source` (fallback только если виджет пуст)
-- `mode` перемещён перед `prompt` в `INPUT_TYPES` (виджет режима над окном промпта)
-- Переключение папки сбрасывает выделение карточки (`selWidget.value = ""`)
-- `listContent`/`tree` увеличены до 480px, `BASE_H` = 596 (два ряда больших карточек с кнопками)
-- SPECIFICATION.md обновлена (§8.1, §8.2, §18.3, §18.4, §20.3)
-- Закоммичено и запушено: `bdaf2cf`
+- Удалили виджет `prompt` из `INPUT_TYPES` — ручной ввод через DOM-кнопку
+- Кнопка `➕ Добавить промпт` → textarea + `💾 Сохранить промпт` (POST `/prompt_library/add`)
+- Вход `source` — единственный способ передать промпт проводом
+- Откатили неудачные эксперименты с flex stretch (§21 в SPEC)
+- Закоммичено и запушено: `b297b47` (v1.7)
 
 ## 2. Итоговое состояние кода
 
-- `prompt_library_node.py:180-186` — `INPUT_TYPES`: mode → prompt → selected → save_folder
-- `prompt_library_node.py:221-226` — `execute()`: prompt приоритетнее source
-- `prompt_library.js:697` — save: `pw.value || st.lastFullText`
-- `prompt_library.js:332-341` — folder switch: `selWidget.value = ""`, `detailId = null`
+- `prompt_library_node.py:180-186` — `INPUT_TYPES`: mode → source → image (prompt удалён)
+- `prompt_library_node.py:207-226` — `execute()`: source-only (prompt parameter удалён)
+- `prompt_library.js:79-123` — toggle input: `➕ Добавить промпт` + textarea + save
 - `prompt_library.js:724-725` — `DETAIL_H=280`, `BASE_H=596`
 - `prompt_library.js:114` — `listContent`: `height:480px`
 - `prompt_library.js:102` — `tree`: `height:480px`
 
 ## 3. Что важно не сломать
 
-- `computeSize`: `BASE_H=596`, `DETAIL_H=280` (фиксированные константы)
+- `computeSize`: `BASE_H=596`, `DETAIL_H=280`, `INPUT_H=130` (фиксированные константы)
 - `listContent`/`tree` = 480px (два ряда больших карточек)
 - `ensureIssueSafe()` возвращает `true`/`false` — не терять этот контракт
-- Save priority: `pw.value` → `st.lastFullText` (только fallback)
-- Mode widget: `mode` перед `prompt` в INPUT_TYPES
+- Toggle input: `inputVisible` toggle + `syncNodeSize()` on toggle
+- Mode widget: `mode` первый в INPUT_TYPES
 - Не перезаписывать `this.computeSize` на ноде
 - Не использовать `root height:100%`
+- **НЕ ИСПОЛЬЗОВАТЬ `flex:1` на list/tree** — создаёт feedback loop с computeSize
 
 ## 4. Следующие шаги
 
@@ -42,8 +41,14 @@
 
 ## 5. Связанные файлы
 
-- `prompt_library.js` — JS DOM widget (актуальная версия)
-- `prompt_library_node.py` — Python node (стабильный)
-- `SPECIFICATION.md` v1.6 — полная документация
-- `.opencode/skills/comfyui-dom-widget-sizing/SKILL.md` — sizing skill (480px/596)
+- `prompt_library.js` — JS DOM widget (v1.7)
+- `prompt_library_node.py` — Python node (v1.7)
+- `SPECIFICATION.md` v1.7 — полная документация с §21 (failed experiments)
+- `.opencode/skills/comfyui-dom-widget-sizing/SKILL.md` — sizing skill
 - `SESSION_MEMORY-history/2026-09-16-0430.md` — снапшот перед перезаписью
+
+## 6. Известные проблемы
+
+- **Низ ноды не примыкает к контенту** — фундаментальное ограничение фиксированных констант
+- **Detail-панель можно тянуть вниз** — resizable=true + onResize clamping не может запретить
+- **Это acceptable** — нода функциональна, layout не идеален, но стабилен
