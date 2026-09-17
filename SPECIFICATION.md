@@ -699,14 +699,19 @@ Vue-обёртка `WidgetDOM` (`flex flex-col *:flex-1`) и так растяг
 высоты — content-sized. Flex-цепочка (§22.3) там нечем ограничить: все карточки
 наружу, скролла нет, нода растягивается и не сжимается.
 
-Решение: `st.applyPaneLayout()` по флагу `Comfy.VueNodes.Enabled` (чтение по
-документированному Settings API: `app.extensionManager.setting.get(id)`,
-фолбэк — `app.ui.settings.getSettingValue`; подписка на `.change`): Vue —
-фиксированные 480px у `tree`/`listContent` (скролл всегда, как v1.7), canvas —
-flex stretch. NB: чтение через `app.ui.settings` напрямую НЕ работает
+Решение (★ упразднено 2026-09-17, см. §22.9): `st.applyPaneLayout()` по флагу
+`Comfy.VueNodes.Enabled` (чтение по документированному Settings API:
+`app.extensionManager.setting.get(id)`, фолбэк — `app.ui.settings.getSettingValue`):
+~~Vue — фиксированные 480px у `tree`/`listContent` (скролл всегда, как v1.7)~~,
+canvas — flex stretch. NB: чтение через `app.ui.settings` напрямую НЕ работает
 (молча false) — только через `extensionManager.setting`.
-`computeLayoutSize`-минимум общий для обоих режимов. Переключение режима без
-reload подхватывается подпиской + повторным вызовом в `onConfigure`.
+`computeLayoutSize`-минимум общий для обоих режимов.
+
+> Фиксированные 480px в Vue отменены: цепочка высоты в Vue существует (§22.9),
+> поэтому там теперь та же flex-раскладка, что в канвасе. Ошибка была в том, что
+> решение принималось до находки цепочки. Подписка на смену режима (`.change`)
+> висит на `app.ui.settings`, а детект читает `extensionManager.setting` —
+> §22.9 «Открытые проблемы» п.2.
 
 ## 22.7. Vue-режим: auto-fit через прокси размера (без борьбы с layout)
 
@@ -748,6 +753,66 @@ deadband «сошлось» → больше никогда не двигает�
 для минимумов.
 
 Урок: телеметрию проверять на присвоение, прежде чем верить ей.
+
+## 22.9. Vue-режим: растяжение контента — РЕШЕНО фактами из фронтенда (2026-09-17)
+
+Симптом: в Nodes 2.0 при растягивании ноды вниз контент оставался 480px → пустота снизу.
+
+Факты из живого фронтенда (`comfyui_frontend_package/static/assets/settingStore-*.js`
+и его **source map** — читать исходники можно прямо из `.map`, `sourcesContent`):
+
+| Что | Код | Следствие |
+|-----|-----|-----------|
+| `_arrangeWidgets` | `computeLayoutSize()` → `{minHeight, maxHeight}`; `minHeight→minSize`, `maxHeight→prefHeight→maxSize` (`?? Infinity`); `distributeSpace` отдаёт свободное место, пишет `widget.computedHeight` | виджет тянется, если у него есть `computeLayoutSize` |
+| то же | `!vueNodesMode && l > t && this.setSize(...)` | в Vue нода НЕ авторастится под контент |
+| `useGraphNodeManager.ts` | `hasLayoutSize: typeof widget.computeLayoutSize === 'function'` | наш виджет квалифицируется |
+| `useProcessedWidgets.ts` | `gridTemplateRows = shouldExpand(type) \|\| hasLayoutSize ? 'auto' : 'min-content'` | наша строка = `auto` |
+| `NodeWidgets.vue` | `flex: gridTemplateRows.includes('auto') ? 1 : undefined` | контейнер виджетов получает `flex:1` |
+| `WidgetDOM.vue` | `<div class="flex flex-col *:flex-1">`, своей высоты нет | наш `root` получает `flex:1` → **реальная высота** |
+| `NodeContent.vue` | `flex flex-auto grow flex-col` | тело ноды реальной высоты |
+
+Вывод: цепочка высоты в Vue существует. Тянуть контент можно тем же приёмом, что
+в канвасе (§22.3) — мешал только `applyPaneLayout`, который пинил `main flex:none`
+и панели на 480px (§22.6).
+
+Решение (Vue-ветка `applyPaneLayout`):
+- `main`: `flex:1 1 0` + `min-height:0`; `tree`/`listContent`: `flex:1 1 0` +
+  `min-height:0` + `height:""` (тянутся по высоте ноды, скролл внутри);
+- `main`+`detail` переезжают в `scrollArea` (`flex:1 1 0`, `min-height:0`,
+  `overflow-y:auto`), `root` — `overflow:hidden`: переполнение уходит в скролл;
+- канвас-ветка не тронута (main/detail — прямые дети root, пол 480px,
+  `computeLayoutSize` как было, §22.4).
+
+Удалено как тупиковое (не возвращать):
+- `autoFitHeight` + `_chromeMin`/`_fitLast` — калибровка chrome самоблокируется (§22.8);
+- `calibrateFloor` + `_vueFloor` — в Vue `root` растянут до высоты ноды, поэтому
+  `offsetHeight` = текущая высота → минимальная высота запиралась на текущей
+  (нода никогда не сжималась). Та же болезнь, что `chromeMin`.
+
+Минимум высоты в обоих режимах — константы `st.minH()` (только boolean-стейт,
+без замеров DOM). `maxHeight` НЕ задаём: он уходит в `prefHeight`, а `maxSize`
+по умолчанию `Infinity` → `distributeSpace` отдаёт виджету всё свободное место.
+
+Проверка без ComfyUI: смоук-тест `_smoke_prompt_library.mjs` (в корне бандла)
+исполняет файл в Node с заглушками DOM/LiteGraph и прогоняет жизненный цикл в
+ОБОИХ режимах, проверяя flex-цепочку. Ловит `ReferenceError`/`TypeError` в
+`onNodeCreated` за секунды — именно так были найдены потерянные `const st` и
+`dropAutoSockets`.
+
+## 22.10. Открытые проблемы Vue-режима (подтверждено живьём 2026-09-17)
+
+1. **Ноду можно сжать «в ноль».** `min-height:0` + `flex:1 1 0` у панелей — это
+   условие корректного скролла, но одновременно снимает пол: в Vue нода
+   сжимается так, что `main`/`tree`/`list` исчезают совсем (в канвасе пол 480px
+   держит размер, поэтому там такого нет). Нужен пол высоты панелей, совместимый
+   со скроллом (константа `min-height` у `tree`/`listContent` либо явный минимум
+   ноды), без возврата к «пустоте снизу».
+2. **Переключение canvas ↔ Vue на лету не применяет раскладку.** После смены
+   `Comfy.VueNodes.Enabled` страница не перезагружается, `applyPaneLayout()`
+   повторно не вызывается → контент остаётся в раскладке прежнего режима и
+   вылезает за границу ноды. Подписка в коде сидит на `app.ui.settings`
+   (не тот API: детект читает `extensionManager.setting`) + нужен пересчёт
+   размера ноды после смены режима.
 
 ## 22.5. Аудит 2026-09-17: баг персистентности (v1.7-регрессия)
 

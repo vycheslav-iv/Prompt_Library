@@ -103,8 +103,9 @@ app.registerExtension({
                 inputVisible = !inputVisible;
                 inputArea.style.display = inputVisible ? "flex" : "none";
                 inputToggle.style.background = inputVisible ? "#2c4a73" : "#2a2a2a";
-                st.syncNodeSize?.();
-                try { st.autoFitHeight?.(); } catch (e) { /* silent */ }
+                // Vue: высоту ноды владеет layout (computeLayoutSize + CSS-цепочка),
+                // подгонять её из JS не нужно и вредно (SPEC §22.9).
+                if (!st._vuePanes) st.syncNodeSize?.();
             };
 
             inputSaveBtn.onclick = async () => {
@@ -221,6 +222,13 @@ app.registerExtension({
             detail.appendChild(dText);
             detail.appendChild(dMeta);
             detail.appendChild(dBtns);
+
+            // Vue (Nodes 2.0): main+detail переезжают внутрь scrollArea — так
+            // переполнение уходит в скролл, а не за границу ноды. В канвасе
+            // scrollArea не используется вовсе: main/detail остаются прямыми
+            // детьми root, ровно как раньше (не трогаем рабочий путь §22.4).
+            const scrollArea = document.createElement("div");
+            scrollArea.style.cssText = "display:flex;flex-direction:column;gap:6px;";
 
             root.appendChild(inputToggle);
             root.appendChild(inputArea);
@@ -347,81 +355,65 @@ app.registerExtension({
                     nodeEl.style.minWidth = MIN_W + "px";
                 } catch (e) { /* silent */ }
             };
-            // Auto-fit высоты в Vue через прокси node.size (запись коммитит
-            // в layout store; платформа не перекоммичивает без изменений —
-            // сходимость встроена, петель нет). Panes фиксированы → контент
-            // не зависит от размера → таргет стабилен. Зум: контент в screen px,
-            // размер в graph units → делим на ds.scale.
-            st._chromeMin = Infinity;
-            st._fitLast = null;
-            st.autoFitHeight = () => {
-                try {
-                    if (!st._vuePanes) return; // канвас: там stretch
-                    let z = 1;
-                    try {
-                        const ds = app.canvas && app.canvas.ds;
-                        if (ds && ds.scale > 0) z = ds.scale;
-                    } catch (e) { /* silent */ }
-                    const contentH = root.offsetHeight;
-                    if (!(contentH > 0)) return;
-                    const nodeH = this.size[1];
-                    if (!(nodeH > 0)) return;
-                    const contentU = contentH / z;
-                    const chrome = nodeH - contentU;
-                    if (chrome >= 0 && chrome < st._chromeMin) st._chromeMin = chrome;
-                    if (!isFinite(st._chromeMin)) return;
-                    let target = contentU + st._chromeMin;
-                    const floor = st.minH();
-                    if (target < floor) target = floor;
-                    if (target > floor + 4000) target = floor + 4000;
-                    if (Math.abs(nodeH - target) < 4) { st._fitLast = null; return; } // сошлось
-                    const L = st._fitLast;
-                    if (L && Math.abs(nodeH - L.nodeH) < 1
-                        && Math.abs(L.target - L.nodeH) > 4
-                        && Math.abs(contentH - L.contentH) < 2) {
-                        return; // прошлая попытка ноду не сдвинула, контент тот же — не спамим
-                    }
-                    st._fitLast = { target, nodeH, contentH };
-                    this.setSize([this.size[0], target]);
-                } catch (e) { /* silent */ }
-            };
+            // Авто-подгонка высоты (chromeMin + setSize по прокси node.size) УДАЛЕНА
+            // 2026-09-17: подход тупиковый — калибровка chrome самоблокируется
+            // на высокой ноде (первая же выборка даёт target = nodeH → deadband,
+            // см. SPEC §22.8). Растяжение теперь делают layout + CSS:
+            // канвас — computeLayoutSize (§22.3), Vue — flex-цепочка (§22.9).
             st.applyPaneLayout = () => {
                 try {
                     st._vuePanes = st.isVueNodes();
                     if (st._vuePanes) {
-                        for (const el of [tree, listContent]) {
-                            el.style.flex = "none";
-                            el.style.minHeight = "";
-                            el.style.height = "480px";
+                        // Vue (Nodes 2.0), факты из исходников фронтенда 1.52:
+                        //  • NodeContent  = `flex flex-auto grow flex-col` → тело ноды
+                        //    имеет реальную (не content-sized) высоту;
+                        //  • NodeWidgets  получает `flex:1` и строку `auto` для нашего
+                        //    виджета, т.к. hasLayoutSize = typeof computeLayoutSize
+                        //    === "function" (useGraphNodeManager.ts);
+                        //  • обёртка WidgetDOM (`flex flex-col *:flex-1`) отдаёт наш
+                        //    root через flex:1 → root тоже реальной высоты.
+                        // Значит растягивать контент можно тем же flex-приёмом, что и в
+                        // канвасе (§22.3). Фиксированные 480px оставляли пустоту снизу.
+                        // main+detail — в scrollArea: переполнение уходит в скролл.
+                        if (scrollArea.parentNode !== root) {
+                            root.insertBefore(scrollArea, hint);
+                            scrollArea.appendChild(main);
+                            scrollArea.appendChild(detail);
                         }
-                        main.style.flex = "none";
+                        root.style.overflow = "hidden";
+                        scrollArea.style.flex = "1 1 0";
+                        scrollArea.style.minHeight = "0";
+                        scrollArea.style.overflowY = "auto";
+                        for (const el of [tree, listContent]) {
+                            el.style.flex = "1 1 0";
+                            el.style.minHeight = "0";
+                            el.style.height = "";
+                        }
+                        main.style.flex = "1 1 0";
+                        main.style.minHeight = "0";
                     } else {
+                        // Канвас: без изменений — stretch через computeLayoutSize
+                        // (проверено живьём, §22.4).
+                        if (scrollArea.parentNode === root) {
+                            root.insertBefore(main, scrollArea);
+                            root.insertBefore(detail, scrollArea);
+                            root.removeChild(scrollArea);
+                        }
+                        root.style.overflow = "";
                         for (const el of [tree, listContent]) {
                             el.style.flex = "1 1 auto";
                             el.style.minHeight = "480px";
                             el.style.height = "";
                         }
                         main.style.flex = "1 1 auto";
-                    }
-                    st.calibrateFloor?.();
-                } catch (e) { /* silent */ }
-            };
-            // Vue: калибровка пола под реальный контент вместо констант.
-            // Panes фиксированы → контент не зависит от размера ноды → измеренный
-            // пол всегда равен контенту: fixed point, петли нет по построению.
-            // Пол только сообщает фронтенду минимум; никого не двигает, не борется.
-            st._vueFloor = null;
-            st.calibrateFloor = () => {
-                try {
-                    if (!st._vuePanes) { st._vueFloor = null; return; }
-                    const h = root.offsetHeight;
-                    if (!(h > 0)) return;
-                    if (st._vueFloor !== h) {
-                        st._vueFloor = h;
-                        try { this.graph?.setDirtyCanvas(true, true); } catch (e) { /* silent */ }
+                        main.style.minHeight = "0";
                     }
                 } catch (e) { /* silent */ }
             };
+            // Замер пола по root.offsetHeight (_vueFloor) УДАЛЁН по той же причине:
+            // в Vue root растянут до высоты ноды, поэтому измеренный «контент» =
+            // текущая высота → минимальная высота запиралась на текущей (нода не
+            // сжималась никогда). Минимум в обоих режимах — константы st.minH().
             st.applyPaneLayout();
             // Переключение режима на лету (если фронтенд его применит без reload)
             try {
@@ -774,7 +766,7 @@ app.registerExtension({
                             st.full.delete(e.id);
                             if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; }
                             renderTree(); render();
-                            st.syncNodeSize?.();
+                            if (!st._vuePanes) st.syncNodeSize?.();
                         } catch (err) { /* silent */ }
                     };
 
@@ -800,8 +792,12 @@ app.registerExtension({
                             }
                         } catch (err) { /* silent */ }
                         render();
-                        st.syncNodeSize?.();
-                        this.graph?.setDirtyCanvas(true, true);
+                        // Vue: размером ноды владеет layout, перерисовку канваса
+                        // не запрашиваем (нода — DOM, canvas не участвует).
+                        if (!st._vuePanes) {
+                            st.syncNodeSize?.();
+                            this.graph?.setDirtyCanvas(true, true);
+                        }
                     };
 
                     // В сетке кнопки — рядком под названием, в списке — сбоку (display:contents)
@@ -817,8 +813,6 @@ app.registerExtension({
                     shown++;
                 }
                 if (!st.detailId) st.hint.textContent = shown ? `Записей в категории: ${shown}` : "Пусто. Запустите Queue или нажмите «Сохранить промпт».";
-                try { st.calibrateFloor?.(); } catch (e) { /* silent */ }
-                try { st.autoFitHeight?.(); } catch (e) { /* silent */ }
             };
             st.render = render;
             search.oninput = render;
@@ -907,7 +901,6 @@ app.registerExtension({
                     try {
                         if (this.size[0] < MIN_W) this.setSize([MIN_W, this.size[1]]);
                     } catch (e) { /* silent */ }
-                    try { st.autoFitHeight?.(); } catch (e) { /* silent */ }
                 };
             } catch (e) { /* silent */ }
 
@@ -1006,11 +999,12 @@ app.registerExtension({
                 // точную высоту и stretch не сработает (_arrangeWidgets).
                 browserWidget.computeLayoutSize = () => {
                     try {
-                        // Vue: измеренный пол точнее констант (chrome фронтенда свой).
-                        // _vueFloor меняется только на дискретных сменах контента,
-                        // panes фиксированы → fixed point, петли нет.
-                        const mh = (st._vuePanes && st._vueFloor) ? st._vueFloor : st.minH();
-                        return { minHeight: mh, minWidth: MIN_W };
+                        // Единый минимум для обоих режимов (§22.3): только boolean-стейт
+                        // (display-флаги), никаких замеров DOM → петель нет по построению.
+                        // maxHeight не задаём: в _arrangeWidgets он уходит в prefHeight,
+                        // а maxSize по умолчанию Infinity → distributeSpace отдаёт
+                        // виджету всё свободное место ноды (растяжение в обоих режимах).
+                        return { minHeight: st.minH(), minWidth: MIN_W };
                     } catch (e) { return { minHeight: BASE_H, minWidth: MIN_W }; }
                 };
             } catch (e) { /* silent */ }
@@ -1030,10 +1024,6 @@ app.registerExtension({
             const ret = origOnConnectionsChange?.apply(this, arguments);
             try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
             try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
-            try {
-                const st = this._pl;
-                if (st) { st._chromeMin = Infinity; st._fitLast = null; }
-            } catch (e) { /* silent */ }
             return ret;
         };
 
