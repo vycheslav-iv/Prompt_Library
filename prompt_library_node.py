@@ -77,10 +77,20 @@ def _load_db():
         data = {"entries": data, "folders": []}
     if not isinstance(data, dict):
         data = {"entries": [], "folders": []}
-    entries = data.get("entries", []) or []
-    folders = data.get("folders", []) or []
+    # Устойчивость к битому/чужому файлу: не-словари в списке записей и
+    # не-строки в списке папок отбрасываем, иначе любая операция (list/execute)
+    # падает на первом же `e.get(...)` до ручного вмешательства в файл.
+    raw_entries = data.get("entries", []) or []
+    raw_folders = data.get("folders", []) or []
+    entries = [e for e in raw_entries if isinstance(e, dict)]
+    folders = [f for f in raw_folders if isinstance(f, str)]
+    if len(entries) != len(raw_entries) or len(folders) != len(raw_folders):
+        # ASCII-only: консоль Windows не всегда умеет cp1251/utf-8 — print с
+        # кириллицей здесь мог бы сам уронить _load_db (остальные логи ASCII).
+        print("[PromptLibrary] library.json: dropped broken records", flush=True)
+        data["broken"] = True
 
-    changed = False
+    changed = bool(data.pop("broken", False))
     for e in entries:
         if "folder" not in e:
             e["folder"] = _norm_folder(e.get("category", ""))

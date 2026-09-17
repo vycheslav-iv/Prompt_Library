@@ -15,6 +15,43 @@ function plMap(e) {
     };
 }
 
+// --- Смена режима рендера (canvas ↔ Nodes 2.0) без перезагрузки страницы ------
+// Настройка `Comfy.VueNodes.Enabled` превращается фронтендом в авторитетный флаг
+// `LiteGraph.vueNodesMode` (useVueFeatureFlags: watch → LiteGraph.vueNodesMode),
+// а сам LiteGraph виден расширению как `window.LiteGraph` (useGlobalLitegraph).
+// Событие настроек — только второй путь (scripts/ui/settings.ts: dispatchChange
+// шлёт CustomEvent `<id>.change` на app.ui.settings); он есть не везде.
+// Оборачиваем свойство accessor'ом один раз на страницу и раздаём сигнал нодам.
+// Если обёртка не удалась — код молча живёт на событии настроек и на сверке
+// в render() (нода обязана работать без любых обходных путей).
+const plModeWatchers = new Set();
+let plModeHooked = false;
+function plHookVueMode() {
+    if (plModeHooked) return;
+    try {
+        const lg = window.LiteGraph;
+        if (!lg || typeof lg.vueNodesMode !== "boolean") return;
+        let current = lg.vueNodesMode;
+        Object.defineProperty(lg, "vueNodesMode", {
+            configurable: true,
+            enumerable: true,
+            get: () => current,
+            set: (v) => {
+                current = !!v;
+                for (const fn of plModeWatchers) {
+                    try { fn(current); } catch (e) { /* silent */ }
+                }
+            },
+        });
+        plModeHooked = true;
+    } catch (e) { /* silent */ }
+}
+
+// Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
+// реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
+const PL_JS_VERSION = "1.15-vue-floor480";
+console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
+
 app.registerExtension({
     name: "PromptLibrary",
     async beforeRegisterNodeDef(nodeType, nodeData) {
@@ -47,6 +84,14 @@ app.registerExtension({
             // Ноду нельзя сжать уже контента, иначе дерево вылезает за границу.
             // (Само присвоение — ниже, после this._pl = st, иначе TDZ-ошибка.)
             const MIN_W = 470;
+            // Пол высоты панелей (список+дерево) — ОДИН для обоих режимов.
+            //  • В Vue высоту ноды задаёт МИНИМАЛЬНАЯ высота контента
+            //    (measureMinContentHeight), а пол внутри `overflow-y:auto` в этот
+            //    замер не попадает (содержимое скролл-контейнера не расширяет
+            //    родителя) — поэтому в Vue пол стоит на самом scrollArea,
+            //    см. applyPaneLayout. Маленькое значение (280) позволяло сжать
+            //    ноду почти в ноль — теперь как в канвасе (480).
+            const PANES_MIN_H = 480;
 
             // Тулбар: вид → порядок → поиск (название + текст)
             const toolbar = document.createElement("div");
@@ -244,6 +289,7 @@ app.registerExtension({
                 detailId: null, selFolder: "__all",
             };
             this._pl = st;
+            st.version = PL_JS_VERSION;
 
             st.toast = (severity, summary, detail) => {
                 try {
@@ -320,14 +366,18 @@ app.registerExtension({
             };
             st.hookCanvasDrop();
 
-            // Двухрежимный layout (SPEC §22.6): канвас даёт виджету definite
-            // height (flex stretch работает), Vue-режим (Nodes 2.0) — нет:
-            // там обёртка content-sized, flex-цепочка не может ограничить
-            // высоту → все карточки наружу, скролла нет, нода растягивается.
-            // Поэтому во Vue фиксированные 480px (скролл всегда), в канвасе flex.
-            // Детект Vue-режима — по документированному Settings API
-            // (docs: app.extensionManager.setting.get(id)). Фолбэк — ui.settings.
+            // Двухрежимный layout (SPEC §22.9): высоту виджету даёт и канвас, и
+            // Vue-режим (Nodes 2.0), поэтому раскладка общая, разница — только в
+            // способе увести переполнение (scrollArea). Прежнее утверждение, что
+            // во Vue обёртка content-sized и flex-цепочку нечем ограничить, —
+            // неверно: см. факты про hasLayoutSize/gridTemplateRows в §22.9.
+            // Детект: авторитетный `window.LiteGraph.vueNodesMode`, затем Settings API
+            // (docs: app.extensionManager.setting.get(id)), затем ui.settings.
             st.isVueNodes = () => {
+                try {
+                    const lg = window.LiteGraph;
+                    if (lg && typeof lg.vueNodesMode === "boolean") return lg.vueNodesMode;
+                } catch (e) { /* silent */ }
                 try {
                     const em = app.extensionManager;
                     if (em && em.setting && typeof em.setting.get === "function") {
@@ -360,9 +410,16 @@ app.registerExtension({
             // на высокой ноде (первая же выборка даёт target = nodeH → deadband,
             // см. SPEC §22.8). Растяжение теперь делают layout + CSS:
             // канвас — computeLayoutSize (§22.3), Vue — flex-цепочка (§22.9).
-            st.applyPaneLayout = () => {
+            st.applyPaneLayout = (forceVue) => {
                 try {
-                    st._vuePanes = st.isVueNodes();
+                    st._vuePanes = (typeof forceVue === "boolean") ? forceVue : st.isVueNodes();
+                    // Обрезка и отказ от собственного min-width — в ОБОИХ режимах.
+                    // Vue-нода (`lg-node`) НЕ обрезает содержимое, а при живом
+                    // переключении режима раскладка может остаться от прежнего
+                    // режима — тогда root обрежет себя сам и не разъедется за ноду
+                    // (грациозная деградация вместо развалившегося вида).
+                    root.style.overflow = "hidden";
+                    root.style.minWidth = "0";
                     if (st._vuePanes) {
                         // Vue (Nodes 2.0), факты из исходников фронтенда 1.52:
                         //  • NodeContent  = `flex flex-auto grow flex-col` → тело ноды
@@ -380,10 +437,8 @@ app.registerExtension({
                             scrollArea.appendChild(main);
                             scrollArea.appendChild(detail);
                         }
-                        root.style.overflow = "hidden";
-                        scrollArea.style.flex = "1 1 0";
-                        scrollArea.style.minHeight = "0";
-                        scrollArea.style.overflowY = "auto";
+                        // Панели заселяют видимую область (их собственный скролл
+                        // рассчитан на переполнение КАРТОЧКАМИ, а не на нехватку места).
                         for (const el of [tree, listContent]) {
                             el.style.flex = "1 1 0";
                             el.style.minHeight = "0";
@@ -391,18 +446,26 @@ app.registerExtension({
                         }
                         main.style.flex = "1 1 0";
                         main.style.minHeight = "0";
+                        scrollArea.style.flex = "1 1 0";
+                        // Пол — на scrollArea, а не на панелях: только он попадает
+                        // в замер минимальной высоты контента, который в Vue задаёт
+                        // высоту ноды. Иначе новая нода открывается «сжатой», а
+                        // ноду можно сжать почти в ноль.
+                        scrollArea.style.minHeight = PANES_MIN_H + "px";
+                        scrollArea.style.overflowY = "auto";
                     } else {
                         // Канвас: без изменений — stretch через computeLayoutSize
-                        // (проверено живьём, §22.4).
+                        // (проверено живьём, §22.4). Пол 480px на панелях здесь
+                        // работает и без scrollArea: фронтенд сам растёт ноду под
+                        // контент (`!vueNodesMode && l > t && setSize(...)`).
                         if (scrollArea.parentNode === root) {
                             root.insertBefore(main, scrollArea);
                             root.insertBefore(detail, scrollArea);
                             root.removeChild(scrollArea);
                         }
-                        root.style.overflow = "";
                         for (const el of [tree, listContent]) {
                             el.style.flex = "1 1 auto";
-                            el.style.minHeight = "480px";
+                            el.style.minHeight = PANES_MIN_H + "px";
                             el.style.height = "";
                         }
                         main.style.flex = "1 1 auto";
@@ -415,13 +478,37 @@ app.registerExtension({
             // текущая высота → минимальная высота запиралась на текущей (нода не
             // сжималась никогда). Минимум в обоих режимах — константы st.minH().
             st.applyPaneLayout();
-            // Переключение режима на лету (если фронтенд его применит без reload)
+            // Смена режима БЕЗ перезагрузки страницы (canvas ↔ Nodes 2.0).
+            // Сигнал №1 — перехват `LiteGraph.vueNodesMode` (его выставляет сам
+            // фронтенд: это и есть момент включения Vue-рендера) — plHookVueMode().
+            // Сигнал №2 — событие настроек (страховка для сборок без window.LiteGraph).
+            st.onModeChange = (vue) => {
+                try { st.applyPaneLayout(typeof vue === "boolean" ? vue : undefined); } catch (e) { /* silent */ }
+                // Vue монтирует ноду АСИНХРОННО: в момент смены флага элемента
+                // `[data-node-id]` в DOM ещё нет, поэтому min-width уходил в пустоту
+                // и нода оставалась на дефолтных 350px (`min-w-(--min-node-width)` в
+                // LGraphNode.vue = узкая, «сжатая»); в reload-пути то же делает rAF
+                // в onNodeCreated уже после монтирования — отсюда разница «до/после F5».
+                try { st.settleLayout(true); } catch (e) { /* silent */ }
+                try { this.graph?.setDirtyCanvas(true, true); } catch (e) { /* silent */ }
+            };
+            // Применение ширины/раскладки с догоняющим кадром (без таймеров и цикла):
+            // первый проход — сразу, второй (один) — на случай кадра между сменой
+            // флага и монтированием Vue-ноды.
+            st.settleLayout = (again) => {
+                try { st.applyNodeMinWidth?.(); } catch (e) { /* silent */ }
+                try { st.enforceMinWidth?.(); } catch (e) { /* silent */ }
+                if (again) { try { requestAnimationFrame(() => st.settleLayout(false)); } catch (e) { /* silent */ } }
+            };
+            plModeWatchers.add(st.onModeChange);
+            plHookVueMode();
             try {
                 const s = app.ui && app.ui.settings;
                 if (s && typeof s.addEventListener === "function") {
-                    s.addEventListener("Comfy.VueNodes.Enabled.change", () => {
-                        try { st.applyPaneLayout(); } catch (e) { /* silent */ }
-                        try { this.graph?.setDirtyCanvas(true, true); } catch (e) { /* silent */ }
+                    s.addEventListener("Comfy.VueNodes.Enabled.change", (ev) => {
+                        // detail.value = новое значение (стор обновляется до события)
+                        const v = ev && ev.detail ? ev.detail.value : undefined;
+                        st.onModeChange(typeof v === "boolean" ? v : undefined);
                     });
                 }
             } catch (e) { /* silent */ }
@@ -813,6 +900,18 @@ app.registerExtension({
                     shown++;
                 }
                 if (!st.detailId) st.hint.textContent = shown ? `Записей в категории: ${shown}` : "Пусто. Запустите Queue или нажмите «Сохранить промпт».";
+                // Страховка: если сигнал о смене режима не пришёл (сборка без
+                // window.LiteGraph и без события настроек) — раскладка догонит при
+                // первом же рендере. Одно чтение свойства, без таймеров и наблюдателей.
+                try {
+                    const vue = st.isVueNodes();
+                    if (vue !== st._vuePanes) {
+                        st.applyPaneLayout(vue);
+                        // Догоняющий кадр: Vue мог ещё не смонтировать ноду
+                        // ([data-node-id] появится только после рендера).
+                        st.settleLayout?.(true);
+                    }
+                } catch (e) { /* silent */ }
             };
             st.render = render;
             search.oninput = render;
@@ -864,8 +963,10 @@ app.registerExtension({
                     const imgLinked = (this.inputs?.find((i) => i.name === "image")?.link ?? null) != null;
                     const outLinked = (this.outputs?.[0]?.links?.length || 0) > 0;
                     const bad = imgLinked && outLinked;
+                    let changed = false;
                     if (bad && !st.cycleWarned) {
                         st.cycleWarned = true;
+                        changed = true;
                         if (st.origBg === undefined) st.origBg = this.bgcolor || null;
                         this.bgcolor = "#5a2323";
                         try {
@@ -879,8 +980,13 @@ app.registerExtension({
                     } else if (!bad && st.cycleWarned) {
                         st.cycleWarned = false;
                         this.bgcolor = st.origBg || null;
+                        changed = true;
                     }
-                    this.graph?.setDirtyCanvas(true, true);
+                    // Перерисовку просим ТОЛЬКО при смене состояния: checkCycle
+                    // вызывается и из onDrawForeground, а безусловный
+                    // setDirtyCanvas там превращается в вечный цикл repaint
+                    // (draw → dirty → draw) на видимой ноде.
+                    if (changed) this.graph?.setDirtyCanvas(true, true);
                 } catch (e) { /* silent */ }
             };
             st.checkCycle = checkCycle;
@@ -1111,6 +1217,7 @@ app.registerExtension({
         const origOnRemoved = nodeType.prototype.onRemoved;
         nodeType.prototype.onRemoved = function () {
             try { this._pl?.full?.clear?.(); } catch (e) { /* silent */ }
+            try { plModeWatchers.delete(this._pl?.onModeChange); } catch (e) { /* silent */ }
             return origOnRemoved?.apply(this, arguments);
         };
     },
