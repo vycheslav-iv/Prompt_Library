@@ -104,6 +104,7 @@ app.registerExtension({
                 inputArea.style.display = inputVisible ? "flex" : "none";
                 inputToggle.style.background = inputVisible ? "#2c4a73" : "#2a2a2a";
                 st.syncNodeSize?.();
+                try { st.autoFitHeight?.(); } catch (e) { /* silent */ }
             };
 
             inputSaveBtn.onclick = async () => {
@@ -310,6 +311,128 @@ app.registerExtension({
                 } catch (e) { /* silent */ }
             };
             st.hookCanvasDrop();
+
+            // Двухрежимный layout (SPEC §22.6): канвас даёт виджету definite
+            // height (flex stretch работает), Vue-режим (Nodes 2.0) — нет:
+            // там обёртка content-sized, flex-цепочка не может ограничить
+            // высоту → все карточки наружу, скролла нет, нода растягивается.
+            // Поэтому во Vue фиксированные 480px (скролл всегда), в канвасе flex.
+            // Детект Vue-режима — по документированному Settings API
+            // (docs: app.extensionManager.setting.get(id)). Фолбэк — ui.settings.
+            st.isVueNodes = () => {
+                try {
+                    const em = app.extensionManager;
+                    if (em && em.setting && typeof em.setting.get === "function") {
+                        const v = em.setting.get("Comfy.VueNodes.Enabled");
+                        if (v !== undefined && v !== null) return !!v;
+                    }
+                } catch (e) { /* silent */ }
+                try {
+                    const s = app.ui && app.ui.settings;
+                    if (s && typeof s.getSettingValue === "function") {
+                        const v = s.getSettingValue("Comfy.VueNodes.Enabled");
+                        if (v !== undefined && v !== null) return !!v;
+                    }
+                } catch (e) { /* silent */ }
+                return false;
+            };
+            // Min-width ноды в Vue-режиме: ядро берёт node.style.min-width
+            // инлайн или 225 по дефолту (useNodeResize) — наш MIN_W через setSize
+            // туда не доходит. Ставим напрямую на [data-node-id] (семантический
+            // атрибут, не build-хэш). В канвасе такого элемента нет → no-op.
+            st.applyNodeMinWidth = () => {
+                try {
+                    const nodeEl = root.closest && root.closest("[data-node-id]");
+                    if (!nodeEl || !(nodeEl instanceof HTMLElement)) return;
+                    nodeEl.style.minWidth = MIN_W + "px";
+                } catch (e) { /* silent */ }
+            };
+            // Auto-fit высоты в Vue через прокси node.size (запись коммитит
+            // в layout store; платформа не перекоммичивает без изменений —
+            // сходимость встроена, петель нет). Panes фиксированы → контент
+            // не зависит от размера → таргет стабилен. Зум: контент в screen px,
+            // размер в graph units → делим на ds.scale.
+            st._chromeMin = Infinity;
+            st._fitLast = null;
+            st.autoFitHeight = () => {
+                try {
+                    if (!st._vuePanes) return; // канвас: там stretch
+                    let z = 1;
+                    try {
+                        const ds = app.canvas && app.canvas.ds;
+                        if (ds && ds.scale > 0) z = ds.scale;
+                    } catch (e) { /* silent */ }
+                    const contentH = root.offsetHeight;
+                    if (!(contentH > 0)) return;
+                    const nodeH = this.size[1];
+                    if (!(nodeH > 0)) return;
+                    const contentU = contentH / z;
+                    const chrome = nodeH - contentU;
+                    if (chrome >= 0 && chrome < st._chromeMin) st._chromeMin = chrome;
+                    if (!isFinite(st._chromeMin)) return;
+                    let target = contentU + st._chromeMin;
+                    const floor = st.minH();
+                    if (target < floor) target = floor;
+                    if (target > floor + 4000) target = floor + 4000;
+                    if (Math.abs(nodeH - target) < 4) { st._fitLast = null; return; } // сошлось
+                    const L = st._fitLast;
+                    if (L && Math.abs(nodeH - L.nodeH) < 1
+                        && Math.abs(L.target - L.nodeH) > 4
+                        && Math.abs(contentH - L.contentH) < 2) {
+                        return; // прошлая попытка ноду не сдвинула, контент тот же — не спамим
+                    }
+                    st._fitLast = { target, nodeH, contentH };
+                    this.setSize([this.size[0], target]);
+                } catch (e) { /* silent */ }
+            };
+            st.applyPaneLayout = () => {
+                try {
+                    st._vuePanes = st.isVueNodes();
+                    if (st._vuePanes) {
+                        for (const el of [tree, listContent]) {
+                            el.style.flex = "none";
+                            el.style.minHeight = "";
+                            el.style.height = "480px";
+                        }
+                        main.style.flex = "none";
+                    } else {
+                        for (const el of [tree, listContent]) {
+                            el.style.flex = "1 1 auto";
+                            el.style.minHeight = "480px";
+                            el.style.height = "";
+                        }
+                        main.style.flex = "1 1 auto";
+                    }
+                    st.calibrateFloor?.();
+                } catch (e) { /* silent */ }
+            };
+            // Vue: калибровка пола под реальный контент вместо констант.
+            // Panes фиксированы → контент не зависит от размера ноды → измеренный
+            // пол всегда равен контенту: fixed point, петли нет по построению.
+            // Пол только сообщает фронтенду минимум; никого не двигает, не борется.
+            st._vueFloor = null;
+            st.calibrateFloor = () => {
+                try {
+                    if (!st._vuePanes) { st._vueFloor = null; return; }
+                    const h = root.offsetHeight;
+                    if (!(h > 0)) return;
+                    if (st._vueFloor !== h) {
+                        st._vueFloor = h;
+                        try { this.graph?.setDirtyCanvas(true, true); } catch (e) { /* silent */ }
+                    }
+                } catch (e) { /* silent */ }
+            };
+            st.applyPaneLayout();
+            // Переключение режима на лету (если фронтенд его применит без reload)
+            try {
+                const s = app.ui && app.ui.settings;
+                if (s && typeof s.addEventListener === "function") {
+                    s.addEventListener("Comfy.VueNodes.Enabled.change", () => {
+                        try { st.applyPaneLayout(); } catch (e) { /* silent */ }
+                        try { this.graph?.setDirtyCanvas(true, true); } catch (e) { /* silent */ }
+                    });
+                }
+            } catch (e) { /* silent */ }
 
             st.enforceMinWidth = () => {
                 try {
@@ -694,6 +817,8 @@ app.registerExtension({
                     shown++;
                 }
                 if (!st.detailId) st.hint.textContent = shown ? `Записей в категории: ${shown}` : "Пусто. Запустите Queue или нажмите «Сохранить промпт».";
+                try { st.calibrateFloor?.(); } catch (e) { /* silent */ }
+                try { st.autoFitHeight?.(); } catch (e) { /* silent */ }
             };
             st.render = render;
             search.oninput = render;
@@ -782,6 +907,7 @@ app.registerExtension({
                     try {
                         if (this.size[0] < MIN_W) this.setSize([MIN_W, this.size[1]]);
                     } catch (e) { /* silent */ }
+                    try { st.autoFitHeight?.(); } catch (e) { /* silent */ }
                 };
             } catch (e) { /* silent */ }
 
@@ -864,6 +990,11 @@ app.registerExtension({
             const DETAIL_H = 280;
             const BASE_H = 596;
             const INPUT_H = 130;
+            // Единый минимум для обоих режимов (single source of truth).
+            st.minH = () => {
+                const showDetail = detail && detail.style.display !== "none";
+                return BASE_H + (showDetail ? DETAIL_H : 0) + (inputVisible ? INPUT_H : 0);
+            };
             st.syncNodeSize = () => {
                 try {
                     const need = this.computeSize(this.size[0]);
@@ -875,17 +1006,22 @@ app.registerExtension({
                 // точную высоту и stretch не сработает (_arrangeWidgets).
                 browserWidget.computeLayoutSize = () => {
                     try {
-                        const showDetail = detail && detail.style.display !== "none";
-                        return {
-                            minHeight: BASE_H + (showDetail ? DETAIL_H : 0) + (inputVisible ? INPUT_H : 0),
-                            minWidth: MIN_W,
-                        };
+                        // Vue: измеренный пол точнее констант (chrome фронтенда свой).
+                        // _vueFloor меняется только на дискретных сменах контента,
+                        // panes фиксированы → fixed point, петли нет.
+                        const mh = (st._vuePanes && st._vueFloor) ? st._vueFloor : st.minH();
+                        return { minHeight: mh, minWidth: MIN_W };
                     } catch (e) { return { minHeight: BASE_H, minWidth: MIN_W }; }
                 };
             } catch (e) { /* silent */ }
+            // NB (Vue): программного ресайза ноды нет — setSize в Vue-режиме не
+            // исполняется (доказано живьём: min-clamp и схлопывания не держатся),
+            // размером владеют layout + пользователь. Поэтому здесь только
+            // grow-only syncNodeSize (безвреден, если игнорируется) и никаких
+            // схлопываний: борьба с layout выглядит как колхоз (дёргание).
 
             reload();
-            requestAnimationFrame(() => { st.hookCanvasDrop?.(); st.enforceMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
+            requestAnimationFrame(() => { st.hookCanvasDrop?.(); st.enforceMinWidth?.(); st.applyNodeMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
             return ret;
         };
 
@@ -894,6 +1030,10 @@ app.registerExtension({
             const ret = origOnConnectionsChange?.apply(this, arguments);
             try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
             try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
+            try {
+                const st = this._pl;
+                if (st) { st._chromeMin = Infinity; st._fitLast = null; }
+            } catch (e) { /* silent */ }
             return ret;
         };
 
@@ -937,6 +1077,8 @@ app.registerExtension({
                 }
             } catch (e) { /* silent */ }
             requestAnimationFrame(() => {
+                try { this._pl?.applyPaneLayout?.(); } catch (e) { /* silent */ }
+                try { this._pl?.applyNodeMinWidth?.(); } catch (e) { /* silent */ }
                 try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
                 try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
                 try {

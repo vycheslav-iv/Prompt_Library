@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (2026-09-17, v1.10: воркфлоу в карточке)
+# Память сессии — Prompt Library (2026-09-17, Vue-фит НЕ работает, handoff)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,43 +7,50 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- v1.10: карточка несёт воркфлоу (PNG-превью с чанком + снапшот в записи, compact-JSON, кап 2МБ); drag на канвас и кнопка 📥 через confirm → `loadGraphData`; lazy-превью (без базы, стабильный кэш, 304). Всё проверено живьём, запушено.
-- Полный аудит проекта: пойманы 3 своих же огреха (отступ `dirty`, флаг хука, stale `st.full`), вычищены устаревшие места в скиллах.
+- v1.10 запушен (`3218c46`): воркфлоу в карточке, drag на канвас, lazy-превью.
+- Дальше — Vue-режим (Nodes 2.0): нода не примыкает к контенту. Было 5+ итераций
+  (flex, фикс, retry, hug, auto-fit) — живьём не заработало. Пользователь остановил
+  работу и передал задачу другой модели. Закоммичено как есть (безвредно).
 
 ## 2. Итоговое состояние кода
 
-- `prompt_library_node.py:216-254` — `_snapshot_workflow` (compact, кап), `_add_entry(..., workflow)`, PNG-превью 512px с workflow.
-- `prompt_library_node.py:167-197,204-213` — `_upgrade_preview_to_png` (one-time JPG→PNG), `_preview_path` (без базы, png→jpg).
-- `prompt_library_node.py:314-341` — `execute()`: захват + backfill + `dirty` всегда при `added`; guard `__*` → корень.
-- `web/js/prompt_library.js:247-312` — `openWorkflow` (confirm → loadGraphData), `hookCanvasDrop` (capture, custom MIME, once-флаг после подписок).
-- `web/js/prompt_library.js:774-790,822-875` — `computeLayoutSize` (минимумы); `onConfigure(info)` sync-restore + reconcile, ноль polling.
-- `SPECIFICATION.md` v1.10 (§22 stretch, §23 restore, §24 workflow; §21.5 — архив).
+- Канвас-режим: работает полностью (stretch, restore, drag, превью) — не трогать.
+- Vue-режим: панели 480 + скролл работают; min-width 470 держится (через
+  `[data-node-id]`); высота НЕ примыкает — открытая проблема.
+- `web/js/prompt_library.js`: `autoFitHeight` (не работает — см. §3),
+  `applyPaneLayout`, `isVueNodes` (через `extensionManager.setting`), калибровка
+  `_vueFloor` (безвредна). Телеметрии нет (удалена).
+- `SPECIFICATION.md`: §22.6–22.8 — вся история Vue-попыток + факты + изъян.
 
-## 3. Проблемы, которые встречались (и как решали)
+## 3. Главная проблема (для следующего агента — читать обязательно)
 
-- Пустота снизу — legacy `computeSize` = точная высота → `computeLayoutSize` (§22).
-- Мёртвый патч (`prompt` + `except`) → `[mode, selected, save_folder]` (§22.5).
-- Папка опаздывала → sync из `info`, retry удалён (§23); `__fav`/`__root` не персистились → round-trip + guard (§23.4).
-- 🚫 при drag на канвас — `dropEffect=copy` вне `effectAllowed=move` → `copyMove`.
-- Headless-тесты врали дважды (мутация эталона патчем; поддельный hash) — эталон копировать, hash считать.
+- Факты (из исходников, достоверно): `node.size` — Proxy → запись коммитит в
+  layout store; `isSizeEqual` — сходимость; `measureMinContentHeight` меряет
+  минимум по контенту; min-width = инлайн или 225; детект Vue — только через
+  `app.extensionManager.setting.get('Comfy.VueNodes.Enabled')`.
+- Изъян auto-fit: `chromeMin` самоблокируется (`chrome = tall − content`
+  включает surplus → target = current → вечный deadband). Chrome нельзя выводить
+  из высокой ноды — нужен независимый замер рамки (шапка напрямую) или константа.
+- Не повторять: слепые итерации без фактов; мутирующие пробы в живом сетапе;
+  polling/retry в layout-путях; выводы по телеметрии без проверки присвоения.
 
 ## 4. Что важно не сломать при продолжении работы
 
-- Не задавать `browserWidget.computeSize`; sizing — только boolean-стейт, никаких `offsetHeight`/`scrollHeight`.
-- Порядок INPUT_TYPES `[mode, selected, save_folder]` — позиционный фолбэк `[2]`, `widgets_values`.
-- `widget.serialize = false` свойством; ноль `setTimeout` в restore; префикс `__` зарезервирован.
-- Тяжёлое (`workflow`) — никогда в `/list` (только флаг `has_workflow`); превью отдавать без базы.
-- При удалении виджетов grep'ать имя везде (голый `except` прячет регрессии).
+- Канвас stretch (§22.3) — проверен живьём, работает. Любые Vue-правки не должны
+  его задевать (ветвление через `st._vuePanes`).
+- Порядок INPUT_TYPES `[mode, selected, save_folder]`; `serialize=false` свойством;
+  тяжёлое — никогда в `/list`; префикс `__` зарезервирован; ноль `setTimeout` в restore.
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-1. **SPLIT на две ноды**: Prompt Library + Prompt Saver.
-2. **Постраничность** (~20 записей) + разгрузка хранения перед поднятием лимита 500 (с workflow вес вырос).
-3. Предложен новый скилл «PNG с workflow внутри» — ждёт решения пользователя.
+1. **Vue auto-fit**: независимый замер chrome (шапка ноды) + shrink через прокси
+   `node.size`. Текущий `autoFitHeight` — заготовка с изъяном, переписать таргет.
+2. **SPLIT на две ноды**: Prompt Library + Prompt Saver.
+3. **Постраничность** (~20 записей) + разгрузка хранения перед поднятием лимита 500.
 
 ## 6. Связанные файлы
 
-- `prompt_library.js` / `prompt_library_node.py` — код ноды (v1.10).
-- `SPECIFICATION.md` v1.10, `README.md` — доки.
-- `comfyui-dom-widget-sizing`, `comfyui-js-extension` (+ `.kilo`, `.agents` копии) — скиллы.
-- `SESSION_MEMORY-history/2026-09-17*.md` — снапшоты памяти.
+- `prompt_library.js` / `prompt_library_node.py` — код ноды.
+- `SPECIFICATION.md` v1.10+ (§22 Vue-история, §23 restore, §24 workflow).
+- `comfyui-dom-widget-sizing`, `comfyui-js-extension` (+ `.kilo`, `.agents` копии).
+- `SESSION_MEMORY-history/2026-09-17*.md` — снапшоты.
