@@ -70,7 +70,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.24b-one-node";
+const PL_JS_VERSION = "1.25-pickup";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -92,6 +92,13 @@ app.registerExtension({
             if (saveFolderW) {
                 saveFolderW.hidden = true;
                 saveFolderW.computeSize = () => [0, -4];
+            }
+            // Узел-источник подхвата (v1.25): значение пишет DOM-селектор,
+            // сам виджет только персистится (как selected/save_folder).
+            const pickupW = this.widgets?.find((w) => w.name === "pickup");
+            if (pickupW) {
+                pickupW.hidden = true;
+                pickupW.computeSize = () => [0, -4];
             }
 
 
@@ -381,6 +388,25 @@ app.registerExtension({
             hintRow.appendChild(bulkDel);
             hintRow.appendChild(bulkClear);
 
+            // --- Подхват текста из другого узла (v1.25) ----------------------
+            // Граф «карточка → LLM → финальный текст» одной нодой требует провода
+            // НАЗАД в ту же ноду — это кольцо, а ComfyUI исполняет только ацикличный
+            // граф (поэтому раньше нужны были две ноды). Вместо провода текст
+            // выбранного узла забирается после прогона (см. savePickup ниже).
+            // Строка фиксированной высоты (22px + flex-shrink:0): подпись/рост не
+            // отжимают место у панелей и не вылезают за бюджет root (SPEC §28).
+            const pickupRow = document.createElement("div");
+            pickupRow.style.cssText = "display:flex;align-items:center;gap:6px;height:22px;flex-shrink:0;";
+            const pickupLabel = document.createElement("div");
+            pickupLabel.textContent = "📎 Текст в базу:";
+            pickupLabel.title = "Откуда брать текст для новой записи. «Из входа» — как раньше (по проводу). " +
+                "«Из узла» — подхват готового текста другого узла после прогона: без провода назад, потому что провод назад даёт кольцо";
+            pickupLabel.style.cssText = "color:#888;font-size:11px;flex-shrink:0;white-space:nowrap;";
+            const pickupSel = document.createElement("select");
+            pickupSel.style.cssText = "flex:1 1 auto;min-width:0;background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:0 4px;height:22px;font-size:11px;";
+            pickupRow.appendChild(pickupLabel);
+            pickupRow.appendChild(pickupSel);
+
             // --- Панель книги: название, полка, полный текст ---
             const detail = document.createElement("div");
             detail.style.cssText = "display:none;flex-direction:column;gap:4px;border:1px solid #4a9eff;border-radius:4px;padding:6px;background:#16202f;flex-shrink:0;max-height:320px;overflow-y:auto;";
@@ -433,6 +459,7 @@ app.registerExtension({
             const scrollArea = document.createElement("div");
             scrollArea.style.cssText = "display:flex;flex-direction:column;gap:6px;";
 
+            root.appendChild(pickupRow);
             root.appendChild(inputToggle);
             root.appendChild(inputArea);
             root.appendChild(toolbar);
@@ -442,6 +469,7 @@ app.registerExtension({
 
             const st = {
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
+                pickupRow, pickupSel,
                 bulkCount, bulkDel, bulkClear,
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow,
                 entries: [], folders: [], full: new Map(),
@@ -460,6 +488,80 @@ app.registerExtension({
             this._pl = st;
             plLiveStates.add(st);
             st.version = PL_JS_VERSION;
+
+            // --- Подхват: выбор узла-источника (v1.25) ----------------------
+            // Кандидаты — узлы верхнего уровня графа, которые могут отдать
+            // текст: STRING-выход или строковый виджет (text/value/string).
+            // Своя нода и mute-узлы не предлагаются (mute не исполнится).
+            st.pickupWidget = () => this.widgets?.find((w) => w.name === "pickup") || null;
+            st.pickupNode = () => {
+                try { return String((st.pickupWidget() || {}).value || "").trim(); }
+                catch (e) { return ""; }
+            };
+            st.setPickup = (val) => {
+                try {
+                    const w = st.pickupWidget();
+                    if (w && w.value !== val) w.value = val;
+                } catch (e) { /* silent */ }
+            };
+            st.pickupCandidates = () => {
+                const out = [];
+                try {
+                    const nodes = (app.graph && app.graph._nodes) || [];
+                    for (const n of nodes) {
+                        if (!n || n === this) continue;
+                        if (String(n.type || "") === "PromptLibrary") continue;
+                        if (n.mode === 4) continue;            // mute: не исполнится
+                        const hasStrOut = (n.outputs || []).some((o) => o
+                            && String(o.type || "").toUpperCase().indexOf("STRING") >= 0);
+                        const hasTextW = (n.widgets || []).some((w) => w && typeof w.value === "string"
+                            && (w.type === "customtext" || w.type === "string"
+                                || ["text", "value", "string", "prompt"].indexOf(String(w.name || "").toLowerCase()) >= 0));
+                        if (!hasStrOut && !hasTextW) continue;
+                        const title = String(n.title || n.type || "").slice(0, 40);
+                        out.push({ id: String(n.id), label: `#${n.id} · ${title} (${n.type || "?"})` });
+                    }
+                } catch (e) { /* silent */ }
+                out.sort((a, b) => a.label.localeCompare(b.label));
+                return out;
+            };
+            st.refreshPickupOptions = () => {
+                try {
+                    const cur = st.pickupNode();
+                    const list = st.pickupCandidates();
+                    pickupSel.replaceChildren();
+                    const add = (value, text, title) => {
+                        const o = document.createElement("option");
+                        o.value = value;
+                        o.textContent = text;
+                        if (title) o.title = title;
+                        pickupSel.appendChild(o);
+                    };
+                    add("", "— из входа (провод) —",
+                        "Как раньше: сохраняем текст, пришедший на вход «Промт»");
+                    for (const c of list) add(c.id, c.label);
+                    if (cur && !list.some((c) => c.id === cur)) {
+                        // Узел удалён/переименован — не молчим: иначе непонятно, почему
+                        // запись не создаётся (подхват ищет несуществующий id).
+                        add(cur, `⚠️ узел #${cur} не найден`, "В графе нет узла с таким id");
+                        console.warn("[PromptLibrary] pickup: узел не найден в графе:", cur);
+                    }
+                    pickupSel.value = cur;
+                } catch (e) { /* silent */ }
+            };
+            pickupSel.onchange = () => {
+                try {
+                    const v = pickupSel.value;
+                    st.setPickup(v);
+                    st.hintSticky = v
+                        ? `Подхват: текст для записи возьмём из узла #${v} после прогона (без провода назад).`
+                        : null;
+                    st.renderHint?.();
+                } catch (e) { /* silent */ }
+            };
+            // Список узлов пересобираем перед открытием списка: без таймеров и
+            // без отслеживания графа (в графе мог появиться новый текстовый узел).
+            pickupSel.onmousedown = () => st.refreshPickupOptions?.();
 
             st.toast = (severity, summary, detail) => {
                 try {
@@ -801,6 +903,13 @@ app.registerExtension({
             // узлов вывода (позиция старого сейвера): тогда saved_id приходит
             // позже картинок, и без этого запаса обложки бы не было.
             st.runImages = new Map();
+            // Подхват (v1.25): текст, который узлы отдавали в ui этого прогона
+            // (ключ — id узла и последний сегмент id: нода внутри subgraph
+            // приходит как "5:12"), и ожидающие подхвата записи: prompt_id ->
+            // { token, node, text }. Токен — от нашей ноды (ui.pickup).
+            st.runTexts = new Map();
+            st.pendingPickup = new Map();
+            const PL_TEXT_LIMIT = 50;      // без таймеров: чистим по количеству
             const PL_PENDING_LIMIT = 20;   // без таймеров: чистим по количеству
             st.rememberPending = (pid, rec) => {
                 try {
@@ -833,11 +942,97 @@ app.registerExtension({
                     console.warn("[PromptLibrary] attach_preview error:", e);
                 }
             };
+            // Достать текст узла для подхвата: сначала текст этого прогона
+            // (ui.text OUTPUT-узлов — так отдаёт PromptKeeper), иначе значение
+            // строкового виджета в живом графе (обычные текстовые узлы, кэш).
+            st.pickupText = (nodeId) => {
+                const want = String(nodeId || "").trim();
+                if (!want) return "";
+                const fromRun = st.runTexts.get(want) || st.runTexts.get(want.split(":").pop());
+                if (typeof fromRun === "string" && fromRun.trim()) return fromRun.trim();
+                try {
+                    const g = app.graph;
+                    if (!g || typeof g.getNodeById !== "function") return "";
+                    const n = g.getNodeById(want) || (isFinite(Number(want)) ? g.getNodeById(Number(want)) : null);
+                    const ws = (n && n.widgets) || [];
+                    const isText = (w) => w && typeof w.value === "string" && w.value.trim();
+                    const named = ws.find((w) => isText(w)
+                        && ["text", "value", "string", "prompt"].indexOf(String(w.name || "").toLowerCase()) >= 0);
+                    const any = named || ws.find(isText);
+                    if (any) return any.value.trim();
+                } catch (e) { /* silent */ }
+                return "";
+            };
+            st.savePickup = async (pick, shot) => {
+                try {
+                    const text = st.pickupText(pick.node);
+                    if (!text) {
+                        // Не молчим: при пустом тексте запись не создаётся, и без
+                        // диагностики причина «почему-то не сохранилось» невидима.
+                        console.warn(`[PromptLibrary] pickup: узел #${pick.node} не отдал текст — запись не создана`);
+                        st.toast("warn", "Prompt Library: подхват",
+                            `Узел #${pick.node} не отдал текст — запись не создана.`);
+                        return;
+                    }
+                    const r = await st.apiPost("/prompt_library/save_pickup",
+                        { token: pick.token, text });
+                    let out = {};
+                    try { out = await r.json(); } catch (e) { /* silent */ }
+                    if (!r.ok) {
+                        console.warn("[PromptLibrary] save_pickup failed:", r.status, out);
+                        return;
+                    }
+                    await reload();
+                    if (out && out.duplicate) {
+                        // Не тост: подхват срабатывает на КАЖДЫЙ Queue, и повторная
+                        // генерация того же промпта поднимала бы попап каждый раз.
+                        // Пишем в нижнюю строку ноды (она видна всегда) + F12.
+                        const where = out.folder || "корне";
+                        st.hintSticky = `Подхват: такой текст уже есть в «${where}» — новая запись не создана.`;
+                        st.renderHint?.();
+                        console.log(`[PromptLibrary] pickup: дубликат, запись не создана («${where}»)`);
+                        return;
+                    }
+                    console.log(`[PromptLibrary] pickup saved: ${out && out.id} (узел #${pick.node})`);
+                    st.hintSticky = `Подхват: сохранили текст узла #${pick.node}.`;
+                    st.renderHint?.();
+                    if (shot && out && out.id) {
+                        await st.attachPreview(String(out.id), shot);
+                    } else {
+                        console.log("[PromptLibrary] pickup: обложки нет (прогон без картинок)",
+                            out && out.id);
+                    }
+                } catch (e) {
+                    console.warn("[PromptLibrary] save_pickup error:", e);
+                }
+            };
             try {
                 const plExecuted = (ev) => {
                     try {
                         const d = ev && ev.detail;
                         if (!d || !d.prompt_id) return;
+                        // Текст, отданный узлом в ui (PromptKeeper и подобные):
+                        // запоминаем для подхвата — ключ и полный id, и последний
+                        // сегмент (в subgraph нода приходит как "5:12").
+                        const uiText = d.output && d.output.text;
+                        if (uiText !== undefined && uiText !== null) {
+                            const t = Array.isArray(uiText) ? uiText[0] : uiText;
+                            if (typeof t === "string" && t.trim()) {
+                                for (const key of [String(d.node || ""), String(d.display_node || "")]) {
+                                    if (!key) continue;
+                                    st.runTexts.set(key, t);
+                                    const tail = key.split(":").pop();
+                                    if (tail) st.runTexts.set(tail, t);
+                                }
+                                while (st.runTexts.size > PL_TEXT_LIMIT) {
+                                    st.runTexts.delete(st.runTexts.keys().next().value);
+                                }
+                                // Наша нода (стоит до LLM-цепочки) исполнилась раньше —
+                                // текст источника приходит после неё: досыпаем в ожидание.
+                                const pp = st.pendingPickup.get(d.prompt_id);
+                                if (pp && !pp.text) pp.text = st.runTexts.get(pp.node) || "";
+                            }
+                        }
                         // Нода внутри subgraph приходит с префиксом ("5:12") —
                         // сверяем и по display_node, и по последнему сегменту id.
                         const mine = ownId();
@@ -845,6 +1040,16 @@ app.registerExtension({
                             && [String(d.node || ""), String(d.display_node || "")]
                                 .some((v) => v === mine || v.endsWith(":" + mine));
                         if (isMine) {
+                            // Подхват: нода отчиталась токеном — сам текст возьмём
+                            // после `execution_success` из узла-источника.
+                            const tok = (d.output && d.output.pickup && d.output.pickup[0]) || "";
+                            const src = (d.output && d.output.pickup_node && d.output.pickup_node[0]) || "";
+                            if (tok && src) {
+                                st.pendingPickup.set(d.prompt_id, {
+                                    token: String(tok), node: String(src),
+                                    text: st.runTexts.get(String(src)) || "",
+                                });
+                            }
                             // Наша нода сохранила запись — ждём обложку для неё.
                             // Картинка может быть уже в запасе (нода после
                             // SaveImage) — тогда берём её сразу.
@@ -880,8 +1085,14 @@ app.registerExtension({
                         const pid = ev && ev.detail && ev.detail.prompt_id;
                         if (!pid) return;
                         const rec = st.pendingPreview.get(pid);
+                        const shot = st.runImages.get(pid) || null;
+                        const pick = st.pendingPickup.get(pid) || null;
                         st.pendingPreview.delete(pid);
+                        st.pendingPickup.delete(pid);
                         st.runImages.delete(pid);
+                        // Подхват (v1.25): запись ещё не создана — сначала сохраняем
+                        // текст узла-источника, потом (из ответа) прикрепляем обложку.
+                        if (pick) st.savePickup(pick, shot);
                         if (!rec) return;
                         if (rec.image) {
                             st.attachPreview(rec.id, rec.image);
@@ -897,6 +1108,7 @@ app.registerExtension({
                         const pid = ev && ev.detail && ev.detail.prompt_id;
                         if (pid) {
                             st.pendingPreview.delete(pid);
+                            st.pendingPickup.delete(pid);
                             st.runImages.delete(pid);
                         }
                     } catch (e) { /* silent */ }
@@ -1568,7 +1780,7 @@ app.registerExtension({
             st.dropAutoSockets = () => {
                 try {
                     if (typeof this.removeInput !== "function" || !this.inputs) return;
-                    for (const n of ["selected", "save_folder"]) {
+                    for (const n of ["selected", "save_folder", "pickup"]) {
                         const idx = this.inputs.findIndex((i) => i.widget && i.widget.name === n);
                         if (idx >= 0 && this.inputs[idx].link == null) this.removeInput(idx);
                     }
@@ -1620,7 +1832,7 @@ app.registerExtension({
                 };
             }
 
-            requestAnimationFrame(() => { st.checkCycle?.(); });
+            requestAnimationFrame(() => { st.checkCycle?.(); st.refreshPickupOptions?.(); });
 
             const browserWidget = this.addDOMWidget("pl_browser", "custom", root, {
                 serialize: false,
@@ -1639,7 +1851,9 @@ app.registerExtension({
             // (display-флаги), НЕ размеры DOM — feedback loop из SPEC §21
             // здесь невозможен по построению. Никакого offsetHeight/scrollHeight.
             const DETAIL_H = 280;
-            const BASE_H = 596;
+            // +28 к BASE_H (v1.25): строка подхвата (22px + gap 6px) в root.
+            // Пол — ТОЛЬКО здесь (computeLayoutSize), на панелях CSS-пола нет (§28).
+            const BASE_H = 624;
             const INPUT_H = 170; // textarea + кнопка сохранения + ряд прикрепления превью
             // Единый минимум для обоих режимов (single source of truth).
             st.minH = () => {
@@ -1746,6 +1960,9 @@ app.registerExtension({
                 try { this._pl?.applyNodeMinWidth?.(); } catch (e) { /* silent */ }
                 try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
                 try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
+                // Список узлов-источников подхвата собирается из живого графа:
+                // после загрузки воркфлоу он другой (SPEC §30).
+                try { this._pl?.refreshPickupOptions?.(); } catch (e) { /* silent */ }
                 try {
                     // Одноразовая сверка после загрузки базы (без таймеров):
                     // виджет (если гидрация донесла) — свежий источник;
@@ -1801,6 +2018,8 @@ app.registerExtension({
                     st.apiTarget?.removeEventListener?.(name, fn);
                 }
                 st.pendingPreview?.clear?.();
+                st.pendingPickup?.clear?.();
+                st.runTexts?.clear?.();
                 st.runImages?.clear?.();
             } catch (e) { /* silent */ }
             try {

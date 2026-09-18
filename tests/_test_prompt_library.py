@@ -21,9 +21,23 @@ fails = []
 oks = []
 
 
+def _p(text):
+    """Печать, устойчивая к кодировке консоли Windows (cp1251 не умеет emoji).
+    Фailing-ассерт с кириллицей/emoji в extra раньше падал UnicodeEncodeError —
+    тест обязан сообщать FAIL, а не трейсбек."""
+    try:
+        enc = sys.stdout.encoding or "utf-8"
+        sys.stdout.write(str(text).encode(enc, "replace").decode(enc, "replace") + "\n")
+    except Exception:
+        try:
+            sys.stdout.write(str(text).encode("ascii", "replace").decode("ascii") + "\n")
+        except Exception:
+            pass
+
+
 def check(name, cond, extra=""):
     (oks if cond else fails).append(name)
-    print(("  ok  " if cond else "  FAIL") + f"  {name}" + (f"  [{extra}]" if extra and not cond else ""))
+    _p(("  ok  " if cond else "  FAIL") + f"  {name}" + (f"  [{extra}]" if extra and not cond else ""))
 
 
 # --- песочница ---------------------------------------------------------------
@@ -182,8 +196,8 @@ res = node.execute(mode=node.MODE_WRITE, selected="", save_folder="Фото",
 check("«Запись»: выход пуст + ui на месте", res["result"] == ("",) and "ui" in res,
       str(res["result"]))
 check("входной текст обрезан", res["ui"]["text"] == ["Портрет девушки"])
-check("PNG-патч записал widgets_values позиционно",
-      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото"],
+check("PNG-патч записал widgets_values позиционно (4 значения, v1.25)",
+      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото", ""],
       str(workflow["nodes"][0]["widgets_values"]))
 check("чужой node id не тронут", len(workflow["nodes"]) == 1)
 entries, folders = mod._load_db()
@@ -834,8 +848,83 @@ finally:
     mod._save_thumbnail = _orig_thumb2
     mod._load_image_file = _orig_loader
 
+# --- 18. подхват финального текста из другого узла (v1.25) --------------------
+print("\n18. Подхват текста: execute(pickup) + /save_pickup")
+node3 = mod.PromptLibrary()
+
+
+def _pick_token(folder="Подхват", pick="1622"):
+    """Прогон ноды с включённым подхватом → токен (клиент вернёт его с текстом)."""
+    res = node3.execute(mode=node3.MODE_ISSUE, selected="", save_folder=folder, pickup=pick,
+                        source="входящий не сохраняем", extra_pnginfo={"workflow": {"nodes": [], "links": []}},
+                        unique_id=7)
+    return (res["ui"].get("pickup") or [""])[0]
+
+
+before_pick = len(mod._load_db()[0])
+wf_pick = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
+res_pick = node3.execute(mode=node3.MODE_ISSUE, selected="", save_folder="Подхват", pickup="1622",
+                         source="входящий не сохраняем",
+                         extra_pnginfo={"workflow": wf_pick}, unique_id=7)
+tok = (res_pick["ui"].get("pickup") or [""])[0]
+check("подхват: токен отдан клиенту в ui.pickup", bool(tok), str(res_pick["ui"].get("pickup")))
+check("подхват: id узла-источника в ui.pickup_node", res_pick["ui"].get("pickup_node") == ["1622"],
+      str(res_pick["ui"].get("pickup_node")))
+check("подхват: входящий текст НЕ сохранён", len(mod._load_db()[0]) == before_pick)
+check("подхват: выход режима выдачи по-прежнему сквозной",
+      res_pick["result"][0] == "входящий не сохраняем", str(res_pick["result"]))
+check("подхват: saved_id пуст (записи ещё нет)", res_pick["ui"]["saved_id"] == [])
+check("подхват: снапшот воркфлоу отложен под токеном",
+      isinstance(mod._PICKUP.get(tok, {}).get("workflow"), dict))
+check("подхват: подсказка о том, почему вход не сохраняется",
+      "не сохраняется" in (res_pick["ui"]["mode_notice"][0] or ""),
+      str(res_pick["ui"]["mode_notice"]))
+check("подхват: PNG-патч несёт pickup 4-м значением",
+      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_ISSUE, "", "Подхват", "1622"],
+      str(wf_pick["nodes"][0]["widgets_values"]))
+# Без подхвата поведение прежнее (pickup="")
+res_off = node3.execute(mode=node3.MODE_WRITE, selected="", save_folder="", pickup="",
+                        source="подхват выключен",
+                        extra_pnginfo={"workflow": {"nodes": [], "links": []}}, unique_id=7)
+check("pickup='' -> обычный автосейв", res_off["ui"].get("pickup") == []
+      and _entry("подхват выключен") is not None)
+
+_broadcasts.clear()
+r_pick = h("POST", "/prompt_library/save_pickup",
+           Req({"token": tok, "text": "  финальный текст из LLM  "}))
+check("save_pickup: 200 + id", r_pick["status"] == 200 and bool(r_pick["json"].get("id")), str(r_pick))
+check("save_pickup: текст обрезан", _entry("финальный текст из LLM") is not None)
+check("save_pickup: папка из токена",
+      (_entry("финальный текст из LLM") or {}).get("folder") == "Подхват")
+check("save_pickup: воркфлоу из токена",
+      isinstance((_entry("финальный текст из LLM") or {}).get("workflow"), dict))
+check("save_pickup: broadcast разослан", "prompt_library/refresh" in _broadcasts)
+check("save_pickup: токен одноразовый", tok not in mod._PICKUP)
+r_again = h("POST", "/prompt_library/save_pickup", Req({"token": tok, "text": "повтор"}))
+check("save_pickup: повторный токен -> 400", r_again["status"] == 400, str(r_again))
+r_unknown = h("POST", "/prompt_library/save_pickup", Req({"token": "нет-такого", "text": "x"}))
+check("save_pickup: неизвестный токен -> 400", r_unknown["status"] == 400, str(r_unknown))
+
+before_empty = len(mod._load_db()[0])
+r_empty = h("POST", "/prompt_library/save_pickup", Req({"token": _pick_token("Подхват"), "text": "   "}))
+check("save_pickup: пустой текст — не ошибка и без записи",
+      r_empty["status"] == 200 and r_empty["json"].get("skipped") == "empty"
+      and len(mod._load_db()[0]) == before_empty, str(r_empty))
+
+_broadcasts.clear()
+r_dup3 = h("POST", "/prompt_library/save_pickup",
+           Req({"token": _pick_token("Подхват"), "text": "финальный текст из LLM"}))
+check("save_pickup: дубль не создаёт вторую запись",
+      r_dup3["json"].get("duplicate") is True and r_dup3["json"].get("folder") == "Подхват", str(r_dup3))
+check("save_pickup: на дубль broadcast не шлём", "prompt_library/refresh" not in _broadcasts)
+
+for _i in range(mod._PICKUP_LIMIT + 5):
+    _pick_token()
+check("подхват: отложенные токены не растут бесконечно (лимит, без таймеров)",
+      len(mod._PICKUP) <= mod._PICKUP_LIMIT, str(len(mod._PICKUP)))
+
 # --- итог -------------------------------------------------------------------
-print(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
+_p(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
 if fails:
     for f in fails:
         print("  - " + f)

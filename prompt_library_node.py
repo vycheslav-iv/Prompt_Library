@@ -447,6 +447,29 @@ def _broadcast_refresh():
         pass
 
 
+# --- Подхват финального текста (v1.25) ---------------------------------------
+# Нода-«выдача» отдаёт карточку в LLM-цепочку, а её результат в библиотеку
+# приходит НЕ проводом: провод «финальный текст → сюда» вместе с выходом в ту же
+# цепочку замыкает граф в кольцо, а ComfyUI исполняет только ацикличный граф
+# (именно поэтому раньше требовались две ноды). Вместо провода текст забирает JS
+# после прогона и присылает его на /prompt_library/save_pickup вместе с токеном.
+# В токене лежат снапшот воркфлоу и папка: в момент прихода текста взять их
+# неоткуда — execute() этой ноды давно отработал.
+_PICKUP = {}
+_PICKUP_LIMIT = 20
+
+
+def _pickup_stash(node, folder, workflow):
+    """Отложить снапшот воркфлоу и папку под токеном подхвата.
+    Возвращает токен (он уходит клиенту в ui.pickup)."""
+    token = _new_id("pickup", str(node))
+    _PICKUP[token] = {"node": str(node), "folder": folder or "", "workflow": workflow}
+    # Без таймеров: чистим по количеству (прогон мог упасть — токен не забрали)
+    while len(_PICKUP) > _PICKUP_LIMIT:
+        _PICKUP.pop(next(iter(_PICKUP)), None)
+    return token
+
+
 def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None, media=None):
     h = _dedup_hash(prompt, folder)
     for e in entries:
@@ -486,6 +509,9 @@ class PromptLibrary:
                 "mode": ([cls.MODE_WRITE, cls.MODE_ISSUE, cls.MODE_BOTH], {"default": cls.MODE_WRITE}),
                 "selected": ("STRING", {"multiline": False, "default": ""}),
                 "save_folder": ("STRING", {"multiline": False, "default": ""}),
+                # id узла, из которого брать текст для сохранения после прогона
+                # (подхват, v1.25). Виджет скрыт: значение пишет DOM-селектор.
+                "pickup": ("STRING", {"multiline": False, "default": ""}),
             },
             "optional": {
                 "source": ("*", {}),
@@ -511,7 +537,7 @@ class PromptLibrary:
         # Вход source — ANY (*): принимаем любой тип без проверки
         return True
 
-    def execute(self, mode="", selected="", save_folder="", source=None, image=None,
+    def execute(self, mode="", selected="", save_folder="", pickup="", source=None, image=None,
                 extra_pnginfo=None, unique_id=None, **kwargs):
         # Папка сохранения = выбранная в дереве (скрытый save_folder, пишет JS).
         # Совместимость: старые workflow несли folder/category виджетом
@@ -533,6 +559,12 @@ class PromptLibrary:
         # провод, продолжаем пропускать текст сквозь и говорим об этом в UI.
         # Смотрим сериализованный граф, а не живые ссылки LiteGraph.
         out_linked = _output_linked(extra_pnginfo, unique_id)
+        # Подхват (v1.25): сохраняем не входящий текст, а текст выбранного узла —
+        # он появится только после прогона (см. _pickup_stash и §30). Пока подхват
+        # включён, входящий текст не сохраняем: иначе на каждый Queue плодилась бы
+        # запись из провода, которого для этого случая и не подключают.
+        pickup_node = (pickup or "").strip()
+        pickup_token = ""
         entries, folders = _load_db()
 
         # Входящий текст: провод source.
@@ -565,7 +597,7 @@ class PromptLibrary:
         need_broadcast = False
         skipped = None
         preview_target = ""  # запись, которой стоит прикрепить обложку из прогона
-        if save_on and incoming:
+        if save_on and incoming and not pickup_node:
             # Снапшот воркфлоу — в запись и в PNG-превью (как SaveImage): карточка
             # самодостаточна, drag на канвас открывает воркфлоу. Считаем его только
             # здесь: в режиме выдачи и без входящего текста он не нужен — иначе
@@ -630,6 +662,12 @@ class PromptLibrary:
             if need_broadcast:
                 _broadcast_refresh()
 
+        # 2.1. Подхват: сохранять сейчас нечего — текст выбранного узла появится
+        # только после прогона. Откладываем воркфлоу и папку под токен, клиент
+        # вернёт токен вместе с текстом (роут /prompt_library/save_pickup).
+        if pickup_node:
+            pickup_token = _pickup_stash(pickup_node, fld, _snapshot_workflow(extra_pnginfo))
+
         # 3. PNG-персистентность выбора и настроек (паттерн Prompt Keeper)
         if extra_pnginfo and unique_id is not None:
             try:
@@ -639,7 +677,7 @@ class PromptLibrary:
                         if str(node_data.get("id")) == str(unique_id):
                             # Порядок = порядок INPUT_TYPES required:
                             # mode, selected, save_folder (prompt-виджет удалён в v1.7)
-                            node_data["widgets_values"] = [mode, selected, save_folder]
+                            node_data["widgets_values"] = [mode, selected, save_folder, pickup]
                             break
             except Exception:
                 pass
@@ -650,6 +688,11 @@ class PromptLibrary:
         if mode == self.MODE_WRITE and out_linked:
             notice = ("Режим «Запись»: провод от выхода подключён — текст идёт сквозь, "
                       "как раньше. Отключите провод, чтобы нода только сохраняла.")
+        elif pickup_node and incoming:
+            # Иначе выглядит как молчаливая потеря: на входе текст есть, а записи
+            # из него нет (подхват берёт текст из другого узла после прогона).
+            notice = (f"Подхват включён: входящий текст не сохраняется — запись "
+                      f"берётся из узла №{pickup_node} после прогона.")
 
         # 4. Лёгкий UI-пакет (без полных текстов — только заголовки, полный текст по клику)
         ui_entries = [
@@ -676,6 +719,8 @@ class PromptLibrary:
         return {"ui": {"entries": ui_entries, "folders": folders, "selected": sel, "text": [display],
                         "skipped_duplicate": skipped or {},
                         "saved_id": [preview_target] if preview_target else [],
+                        "pickup": [pickup_token] if pickup_token else [],
+                        "pickup_node": [pickup_node] if pickup_token else [],
                         "mode_notice": [notice]},
                 "result": (out_text,)}
 
@@ -750,6 +795,46 @@ try:
             return web.json_response({"error": f"save failed: {exc}"}, status=500)
         _broadcast_refresh()
         return web.json_response({"ok": True, "preview": prev})
+
+    @routes.post("/prompt_library/save_pickup")
+    async def _pl_save_pickup(request):
+        """Запись текста, подхваченного из другого узла после прогона (v1.25).
+
+        Провод «финальный текст -> библиотека» замыкает граф в кольцо, если
+        карточку в LLM-цепочку отдаёт эта же нода, поэтому текст приходит сюда
+        уже после `execution_success` — вместе с токеном, под которым в execute()
+        отложены снапшот воркфлоу и папка (в момент сохранения взять их неоткуда).
+        Обложку клиент прикрепляет следом через attach_preview.
+        """
+        body = await _req_body(request)
+        token = str(body.get("token") or "").strip()
+        text = str(body.get("text") or "").strip()
+        rec = _PICKUP.pop(token, None)
+        if not token or rec is None:
+            # Токена нет: прогон состоялся без execute() нашей ноды (кэш, mute,
+            # interrupt) либо токен уже забрали — это не ошибка базы.
+            return web.json_response({"error": "unknown token"}, status=400)
+        if not text:
+            return web.json_response({"ok": True, "skipped": "empty"})
+        folder = _storage_folder(rec.get("folder", ""))
+        entries, folders = _load_db()
+        dup = _find_text_match(entries, text)
+        if dup is not None:
+            print(f"[PromptLibrary] duplicate skipped (already in '{dup.get('folder', '') or 'root'}')", flush=True)
+            return web.json_response({"ok": True, "id": dup.get("id"), "duplicate": True,
+                                      "folder": dup.get("folder", "")})
+        # Воркфлоу из токена: запись самодостаточна, как у автосейва из execute()
+        entry_id, created = _add_entry(entries, text, folder, workflow=rec.get("workflow"))
+        if created:
+            entries = entries[:MAX_ENTRIES]
+            if folder and folder not in folders:
+                folders = sorted(set(folders) | {folder} | set(_parent_folders(folder)))
+            try:
+                _save_db(entries, folders)
+            except Exception as exc:
+                return web.json_response({"error": f"save failed: {exc}"}, status=500)
+            _broadcast_refresh()
+        return web.json_response({"ok": True, "id": entry_id, "duplicate": False})
 
     @routes.get("/prompt_library/list")
     async def _pl_list(request):

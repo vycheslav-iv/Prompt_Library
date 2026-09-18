@@ -183,6 +183,7 @@ function makeNode() {
     { name: "mode", value: "📥 Запись", type: "combo", options: {}, callback: null, serialize: true },
     { name: "selected", value: "", type: "text", options: {}, callback: null, serialize: true },
     { name: "save_folder", value: "", type: "text", options: {}, callback: null, serialize: true },
+    { name: "pickup", value: "", type: "text", options: {}, callback: null, serialize: true },
   ];
   const node = {
     id: 1, pos: [0, 0], size: [470, 700], flags: {}, bgcolor: null, widgets,
@@ -226,7 +227,12 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.24b-one-node");
+  check(`${tag}: версия JS видна`, st.version === "1.25-pickup");
+  // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
+  // фиксированной высоты; селектор собирает узлы-источники из живого графа.
+  check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
+  check(`${tag}: селектор подхвата создан`, !!st.pickupSel
+    && st.pickupSel.children.length >= 1 && st.pickupSel.children[0].value === "");
 }
 
 // Канвас: панели СЖИМАЮТСЯ (flex 1 1 0 + min-height:0) — тот же clamp, что в Vue.
@@ -311,7 +317,9 @@ for (const vue of [false, true]) {
   } else {
     check(`${tag}: main+detail прямые дети root`, st.detail.parentNode === st.root);
     check(`${tag}: scrollArea нет в root`, scrollAreaOf() === undefined);
-    check(`${tag}: 6 детей root`, st.root.children.length === 6 && st.root.children[5] === st.hintRow);
+    check(`${tag}: 7 детей root (подхват + 6)`,
+      st.root.children.length === 7 && st.root.children[6] === st.hintRow,
+      String(st.root.children.length));
     checkCanvasPanes(tag, st);
   }
   console.log(`--- ${tag}: ok, root children=${st.root.children.length} ---`);
@@ -326,7 +334,7 @@ await run("switch: canvas → Vue через LiteGraph.vueNodesMode", () => {
   // нода, созданная в canvas-режиме, после переключения флага должна сама
   // перейти в Vue-раскладку (шаг выше уже перевёл её в Vue — возвращаем назад)
   LG.vueNodesMode = false;
-  check("после возврата — canvas-раскладка", areaOf(stC) === undefined && stC.root.children.length === 6);
+  check("после возврата — canvas-раскладка", areaOf(stC) === undefined && stC.root.children.length === 7);
   LG.vueNodesMode = true; // именно это делает фронтенд в useVueFeatureFlags
   check("после флага — Vue-раскладка", areaOf(stC) !== undefined && stC.root.style.overflow === "hidden");
   check("пол переехал на scrollArea", areaOf(stC).style.minHeight === "480px");
@@ -338,7 +346,7 @@ await run("switch: Vue → canvas через LiteGraph.vueNodesMode", () => {
   nodeElStub.style.minWidth = ""; // сбрасываем, чтобы проверить повторное применение
   LG.vueNodesMode = false;
   check("вернулись в canvas-раскладку", areaOf(stC) === undefined);
-  check("6 детей root", stC.root.children.length === 6);
+  check("7 детей root", stC.root.children.length === 7);
   check("обрезка осталась (не зависит от режима)", stC.root.style.overflow === "hidden");
   checkCanvasPanes("после возврата", stC);
 });
@@ -696,8 +704,15 @@ await run("preview: onRemoved снимает exec-слушатели", async () 
   const node = makeNode();
   proto.onNodeCreated.call(node);
   const st = node._pl;
+  // v1.25: подхват держит текст прогона и ожидающие токены — удалённая нода
+  // не должна их за собой тащить (иначе утечка до конца сессии).
+  st.pendingPickup.set("z1", { token: "t", node: "1", text: "x" });
+  st.runTexts.set("1", "x");
   const before = (apiListeners["executed"] ?? []).length;
   proto.onRemoved.call(node);
+  check("подхват: карты очищены при удалении ноды",
+    st.pendingPickup.size === 0 && st.runTexts.size === 0
+    && st.pendingPreview.size === 0 && st.runImages.size === 0);
   check("executed/execution_success сняты",
     (apiListeners["executed"] ?? []).length === before - 1
     && !(apiListeners["execution_success"] ?? []).includes(st.execListeners[1][1]));
@@ -762,6 +777,220 @@ await run("preview: нода ПОСЛЕ узлов вывода (позиция 
       JSON.stringify(posts));
     check("запас прогона очищен", st.runImages.size === 0);
   } finally { sandbox.fetch = origFetch; }
+});
+
+// --- v1.25: подхват финального текста из другого узла (без провода назад) ---
+// Провод «финальный текст → эта же нода» — кольцо (ComfyUI исполняет только
+// DAG), поэтому текст забирается после прогона: нода отдаёт токен (ui.pickup),
+// источник — текст (ui.text), JS сохраняет это через /save_pickup + обложку.
+await run("pickup: список узлов и сохранение текста источника", async () => {
+  const node = makeNode();
+  node.id = 41;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const keeper = { id: 1622, type: "PromptKeeper", title: "Итоговый Promt", mode: 0,
+    outputs: [{ name: "text", type: "STRING" }],
+    widgets: [{ name: "text", value: "старый текст", type: "customtext" }] };
+  const noise = { id: 1524, type: "KSampler", title: "", mode: 0,
+    outputs: [{ name: "LATENT", type: "LATENT" }], widgets: [{ name: "steps", value: 20, type: "number" }] };
+  const otherLib = { id: 5, type: "PromptLibrary", title: "", mode: 0,
+    outputs: [{ name: "prompt_out", type: "STRING" }], widgets: [] };
+  const muted = { id: 7, type: "PromptKeeper", title: "Muted", mode: 4,
+    outputs: [{ name: "text", type: "STRING" }], widgets: [] };
+  const prevNodes = appStub.graph._nodes;
+  const prevGet = appStub.graph.getNodeById;
+  appStub.graph._nodes = [keeper, noise, otherLib, muted, node];
+  appStub.graph.getNodeById = (id) => appStub.graph._nodes.find((n) => String(n.id) === String(id)) || null;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("save_pickup")) return jsonResponse({ ok: true, id: "e77", duplicate: false });
+    return jsonResponse({ ok: true, preview: "previews/e77.png" });
+  };
+  try {
+    st.refreshPickupOptions();
+    const opts = st.pickupSel.children.map((o) => o.value);
+    check("pickup: селектор нашёл текстовый узел", opts.includes("1622"), JSON.stringify(opts));
+    check("pickup: первая опция — «из входа»", st.pickupSel.children[0].value === "");
+    check("pickup: узел без текста не предложен", !opts.includes("1524"), JSON.stringify(opts));
+    check("pickup: вторая Library-нода не предложена", !opts.includes("5"), JSON.stringify(opts));
+    check("pickup: mute-узел не предложен", !opts.includes("7"), JSON.stringify(opts));
+    st.pickupSel.value = "1622";
+    st.pickupSel.onchange();
+    check("pickup: выбор пишется в скрытый виджет",
+      node.widgets.find((w) => w.name === "pickup").value === "1622",
+      String(node.widgets.find((w) => w.name === "pickup").value));
+    check("pickup: пользователь видит подсказку об источнике",
+      String(st.hintSticky || "").includes("#1622"), String(st.hintSticky));
+    // прогон: наша нода отдала токен → узел-источник отдал текст → успех
+    apiStub.dispatch("executed", { node: "41", prompt_id: "r1",
+      output: { pickup: ["tok1"], pickup_node: ["1622"] } });
+    check("pickup: токен запомнен", st.pendingPickup.get("r1")?.token === "tok1",
+      JSON.stringify(st.pendingPickup.get("r1")));
+    apiStub.dispatch("executed", { node: "1622", prompt_id: "r1",
+      output: { text: ["финальный текст из LLM"] } });
+    check("pickup: текст источника досыпан в ожидание",
+      st.pendingPickup.get("r1")?.text === "финальный текст из LLM",
+      JSON.stringify(st.pendingPickup.get("r1")));
+    apiStub.dispatch("executed", { node: "77", prompt_id: "r1",
+      output: { images: [{ filename: "run.png", subfolder: "", type: "output" }] } });
+    apiStub.dispatch("execution_success", { prompt_id: "r1" });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const save = posts.find((p) => p.url.includes("save_pickup"));
+    check("pickup: save_pickup с токеном и текстом источника",
+      save && save.body.token === "tok1" && save.body.text === "финальный текст из LLM",
+      JSON.stringify(save?.body));
+    const cov = posts.find((p) => p.url.includes("attach_preview"));
+    check("pickup: обложка прикреплена к новой записи",
+      cov && cov.body.id === "e77" && cov.body.filename === "run.png", JSON.stringify(cov?.body));
+    check("pickup: ожидание очищено", st.pendingPickup.size === 0);
+  } finally {
+    sandbox.fetch = origFetch;
+    appStub.graph._nodes = prevNodes;
+    appStub.graph.getNodeById = prevGet;
+  }
+});
+
+await run("pickup: фолбэк на виджет графа и id с префиксом subgraph", async () => {
+  const node = makeNode();
+  node.id = 42;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const keeper = { id: 900, type: "PromptKeeper", title: "Финал", mode: 0,
+    outputs: [{ name: "text", type: "STRING" }],
+    widgets: [{ name: "text", value: "текст из виджета", type: "customtext" }] };
+  const prevNodes = appStub.graph._nodes;
+  const prevGet = appStub.graph.getNodeById;
+  appStub.graph._nodes = [keeper, node];
+  appStub.graph.getNodeById = (id) => appStub.graph._nodes.find((n) => String(n.id) === String(id)) || null;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("save_pickup")) return jsonResponse({ ok: true, id: "e78", duplicate: false });
+    return jsonResponse({ ok: true });
+  };
+  try {
+    st.setPickup("900");
+    st.runTexts.set("900", "текст из прогона");
+    check("pickup: приоритет — текст этого прогона",
+      st.pickupText("900") === "текст из прогона", st.pickupText("900"));
+    st.runTexts.clear();
+    check("pickup: прогон без ui.text — берём виджет графа",
+      st.pickupText("900") === "текст из виджета", st.pickupText("900"));
+    check("pickup: неизвестный узел -> пусто", st.pickupText("нет-такого") === "");
+    // Нода внутри subgraph приходит с префиксом ("5:900"), а в селекторе — "900"
+    apiStub.dispatch("executed", { node: "42", prompt_id: "r2",
+      output: { pickup: ["tok2"], pickup_node: ["900"] } });
+    apiStub.dispatch("executed", { node: "5:900", display_node: "5:900", prompt_id: "r2",
+      output: { text: ["текст из subgraph"] } });
+    check("pickup: id с префиксом subgraph распознан",
+      st.pendingPickup.get("r2")?.text === "текст из subgraph",
+      JSON.stringify(st.pendingPickup.get("r2")));
+    apiStub.dispatch("execution_success", { prompt_id: "r2" });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const save = posts.find((p) => p.url.includes("save_pickup"));
+    check("pickup: сохранён текст из subgraph-узла",
+      save && save.body.text === "текст из subgraph", JSON.stringify(save?.body));
+  } finally {
+    sandbox.fetch = origFetch;
+    appStub.graph._nodes = prevNodes;
+    appStub.graph.getNodeById = prevGet;
+  }
+});
+
+await run("pickup: дубликат — без тоста (подхват срабатывает каждый Queue)", async () => {
+  const node = makeNode();
+  node.id = 44;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const keeper = { id: 901, type: "PromptKeeper", title: "Финал", mode: 0,
+    outputs: [{ name: "text", type: "STRING" }],
+    widgets: [{ name: "text", value: "уже в базе", type: "customtext" }] };
+  const prevNodes = appStub.graph._nodes;
+  const prevGet = appStub.graph.getNodeById;
+  appStub.graph._nodes = [keeper, node];
+  appStub.graph.getNodeById = (id) => appStub.graph._nodes.find((n) => String(n.id) === String(id)) || null;
+  const origFetch = sandbox.fetch;
+  const origToast = st.toast;
+  const posts = [];
+  let toasts = 0;
+  st.toast = () => { toasts++; };
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("save_pickup")) {
+      return jsonResponse({ ok: true, id: "e1", duplicate: true, folder: "Подхват" });
+    }
+    return jsonResponse({ ok: true });
+  };
+  try {
+    st.setPickup("901");
+    apiStub.dispatch("executed", { node: "44", prompt_id: "r4",
+      output: { pickup: ["tok4"], pickup_node: ["901"] } });
+    apiStub.dispatch("executed", { node: "901", prompt_id: "r4",
+      output: { text: ["уже в базе"] } });
+    apiStub.dispatch("execution_success", { prompt_id: "r4" });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    check("pickup: дубль всё равно проверяем на сервере",
+      posts.some((p) => p.url.includes("save_pickup")), JSON.stringify(posts.map((p) => p.url)));
+    check("pickup: дубль — без тоста (не надоедаем на каждый Queue)", toasts === 0, `toasts=${toasts}`);
+    check("pickup: дубль виден в нижней строке ноды",
+      String(st.hintSticky || "").includes("Подхват"), String(st.hintSticky));
+    check("pickup: дубль — обложку не трогаем",
+      !posts.some((p) => p.url.includes("attach_preview")), JSON.stringify(posts.map((p) => p.url)));
+  } finally {
+    sandbox.fetch = origFetch;
+    st.toast = origToast;
+    appStub.graph._nodes = prevNodes;
+    appStub.graph.getNodeById = prevGet;
+  }
+});
+
+await run("pickup: пустой текст источника — записи нет, пользователь предупреждён", async () => {
+  const node = makeNode();
+  node.id = 43;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const prevNodes = appStub.graph._nodes;
+  const prevGet = appStub.graph.getNodeById;
+  appStub.graph._nodes = [node];
+  appStub.graph.getNodeById = () => null;
+  const origFetch = sandbox.fetch;
+  const origToast = st.toast;
+  let posts = 0;
+  let toasts = 0;
+  st.toast = () => { toasts++; };
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts++;
+    return jsonResponse({ ok: true });
+  };
+  try {
+    apiStub.dispatch("executed", { node: "43", prompt_id: "r3",
+      output: { pickup: ["tok3"], pickup_node: ["999"] } });
+    apiStub.dispatch("execution_success", { prompt_id: "r3" });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    check("pickup: пустой текст — save_pickup не зовём", posts === 0, `posts=${posts}`);
+    check("pickup: пользователь предупреждён тостом", toasts === 1, `toasts=${toasts}`);
+    check("pickup: ожидание снято", st.pendingPickup.size === 0);
+  } finally {
+    sandbox.fetch = origFetch;
+    st.toast = origToast;
+    appStub.graph._nodes = prevNodes;
+    appStub.graph.getNodeById = prevGet;
+  }
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
