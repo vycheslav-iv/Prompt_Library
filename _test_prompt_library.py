@@ -321,6 +321,50 @@ check("execute фильтрует не-строковый source", (
                  extra_pnginfo=pnginfo, unique_id=7)["result"][0] == ""))
 check("OUTPUT_NODE = True (персистентность PNG)", mod.PromptLibrary.OUTPUT_NODE is True)
 
+# --- 7. авто-метка media ------------------------------------------------------
+print("\n7. Авто-метка media (video/image)")
+check("_media_of(None) -> None", mod._media_of(None) is None)
+check("_media_of(тензор без get_components) -> image", mod._media_of(object()) == "image")
+
+
+class FakeVideo:
+    def get_components(self):
+        raise RuntimeError("no frames in test")
+
+
+check("_media_of(VIDEO-объект) -> video", mod._media_of(FakeVideo()) == "video")
+check("_extract_frame(VIDEO с пустыми кадрами) -> None",
+      mod._extract_frame(FakeVideo()) is None)
+
+res_v = node.execute(mode=node.MODE_WRITE, selected="", save_folder="", source="видео-запись",
+                     image=FakeVideo(), extra_pnginfo=pnginfo, unique_id=7)
+entries, _ = mod._load_db()
+hit_v = next((e for e in entries if e["prompt"] == "видео-запись"), None)
+check("execute с VIDEO пишет media='video'",
+      hit_v is not None and hit_v.get("media") == "video")
+check("ui-пакет несёт media",
+      res_v["ui"]["entries"] and res_v["ui"]["entries"][0].get("media") == "video")
+
+res_i = node.execute(mode=node.MODE_WRITE, selected="", save_folder="", source="фото-запись",
+                     image=object(), extra_pnginfo=pnginfo, unique_id=7)
+entries, _ = mod._load_db()
+hit_i = next((e for e in entries if e["prompt"] == "фото-запись"), None)
+check("execute с IMAGE пишет media='image'",
+      hit_i is not None and hit_i.get("media") == "image")
+
+# legacy-запись без поля media
+db = json.loads(lib_file.read_text(encoding="utf-8"))
+db["entries"].append({"id": "legacy1", "hash": "h-leg", "prompt": "старая",
+                      "folder": "", "title": "старая"})
+lib_file.write_text(json.dumps(db, ensure_ascii=False), encoding="utf-8")
+entries, _ = mod._load_db()
+hit_l = next((e for e in entries if e["id"] == "legacy1"), None)
+check("старая запись без media читается как None",
+      hit_l is not None and hit_l.get("media") is None)
+
+r = h("GET", "/prompt_library/list", Req())
+check("/list отдаёт media", any("media" in e for e in r["json"]["entries"]))
+
 # --- итог -------------------------------------------------------------------
 print(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
 if fails:

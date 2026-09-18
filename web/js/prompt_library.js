@@ -12,7 +12,13 @@ function plMap(e) {
         last_used: e.last_used || null,
         has_preview: !!e.preview,
         has_workflow: !!e.has_workflow,
+        media: e.media || null, // 'video' / 'image' / null (старые записи — неизвестно)
     };
+}
+
+// Бейдж типа записи: только текст, раскладку не трогает
+function plBadge(e) {
+    return e.media === "video" ? "🎬 " : e.media === "image" ? "🖼 " : "";
 }
 
 // --- Смена режима рендера (canvas ↔ Nodes 2.0) без перезагрузки страницы ------
@@ -120,8 +126,22 @@ app.registerExtension({
                 if (savedView) viewSel.value = savedView;
             } catch (e) { /* silent */ }
             if (!["large", "medium", "list"].includes(viewSel.value)) viewSel.value = "large";
+            // Фильтр типа: все / только фото / только видео (записи без метки видны только во «Все»)
+            const mediaSel = document.createElement("select");
+            mediaSel.title = "Тип записей";
+            mediaSel.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px;max-width:110px;";
+            mediaSel.innerHTML = `
+                <option value="all">Всё</option>
+                <option value="image">🖼 Фото</option>
+                <option value="video">🎬 Видео</option>`;
+            try {
+                const savedMedia = localStorage.getItem("promptLibrary.media");
+                if (savedMedia) mediaSel.value = savedMedia;
+            } catch (e) { /* silent */ }
+            if (!["all", "image", "video"].includes(mediaSel.value)) mediaSel.value = "all";
             toolbar.appendChild(viewSel);
             toolbar.appendChild(sortSel);
+            toolbar.appendChild(mediaSel);
             toolbar.appendChild(search);
 
             // Кнопка-тогл ручного ввода + область ввода
@@ -283,7 +303,7 @@ app.registerExtension({
             root.appendChild(hint);
 
             const st = {
-                root, search, sortSel, viewSel, tree, list: listContent, hint, detail,
+                root, search, sortSel, viewSel, mediaSel, tree, list: listContent, hint, detail,
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow,
                 entries: [], folders: [], full: new Map(),
                 detailId: null, selFolder: "__all",
@@ -728,10 +748,12 @@ app.registerExtension({
             // --- Список книг ---
             const sortedFiltered = () => {
                 const q = (st.search.value || "").toLowerCase();
+                const mf = st.mediaSel.value || "all";
                 let arr = st.entries.filter((e) => {
                     if (st.selFolder === "__fav" && !e.favorite) return false;
                     else if (st.selFolder === "__root" && e.folder) return false;
                     else if (st.selFolder && !st.selFolder.startsWith("__") && e.folder !== st.selFolder) return false;
+                    if (mf !== "all" && e.media !== mf) return false;
                     if (q && !((e.title || "") + "\n" + (e.head || "") + "\n" + (e.folder || "")).toLowerCase().includes(q)) return false;
                     return true;
                 });
@@ -784,7 +806,7 @@ app.registerExtension({
                     body.style.cssText = grid ? "min-width:0;text-align:center;" : "flex:1;min-width:0;";
                     const title = document.createElement("div");
                     title.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                    title.textContent = e.title || e.head || "(без названия)";
+                    title.textContent = plBadge(e) + (e.title || e.head || "(без названия)");
                     title.title = e.title || e.head || "";
                     body.appendChild(title);
                     if (!grid) {
@@ -916,6 +938,10 @@ app.registerExtension({
             st.render = render;
             search.oninput = render;
             sortSel.onchange = render;
+            mediaSel.onchange = () => {
+                try { localStorage.setItem("promptLibrary.media", mediaSel.value); } catch (e) { /* silent */ }
+                render();
+            };
             viewSel.onchange = () => {
                 try { localStorage.setItem("promptLibrary.view", viewSel.value); } catch (e) { /* silent */ }
                 render();

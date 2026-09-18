@@ -100,6 +100,9 @@ def _load_db():
         if not e.get("title"):
             e["title"] = _auto_title(e.get("prompt", ""))
             changed = True
+        # Старые записи без media — неизвестно (None). setdefault без changed:
+        # отсутствие поля и так трактуется как None, файл не переписываем зря.
+        e.setdefault("media", None)
 
     # Папки из записей + родители для дерева
     fset = set(_norm_folder(f) for f in folders if _norm_folder(f))
@@ -304,7 +307,16 @@ def _snapshot_workflow(extra_pnginfo, cap=2_000_000):
         return None
 
 
-def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None):
+def _media_of(source):
+    """Источник превью: 'video' (VIDEO-объект ядра с get_components),
+    'image' (IMAGE-тензор/массив) или None (провода нет)."""
+    if source is None:
+        return None
+    get_comp = getattr(source, "get_components", None)
+    return "video" if callable(get_comp) else "image"
+
+
+def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None, media=None):
     h = _dedup_hash(prompt, folder)
     for e in entries:
         if e.get("hash") == h:
@@ -322,6 +334,7 @@ def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None):
         "last_used": None,  # дата последней выдачи (как в библиотеке)
         "preview": preview,  # уже относительный путь 'previews/{id}.png' или None
         "workflow": workflow,  # снапшот воркфлоу (открытие с канваса); None = нет
+        "media": media,  # 'video' / 'image' / None (старые записи — None = неизвестно)
     })
     return entry_id, True
 
@@ -406,7 +419,8 @@ class PromptLibrary:
         wf_copy = _snapshot_workflow(extra_pnginfo)
         fld = _norm_folder(folder)
         if not issue and incoming:
-            entry_id, added = _add_entry(entries, incoming, fld, workflow=wf_copy)
+            media = _media_of(image)
+            entry_id, added = _add_entry(entries, incoming, fld, workflow=wf_copy, media=media)
             if added:
                 frame = _extract_frame(image) if image is not None else None
                 preview = _save_thumbnail(frame, entry_id, wf_copy) if frame is not None else None
@@ -462,6 +476,7 @@ class PromptLibrary:
                 "last_used": e.get("last_used"),
                 "has_preview": bool(e.get("preview")),
                 "has_workflow": bool(e.get("workflow")),
+                "media": e.get("media"),
             }
             for e in entries[:200]
         ]
