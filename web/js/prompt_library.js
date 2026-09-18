@@ -70,7 +70,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.25-pickup";
+const PL_JS_VERSION = "1.26-media";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -196,30 +196,51 @@ app.registerExtension({
             inputAttachRow.style.cssText = "display:flex;gap:4px;align-items:center;";
             const inputFile = document.createElement("input");
             inputFile.type = "file";
-            inputFile.accept = "image/*";
+            inputFile.accept = "image/*,video/*";
             inputFile.style.display = "none";
             const attachBtn = document.createElement("button");
             attachBtn.type = "button";
-            attachBtn.title = "Выбрать картинку с диска как превью записи";
+            attachBtn.title = "Выбрать картинку или видео с диска как превью записи (у видео берётся первый кадр)";
             attachBtn.style.cssText = "flex:1;min-width:0;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
             const attachThumb = document.createElement("img");
             attachThumb.style.cssText = "width:40px;height:40px;object-fit:cover;border-radius:3px;background:#222;display:none;flex-shrink:0;";
+            // Видео в <img> не покажешь — отдельный <video> сам рисует первый кадр
+            const attachVid = document.createElement("video");
+            attachVid.muted = true;
+            attachVid.playsInline = true;
+            attachVid.preload = "metadata";
+            attachVid.style.cssText = attachThumb.style.cssText;
             const attachClear = document.createElement("button");
             attachClear.type = "button";
             attachClear.textContent = "✖";
             attachClear.title = "Убрать прикреплённое превью";
             attachClear.style.cssText = "display:none;background:none;border:none;cursor:pointer;font-size:12px;flex-shrink:0;";
             let attachedFile = null;
+            // Тип файла — по MIME и по расширению: у файлов с диска браузер
+            // иногда отдаёт пустой type.
+            const isVideoFile = (f) => !!f && (String(f.type || "").startsWith("video/")
+                || /\.(mp4|webm|mkv|mov|m4v|avi)$/i.test(f.name || ""));
             const renderAttach = () => {
-                attachBtn.textContent = attachedFile ? `📷 ${attachedFile.name}` : "📷 Прикрепить превью";
+                const vid = isVideoFile(attachedFile);
+                attachBtn.textContent = attachedFile
+                    ? `${vid ? "🎬" : "📷"} ${attachedFile.name}`
+                    : "📷 Прикрепить превью";
                 attachThumb.style.display = "none";
+                attachVid.style.display = "none";
                 attachClear.style.display = attachedFile ? "" : "none";
                 if (attachedFile) {
                     try {
                         const url = URL.createObjectURL(attachedFile);
-                        attachThumb.src = url;
-                        attachThumb.style.display = "";
-                        attachThumb.onload = () => { try { URL.revokeObjectURL(url); } catch (e) { /* silent */ } };
+                        const show = () => { try { URL.revokeObjectURL(url); } catch (e) { /* silent */ } };
+                        if (vid) {
+                            attachVid.src = url;
+                            attachVid.style.display = "";
+                            attachVid.onloadeddata = show;
+                        } else {
+                            attachThumb.src = url;
+                            attachThumb.style.display = "";
+                            attachThumb.onload = show;
+                        }
                     } catch (e) { /* silent */ }
                 }
             };
@@ -235,31 +256,14 @@ app.registerExtension({
             };
             inputAttachRow.appendChild(attachBtn);
             inputAttachRow.appendChild(attachThumb);
+            inputAttachRow.appendChild(attachVid);
             inputAttachRow.appendChild(attachClear);
             inputArea.appendChild(inputAttachRow);
             inputArea.appendChild(inputSaveBtn);
             renderAttach();
-            const readAttachedPreview = () => new Promise((resolve) => {
-                if (!attachedFile) return resolve(null);
-                try {
-                    const url = URL.createObjectURL(attachedFile);
-                    const img = new Image();
-                    img.onload = () => {
-                        try {
-                            const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
-                            const scale = Math.min(1, 512 / Math.max(w, h));
-                            const cw = document.createElement("canvas");
-                            cw.width = Math.max(1, Math.round(w * scale));
-                            cw.height = Math.max(1, Math.round(h * scale));
-                            cw.getContext("2d").drawImage(img, 0, 0, cw.width, cw.height);
-                            resolve(cw.toDataURL("image/png"));
-                        } catch (e) { resolve(null); }
-                        try { URL.revokeObjectURL(url); } catch (err) { /* silent */ }
-                    };
-                    img.onerror = () => { try { URL.revokeObjectURL(url); } catch (err) { /* silent */ } resolve(null); };
-                    img.src = url;
-                } catch (e) { resolve(null); }
-            });
+            // Кадр-превью из выбранного файла: одна логика на ручной ввод,
+            // замену обложки и (если понадобится) другие места — st.readPreviewFile.
+            const readAttachedPreview = () => st.readPreviewFile(attachedFile);
 
             let inputVisible = false;
             inputToggle.onclick = () => {
@@ -284,9 +288,17 @@ app.registerExtension({
                 }
                 inputSaveBtn.textContent = "⏳ Сохраняю...";
                 try {
-                    const previewData = await readAttachedPreview();
+                    const prev = await readAttachedPreview();
+                    if (attachedFile && !prev) {
+                        // Файл выбран, а кадр снять не удалось (битый/экзотический
+                        // кодек): запись сохраняем, но не молчим — иначе выглядит
+                        // как «превью просто пропало».
+                        console.warn("[PromptLibrary] preview: не удалось прочитать файл", attachedFile.name);
+                        st.hintSticky = "Превью не прикрепилось: браузер не смог прочитать этот файл.";
+                        st.renderHint?.();
+                    }
                     const r = await st.apiPost("/prompt_library/add", { prompt: text, folder: dest,
-                        ...(previewData ? { preview_data: previewData } : {}) });
+                        ...(prev ? { preview_data: prev.dataUrl, media: prev.media } : {}) });
                     if (r.ok) {
                         let dup = null;
                         try { dup = await r.json(); } catch (e) { /* silent */ }
@@ -440,10 +452,64 @@ app.registerExtension({
             bSave.style.display = "none";
             const bWorkflow = mkBtn("📥 Воркфлоу", "Открыть сохранённый воркфлоу на канвасе (текущий будет заменён)");
             bWorkflow.style.display = "none";
+            // Замена обложки существующей записи (v1.26): картинка или видео
+            // с диска, у видео — первый кадр. Провод и новый прогон не нужны.
+            const bPreviewLabel = (media) => (media === "video" ? "🎬 Заменить превью" : "🖼 Заменить превью");
+            const bPreview = mkBtn("🖼 Заменить превью", "Заменить обложку записи: картинка или видео с диска (у видео — первый кадр)");
+            const dPreviewFile = document.createElement("input");
+            dPreviewFile.type = "file";
+            dPreviewFile.accept = "image/*,video/*";
+            dPreviewFile.style.display = "none";
+            bPreview.onclick = () => { try { dPreviewFile.value = ""; dPreviewFile.click(); } catch (e) { /* silent */ } };
+            dPreviewFile.onchange = async () => {
+                const f = (dPreviewFile.files && dPreviewFile.files[0]) || null;
+                if (!f || !st.detailId) return;
+                const id = st.detailId;
+                bPreview.textContent = "⏳ Читаю файл...";
+                try {
+                    const prev = await st.readPreviewFile(f);
+                    if (!prev) {
+                        // Не молчим: иначе «нажал — ничего не произошло»
+                        console.warn("[PromptLibrary] replace preview: файл не прочитался", f.name);
+                        st.hintSticky = `Превью не заменено: браузер не смог прочитать «${f.name}».`;
+                        st.renderHint?.();
+                        bPreview.textContent = "⚠️ Файл не прочитался";
+                        setTimeout(() => { bPreview.textContent = bPreviewLabel((st.full.get(id) || {}).media); }, 1500);
+                        return;
+                    }
+                    const r = await st.apiPost("/prompt_library/attach_preview",
+                        { id, preview_data: prev.dataUrl, media: prev.media, force: true });
+                    if (!r.ok) {
+                        let out = {};
+                        try { out = await r.json(); } catch (e) { /* silent */ }
+                        console.warn("[PromptLibrary] replace preview failed:", r.status, out);
+                        bPreview.textContent = `❌ Ошибка ${r.status}`;
+                        setTimeout(() => { bPreview.textContent = bPreviewLabel((st.full.get(id) || {}).media); }, 1500);
+                        return;
+                    }
+                    // Тот же URL превью кэшируется по created_at — без локальной
+                    // метки карточка показала бы старую обложку
+                    st.previewStamp.set(id, Date.now());
+                    st.full.delete(id);
+                    await reload();
+                    await st.fillDetail?.(id);
+                    bPreview.textContent = "✅ Превью заменено";
+                    st.hintSticky = prev.media === "video"
+                        ? "Обложка заменена: сохранён первый кадр видео, метка 🎬 видео."
+                        : "Обложка заменена: метка 📷 фото.";
+                    st.renderHint?.();
+                } catch (err) {
+                    console.warn("[PromptLibrary] replace preview error:", err);
+                    bPreview.textContent = "❌ Ошибка";
+                }
+                setTimeout(() => { bPreview.textContent = bPreviewLabel((st.full.get(id) || {}).media); }, 1500);
+            };
+            dBtns.appendChild(dPreviewFile);
             dBtns.appendChild(bCopy);
             dBtns.appendChild(bEdit);
             dBtns.appendChild(bSave);
             dBtns.appendChild(bWorkflow);
+            dBtns.appendChild(bPreview);
             bWorkflow.onclick = () => { try { st.openWorkflow?.(st.detailId); } catch (e) { /* silent */ } };
 
             detail.appendChild(dTitle);
@@ -471,8 +537,11 @@ app.registerExtension({
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
                 pickupRow, pickupSel,
                 bulkCount, bulkDel, bulkClear,
-                dTitle, dFolder, dText, dMeta, bSave, bWorkflow,
+                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview,
                 entries: [], folders: [], full: new Map(),
+                // Локальная метка «обложка заменена» (v1.26): URL превью кэшируется
+                // по created_at, без метки браузер показал бы старую картинку.
+                previewStamp: new Map(),
                 detailId: null, selFolder: "__all",
                 // Мультивыделение на удаление (Ctrl — поштучно, Shift — диапазон).
                 // Живёт только в сессии, в PNG не персистится; цель сохранения
@@ -921,6 +990,65 @@ app.registerExtension({
                     }
                 } catch (e) { /* silent */ }
             };
+            // Кадр-превью из файла, выбранного на диске (ручной ввод и замена
+            // обложки): картинка → даунскейл 512px через canvas; видео → первый
+            // кадр через <video>+canvas (файл лежит на диске пользователя, сервер
+            // его не видит). media нужен серверу: по нему работают 🎬-бейдж и фильтр.
+            st.readPreviewFile = (file) => new Promise((resolve) => {
+                if (!file) return resolve(null);
+                let url = "";
+                const done = (res) => {
+                    try { if (url) URL.revokeObjectURL(url); } catch (e) { /* silent */ }
+                    resolve(res);
+                };
+                const draw = (src, w, h) => {
+                    try {
+                        const scale = Math.min(1, 512 / Math.max(w || 1, h || 1));
+                        const cw = document.createElement("canvas");
+                        cw.width = Math.max(1, Math.round((w || 512) * scale));
+                        cw.height = Math.max(1, Math.round((h || 512) * scale));
+                        cw.getContext("2d").drawImage(src, 0, 0, cw.width, cw.height);
+                        return cw.toDataURL("image/png");
+                    } catch (e) { return null; }
+                };
+                try { url = URL.createObjectURL(file); } catch (e) { return resolve(null); }
+                const vid = String(file.type || "").startsWith("video/")
+                    || /\.(mp4|webm|mkv|mov|m4v|avi)$/i.test(file.name || "");
+                if (!vid) {
+                    const img = new Image();
+                    img.onload = () => done((() => {
+                        const d = draw(img, img.naturalWidth || img.width, img.naturalHeight || img.height);
+                        return d ? { dataUrl: d, media: "image" } : null;
+                    })());
+                    img.onerror = () => done(null);
+                    img.src = url;
+                    return;
+                }
+                const v = document.createElement("video");
+                v.muted = true;
+                v.playsInline = true;
+                v.preload = "metadata";
+                let settled = false;
+                const finish = (res) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(guard);
+                    done(res);
+                };
+                // Один одноразовый предохранитель (не наблюдатель и не polling):
+                // у битого контейнера не приходит ни кадр, ни ошибка.
+                const guard = setTimeout(() => finish(null), 8000);
+                v.onerror = () => finish(null);
+                v.onloadeddata = () => {
+                    // Сдвиг на кадр вперёд: у некоторых кодеков нулевой кадр серый
+                    try { if (!v.currentTime) v.currentTime = 0.05; } catch (e) { /* кадр уже есть */ }
+                };
+                v.onseeked = () => {
+                    const d = draw(v, v.videoWidth, v.videoHeight);
+                    finish(d ? { dataUrl: d, media: "video" } : null);
+                };
+                try { v.src = url; } catch (e) { finish(null); }
+            });
             st.attachPreview = async (id, image) => {
                 try {
                     const r = await st.apiPost("/prompt_library/attach_preview", {
@@ -999,7 +1127,7 @@ app.registerExtension({
                     if (shot && out && out.id) {
                         await st.attachPreview(String(out.id), shot);
                     } else {
-                        console.log("[PromptLibrary] pickup: обложки нет (прогон без картинок)",
+                        console.log("[PromptLibrary] pickup: обложки нет (в прогоне нет файлов-превью)",
                             out && out.id);
                     }
                 } catch (e) {
@@ -1062,10 +1190,15 @@ app.registerExtension({
                             });
                             return;
                         }
-                        const imgs = d.output && d.output.images;
-                        if (!Array.isArray(imgs) || !imgs.length) return;
-                        const im = imgs[0] || {};
-                        if (!im.filename) return;
+                        // Файл прогона для обложки. Ядро кладёт видео в `images`
+                        // (+ animated: true — так отдаёт PreviewVideo), но сторонние
+                        // ноды (VHS и подобные) — в `video`/`gifs`. Раньше читался
+                        // только `images`, и видео-прогон оставался без обложки.
+                        const pools = [d.output && d.output.images, d.output && d.output.video,
+                                       d.output && d.output.gifs];
+                        const pool = pools.find((p) => Array.isArray(p) && p.length && p[0] && p[0].filename);
+                        if (!pool) return;
+                        const im = pool[0] || {};
                         const shot = { filename: im.filename, subfolder: im.subfolder || "", type: im.type || "output" };
                         // Первый файл прогона — в запас (и в ожидание, если оно есть)
                         if (!st.runImages.has(d.prompt_id)) {
@@ -1097,9 +1230,9 @@ app.registerExtension({
                         if (rec.image) {
                             st.attachPreview(rec.id, rec.image);
                         } else {
-                            // Прогон без картинок (видео-выход, только текст) —
-                            // обложку не из чего взять, это не ошибка
-                            console.log("[PromptLibrary] cover: прогон без картинок, обложка не прикреплена", rec.id);
+                            // В прогоне нет ни картинок, ни видео — обложку
+                            // не из чего взять, это не ошибка
+                            console.log("[PromptLibrary] cover: в прогоне нет файлов-превью, обложка не прикреплена", rec.id);
                         }
                     } catch (e) { /* silent */ }
                 };
@@ -1386,7 +1519,16 @@ app.registerExtension({
                     // Стабильный t=: превью неизменно для записи (апгрейд jpg→png
                     // виден через Last-Modified → дешёвый 304, а не перезакачка).
                     // Date.now() тут был бы DDoS на 85 картинок при каждом рендере.
-                    if (e.has_preview) img.src = `/prompt_library/preview?id=${encodeURIComponent(e.id)}&t=${encodeURIComponent(e.created_at || e.id)}`;
+                    if (e.has_preview) {
+                        // t=created_at — стабильный ключ кэша (иначе все превью
+                        // перекачиваются на каждом рендере). После замены обложки
+                        // (v1.26) добавляем локальную метку: сервер отдаёт тот же
+                        // URL, и без неё браузер показал бы старую картинку.
+                        const stamp = st.previewStamp.get(e.id) || "";
+                        img.src = `/prompt_library/preview?id=${encodeURIComponent(e.id)}`
+                            + `&t=${encodeURIComponent(e.created_at || e.id)}`
+                            + (stamp ? `&r=${stamp}` : "");
+                    }
                     else img.style.display = "none";
 
                     const body = document.createElement("div");
@@ -1469,28 +1611,7 @@ app.registerExtension({
                         if (st.markEntries.size || st.markFolders.size) st.clearMarks();
                         if (selWidget) selWidget.value = e.id;
                         st.anchorEntry = e.id; // обычный клик ставит якорь для Shift-диапазона
-                        try {
-                            if (!st.full.has(e.id)) {
-                                const r = await fetch(`/prompt_library/entry?id=${encodeURIComponent(e.id)}`);
-                                if (r.ok) st.full.set(e.id, await r.json());
-                            }
-                            const full = st.full.get(e.id);
-                            if (full) {
-                                st.detailId = e.id;
-                                st.dTitle.value = full.title || "";
-                                st.dFolder.value = full.folder || "";
-                                st.dText.value = full.prompt || "";
-                                for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
-                                st.bSave.style.display = "none";
-                                st.bWorkflow.style.display = full.workflow ? "" : "none";
-                                const mediaLabel = full.media === "video" ? " · 🎬 видео" : full.media === "image" ? " · 📷 фото" : "";
-                                st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}${mediaLabel}`;
-                                st.panelOpened?.();
-                                st.detail.style.display = "flex";
-                                st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача» или «📤📥 Выдача + запись».";
-                                st.hintSticky = null;
-                            }
-                        } catch (err) { /* silent */ }
+                        await st.fillDetail(e.id);
                         render();
                         // Vue: размером ноды владеет layout, перерисовку канваса
                         // не запрашиваем (нода — DOM, canvas не участвует).
@@ -1724,6 +1845,36 @@ app.registerExtension({
                     st.bSave.style.display = "none";
                     await reload();
                 } catch (err) { /* silent */ }
+            };
+
+            // Открыть/обновить панель книги по id: одна точка для клика по карточке
+            // и для замены обложки (после неё формуляр и кнопка обязаны обновиться,
+            // иначе метка показала бы старое).
+            st.fillDetail = async (id) => {
+                if (!id) return null;
+                try {
+                    if (!st.full.has(id)) {
+                        const r = await fetch(`/prompt_library/entry?id=${encodeURIComponent(id)}`);
+                        if (r.ok) st.full.set(id, await r.json());
+                    }
+                } catch (e) { return null; }
+                const full = st.full.get(id);
+                if (!full) return null;
+                st.detailId = id;
+                st.dTitle.value = full.title || "";
+                st.dFolder.value = full.folder || "";
+                st.dText.value = full.prompt || "";
+                for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
+                st.bSave.style.display = "none";
+                st.bWorkflow.style.display = full.workflow ? "" : "none";
+                const mediaLabel = full.media === "video" ? " · 🎬 видео" : full.media === "image" ? " · 📷 фото" : "";
+                st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}${mediaLabel}`;
+                if (st.bPreview) st.bPreview.textContent = bPreviewLabel(full.media);
+                st.panelOpened?.();
+                st.detail.style.display = "flex";
+                st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача» или «📤📥 Выдача + запись».";
+                st.hintSticky = null;
+                return full;
             };
 
             // --- Сторож цикла: IMAGE подключён + выход куда-то идёт = кольцо в графе ---

@@ -46,7 +46,7 @@ function makeEl(tag = "div") {
     querySelector: () => null, querySelectorAll: () => [],    // Vue-нода: [data-node-id] — сюда applyNodeMinWidth пишет min-width
     closest: (sel) => (sel === "[data-node-id]" ? nodeElStub : null),
     focus() {}, blur() {}, click() {}, scrollIntoView() {},
-    getContext: () => ({}), toDataURL: () => "data:,",
+    getContext: () => ({ drawImage() {} }), toDataURL: () => "data:,",
     cloneNode: () => makeEl(tag),
     getBoundingClientRect: () => ({ width: 480, height: 596, top: 0, left: 0, right: 480, bottom: 596, x: 0, y: 0 }),
     dispatchEvent: () => true,
@@ -65,8 +65,12 @@ class HTMLElementStub {
 }
 const nodeElStub = new HTMLElementStub();
 
+// Всё созданное через createElement/Image — в реестре: фазы кадров из файла
+// должны иметь доступ к <video>, чтобы вручную поднять его события.
+const madeEls = [];
+
 const documentStub = {
-  createElement: (t) => makeEl(t),
+  createElement: (t) => { const el = makeEl(t); madeEls.push(el); return el; },
   createTextNode: () => makeEl("text"),
   createDocumentFragment: () => makeEl("fragment"),
   body: makeEl("body"), head: makeEl("head"), documentElement: makeEl("html"),
@@ -167,7 +171,7 @@ const sandbox = {
   navigator: { userAgent: "node", clipboard: { writeText: async () => {} } },
   location: { href: "http://localhost/", origin: "http://localhost" },
   HTMLElement: HTMLElementStub,
-  Image: function () { return makeEl("img"); },
+  Image: function () { const el = makeEl("img"); madeEls.push(el); return el; },
   URL: { createObjectURL: () => "blob:", revokeObjectURL() {} },
   Blob: function () {}, FileReader: function () { this.readAsDataURL = () => {}; },
   structuredClone: (v) => JSON.parse(JSON.stringify(v)),
@@ -227,7 +231,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.25-pickup");
+  check(`${tag}: версия JS видна`, st.version === "1.26-media");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -990,6 +994,147 @@ await run("pickup: пустой текст источника — записи �
     st.toast = origToast;
     appStub.graph._nodes = prevNodes;
     appStub.graph.getNodeById = prevGet;
+  }
+});
+
+// --- v1.26: видео как обложка + замена обложки из файла ----------------------
+// Ядро отдаёт видео в том же `images` (+ animated), сторонние ноды (VHS) —
+// в `video`/`gifs`: раньше читался только `images`, и видео-прогон оставался
+// без обложки.
+await run("preview: видео-прогон (images+animated) и сторонние пулы video/gifs", async () => {
+  const node = makeNode();
+  node.id = 21;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    return jsonResponse({ ok: true, preview: "previews/e1.png" });
+  };
+  try {
+    apiStub.dispatch("executed", { node: "21", prompt_id: "v1", output: { saved_id: ["e1"] } });
+    apiStub.dispatch("executed", { node: "88", prompt_id: "v1",
+      output: { images: [{ filename: "clip.mp4", subfolder: "", type: "output" }], animated: [true] } });
+    apiStub.dispatch("execution_success", { prompt_id: "v1" });
+    await new Promise((r) => setImmediate(r));
+    check("видео-прогон: файл ушёл в attach_preview",
+      posts.some((p) => p.url.includes("attach_preview") && p.body.filename === "clip.mp4"),
+      JSON.stringify(posts.map((p) => p.body)));
+
+    posts.length = 0;
+    apiStub.dispatch("executed", { node: "21", prompt_id: "v2", output: { saved_id: ["e2"] } });
+    apiStub.dispatch("executed", { node: "89", prompt_id: "v2",
+      output: { gifs: [{ filename: "clip2.webm", subfolder: "v", type: "output" }] } });
+    apiStub.dispatch("execution_success", { prompt_id: "v2" });
+    await new Promise((r) => setImmediate(r));
+    check("сторонний пул gifs тоже становится обложкой",
+      posts.some((p) => p.url.includes("attach_preview") && p.body.filename === "clip2.webm"),
+      JSON.stringify(posts.map((p) => p.body)));
+
+    posts.length = 0;
+    apiStub.dispatch("executed", { node: "21", prompt_id: "v3", output: { saved_id: ["e3"] } });
+    apiStub.dispatch("executed", { node: "90", prompt_id: "v3",
+      output: { video: [{ filename: "clip3.mkv", subfolder: "", type: "output" }] } });
+    apiStub.dispatch("execution_success", { prompt_id: "v3" });
+    await new Promise((r) => setImmediate(r));
+    check("сторонний пул video тоже становится обложкой",
+      posts.some((p) => p.url.includes("attach_preview") && p.body.filename === "clip3.mkv"),
+      JSON.stringify(posts.map((p) => p.body)));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+await run("preview: кадр из файла с диска (картинка и видео)", async () => {
+  const node = makeNode();
+  node.id = 31;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+
+  check("readPreviewFile: без файла — null", (await st.readPreviewFile(null)) === null);
+
+  const pImg = st.readPreviewFile({ name: "photo.png", type: "image/png" });
+  const img = madeEls.filter((e) => e.tagName === "IMG").pop();
+  check("картинка: загружена через blob-URL", !!img && String(img.src).startsWith("blob:"));
+  img.onload?.();
+  const resImg = await pImg;
+  check("картинка: media=image + PNG dataURL",
+    !!resImg && resImg.media === "image" && String(resImg.dataUrl).startsWith("data:"),
+    JSON.stringify(resImg));
+
+  const pVid = st.readPreviewFile({ name: "clip.mp4", type: "video/mp4" });
+  const vid = madeEls.filter((e) => e.tagName === "VIDEO").pop();
+  check("видео: элемент <video> с preload=metadata", !!vid && vid.preload === "metadata");
+  vid.onloadeddata?.();
+  vid.onseeked?.();
+  const resVid = await pVid;
+  check("видео: media=video + кадр как dataURL",
+    !!resVid && resVid.media === "video" && String(resVid.dataUrl).startsWith("data:"),
+    JSON.stringify(resVid));
+
+  const pBad = st.readPreviewFile({ name: "broken.mp4", type: "video/mp4" });
+  const bad = madeEls.filter((e) => e.tagName === "VIDEO").pop();
+  bad.onerror?.();
+  check("битый контейнер: null без зависания", (await pBad) === null);
+});
+
+await run("preview: замена обложки существующей записи (кнопка панели книги)", async () => {
+  const node = makeNode();
+  node.id = 41;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    if (url.includes("/prompt_library/entry")) {
+      return jsonResponse({ id: "e1", title: "t", folder: "", prompt: "p", media: "video" });
+    }
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    return jsonResponse({ ok: true });
+  };
+  try {
+    check("панель книги: кнопка замены обложки есть", !!st.bPreview);
+    check("кнопка лежит в ряду действий панели",
+      st.detail.children.some((c) => Array.isArray(c.children) && c.children.includes(st.bPreview)));
+
+    st.full.set("e1", { id: "e1", title: "t", folder: "", prompt: "p", media: "video" });
+    await st.fillDetail("e1");
+    check("media=video: подпись кнопки 🎬", String(st.bPreview.textContent).startsWith("🎬"),
+      st.bPreview.textContent);
+    check("формуляр несёт метку типа", String(st.dMeta.textContent).includes("🎬 видео"),
+      st.dMeta.textContent);
+
+    st.full.delete("e1");
+    st.full.set("e1", { id: "e1", title: "t", folder: "", prompt: "p", media: "image" });
+    await st.fillDetail("e1");
+    check("media=image: подпись кнопки 🖼", String(st.bPreview.textContent).startsWith("🖼"),
+      st.bPreview.textContent);
+
+    // Файл выбран → кадр снят → force-POST с preview_data и меткой
+    const fileInput = st.detail.children
+      .flatMap((c) => (Array.isArray(c.children) ? c.children : []))
+      .find((el) => el.tagName === "INPUT" && el.type === "file" && String(el.accept).includes("video"));
+    check("в панели есть скрытый input для картинки/видео", !!fileInput, String(fileInput?.accept));
+    st.detailId = "e1";
+    fileInput.files = [{ name: "clip.mp4", type: "video/mp4" }];
+    const pending = fileInput.onchange();
+    const vid = madeEls.filter((e) => e.tagName === "VIDEO").pop();
+    vid.onloadeddata?.();
+    vid.onseeked?.();
+    await pending;
+    const post = posts.find((p) => p.url.includes("attach_preview"));
+    check("замена: POST attach_preview с preview_data + force",
+      !!post && post.body.id === "e1" && post.body.force === true
+        && post.body.media === "video" && String(post.body.preview_data).startsWith("data:"),
+      JSON.stringify(post?.body));
+    check("замена: локальная метка кэша превью поставлена", st.previewStamp.has("e1"));
+  } finally {
+    sandbox.fetch = origFetch;
   }
 });
 

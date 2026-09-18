@@ -923,6 +923,135 @@ for _i in range(mod._PICKUP_LIMIT + 5):
 check("подхват: отложенные токены не растут бесконечно (лимит, без таймеров)",
       len(mod._PICKUP) <= mod._PICKUP_LIMIT, str(len(mod._PICKUP)))
 
+# --- 19. видео-обложка, метка media и замена превью (v1.26) --------------------
+print("\n19. Видео-обложка + замена превью: attach_preview(preview_data/force) + /add(media)")
+
+check("_is_video_file: mp4/webm/mkv — видео",
+      mod._is_video_file("a.mp4") and mod._is_video_file("b.WEBM") and mod._is_video_file("c.mkv"))
+check("_is_video_file: png/webp/gif — картинки (PIL берёт первый кадр)",
+      not mod._is_video_file("a.png") and not mod._is_video_file("b.webp") and not mod._is_video_file("c.gif"))
+
+(out_dir / "clip.mp4").write_bytes(b"x")
+(out_dir / "shot.png").write_bytes(b"x")
+
+_orig_loader5 = mod._load_image_file
+_orig_video5 = mod._load_video_frame
+_orig_thumb5 = mod._save_thumbnail
+_orig_upload5 = mod._save_preview_upload
+_thumb5, _uploads5 = [], []
+
+
+def _thumb_stub5(img, entry_id, workflow=None):
+    _thumb5.append(entry_id)
+    return f"previews/{entry_id}.png"
+
+
+def _upload_stub5(data, entry_id, workflow=None):
+    # Пустой data ведёт себя как настоящий: превью не создаётся
+    if not data:
+        return None
+    _uploads5.append({"id": entry_id, "wf": bool(workflow), "head": str(data)[:16]})
+    return f"previews/{entry_id}.png"
+
+
+def _loader5(path):
+    # PIL видео не открывает — ровно на этом падал видео-прогон
+    if str(path).lower().endswith(".mp4"):
+        raise ValueError("PIL не открывает видео")
+    return object()
+
+
+mod._save_thumbnail = _thumb_stub5
+mod._save_preview_upload = _upload_stub5
+mod._load_image_file = _loader5
+mod._load_video_frame = lambda p: object()   # PyAV в песочнице нет — заглушка
+try:
+    check("_load_media_frame: картинку берёт из PIL", mod._load_media_frame("shot.png") is not None)
+    check("_load_media_frame: видео падает на PIL и берётся из PyAV",
+          mod._load_media_frame("clip.mp4") is not None)
+
+    # 1. Видео-прогон: mp4 на диске → обложка из первого кадра + метка video
+    h("POST", "/prompt_library/add", Req({"prompt": "видео-прогон", "folder": "Видео"}))
+    vid = _entry("видео-прогон")["id"]
+    r_vid = h("POST", "/prompt_library/attach_preview",
+              Req({"id": vid, "filename": "clip.mp4", "subfolder": "", "type": "output"}))
+    check("видео-прогон: обложка из первого кадра (200)",
+          r_vid["status"] == 200 and r_vid["json"].get("preview") == f"previews/{vid}.png", str(r_vid))
+    check("видео-прогон: метка media=video по расширению",
+          _entry("видео-прогон").get("media") == "video")
+    check("видео-прогон: кадр снят (thumbnail вызван один раз)",
+          _thumb5.count(vid) == 1, str(_thumb5))
+
+    # 2. Замена обложки файлом, метка из подсказки клиента важнее расширения
+    r_rep = h("POST", "/prompt_library/attach_preview",
+              Req({"id": vid, "filename": "shot.png", "subfolder": "", "type": "output",
+                   "media": "image", "force": True}))
+    check("замена файлом: 200 и метка из подсказки клиента",
+          r_rep["status"] == 200 and _entry("видео-прогон").get("media") == "image", str(r_rep))
+
+    # 3. Замена обложки кадром из браузера (ручное видео с диска)
+    _uploads5.clear()
+    r_data = h("POST", "/prompt_library/attach_preview",
+               Req({"id": vid, "preview_data": "data:image/png;base64,AAA", "media": "video",
+                    "force": True}))
+    check("замена кадром: 200, метка video, превью записано",
+          r_data["status"] == 200 and _entry("видео-прогон").get("media") == "video", str(r_data))
+    check("замена кадром: filename не обязателен, кадр ушёл в загрузчик",
+          len(_uploads5) == 1 and _uploads5[0]["id"] == vid, str(_uploads5))
+
+    r_skip = h("POST", "/prompt_library/attach_preview",
+               Req({"id": vid, "preview_data": "data:image/png;base64,AAA", "media": "video"}))
+    check("без force готовое превью не перетирается даже кадром",
+          r_skip["status"] == 200 and r_skip["json"].get("skipped") == "has_preview", str(r_skip))
+
+    r_none = h("POST", "/prompt_library/attach_preview", Req({"id": vid}))
+    check("ни filename, ни preview_data -> 400", r_none["status"] == 400, str(r_none))
+
+    r_gone = h("POST", "/prompt_library/attach_preview",
+               Req({"id": "нет-такой", "preview_data": "data:image/png;base64,AAA", "force": True}))
+    check("ручная замена у удалённой записи -> 404 (не молчим)",
+          r_gone["status"] == 404, str(r_gone))
+
+    # 4. В запись с воркфлоу новое превью встраивает его же (карточка самодостаточна)
+    wf_entry = _entry("финальный текст из LLM")
+    _uploads5.clear()
+    r_wf = h("POST", "/prompt_library/attach_preview",
+             Req({"id": wf_entry["id"], "preview_data": "data:image/png;base64,AAA",
+                  "media": "image", "force": True}))
+    check("замена кадром: воркфлоу записи встраивается в превью",
+          r_wf["status"] == 200 and _uploads5 and _uploads5[-1]["wf"] is True, str(_uploads5))
+
+    # 5. Ручное добавление с превью: метка приходит из JS вместе с кадром
+    r_add_v = h("POST", "/prompt_library/add",
+                Req({"prompt": "ручной видео-промпт", "folder": "Ручное",
+                     "preview_data": "data:image/png;base64,AAA", "media": "video"}))
+    check("ручное добавление: метка video сохранена",
+          r_add_v["status"] == 200 and _entry("ручной видео-промпт").get("media") == "video",
+          str(r_add_v))
+    check("ручное добавление: кадр стал превью",
+          _entry("ручной видео-промпт").get("preview")
+          == f"previews/{_entry('ручной видео-промпт')['id']}.png",
+          str(_entry("ручной видео-промпт").get("preview")))
+    r_add_i = h("POST", "/prompt_library/add",
+                Req({"prompt": "ручной фото-промпт", "folder": "Ручное",
+                     "preview_data": "data:image/png;base64,AAA", "media": "image"}))
+    check("ручное добавление: метка image сохранена",
+          r_add_i["status"] == 200 and _entry("ручной фото-промпт").get("media") == "image",
+          str(r_add_i))
+    r_add_w = h("POST", "/prompt_library/add",
+                Req({"prompt": "ручной мусор-метка", "folder": "Ручное", "media": "wat"}))
+    check("мусорная метка не попадает в базу",
+          _entry("ручной мусор-метка").get("media") is None,
+          str(_entry("ручной мусор-метка")))
+    check("без preview_data превью не создаётся",
+          _entry("ручной мусор-метка").get("preview") is None)
+finally:
+    mod._save_thumbnail = _orig_thumb5
+    mod._save_preview_upload = _orig_upload5
+    mod._load_image_file = _orig_loader5
+    mod._load_video_frame = _orig_video5
+
+
 # --- итог -------------------------------------------------------------------
 _p(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
 if fails:

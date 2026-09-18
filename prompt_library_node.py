@@ -301,10 +301,14 @@ def _upgrade_preview_to_png(entry, workflow):
         return False
 
 
-def _save_preview_upload(data_url, entry_id):
+def _save_preview_upload(data_url, entry_id, workflow=None):
     """Превью из ручной загрузки (PNG/JPEG dataURL или голый base64).
     Сохраняет даунскейл 512px в previews/{id}.png. Возвращает относительный
-    путь или None (битый файл — запись создаётся и без превью)."""
+    путь или None (битый файл — запись создаётся и без превью).
+
+    Кадр видео сюда тоже приходит — но уже картинкой: браузер достаёт первый
+    кадр через <video>+canvas (файл с диска серверу не виден). Воркфлоу
+    встраиваем, если он есть: карточка должна остаться самодостаточной (§24)."""
     try:
         from PIL import Image
     except Exception:
@@ -319,7 +323,9 @@ def _save_preview_upload(data_url, entry_id):
         img = Image.open(io.BytesIO(raw)).convert("RGB")
         img.thumbnail((512, 512), Image.LANCZOS)
         root = _ensure_dirs()
-        img.save(root / "previews" / f"{entry_id}.png", "PNG")
+        pnginfo = _workflow_pnginfo(workflow) if workflow else None
+        kw = {"pnginfo": pnginfo} if pnginfo is not None else {}
+        img.save(root / "previews" / f"{entry_id}.png", "PNG", **kw)
         return f"previews/{entry_id}.png"
     except Exception as e:
         print(f"[PromptLibrary] upload preview failed: {e}", flush=True)
@@ -406,6 +412,55 @@ def _load_image_file(path):
     import numpy as np
     with Image.open(str(path)) as im:
         return np.asarray(im.convert("RGB"))
+
+
+# Расширения, которые PIL не откроет: кадр достаёт PyAV (та же зависимость, что
+# у SaveVideo). Анимированные GIF/WEBP остаются картинками — PIL берёт первый кадр.
+_VIDEO_EXT = {".mp4", ".webm", ".mkv", ".mov", ".m4v", ".avi", ".wmv", ".mpg", ".mpeg", ".flv"}
+
+
+def _is_video_file(path):
+    """По имени файла понятно, что это видео (обложку берём первым кадром)."""
+    try:
+        return os.path.splitext(str(path))[1].lower() in _VIDEO_EXT
+    except Exception:
+        return False
+
+
+def _load_video_frame(path):
+    """Первый кадр видеофайла как RGB-массив (или None).
+
+    PyAV — штатная зависимость ComfyUI (им же пользуются SaveVideo/VideoInput),
+    поэтому новых пакетов не тянем; декодируем ЛЕНИВО: нужен только кадр [0].
+    """
+    try:
+        import av  # type: ignore
+    except Exception as exc:
+        print(f"[PromptLibrary] video frame: PyAV недоступен ({exc})", flush=True)
+        return None
+    try:
+        import numpy as np
+        with av.open(str(path)) as container:
+            for frame in container.decode(video=0):
+                return np.asarray(frame.to_ndarray(format="rgb24"))
+    except Exception as exc:
+        print(f"[PromptLibrary] video frame failed: {exc}", flush=True)
+    return None
+
+
+def _load_media_frame(path):
+    """Кадр для обложки из файла прогона: картинка (PIL) или первый кадр видео (PyAV).
+
+    Порядок именно такой: PIL первым — в песочнице тестов он подменяется, поэтому
+    логика роута проверяется без реального декодирования.
+    """
+    try:
+        return _load_image_file(path)
+    except Exception:
+        arr = _load_video_frame(path)
+        if arr is None:
+            raise
+        return arr
 
 
 def _resolve_output_file(filename, subfolder, kind):
@@ -749,25 +804,38 @@ try:
 
     @routes.post("/prompt_library/attach_preview")
     async def _pl_attach_preview(request):
-        """Обложка записи из файла прогона (автоподхват, v1.24).
+        """Обложка записи: автоподхват из прогона (v1.24) ИЛИ замена кадром (v1.26).
 
         Провода IMAGE для этого не нужно: после Queue клиент присылает то, что
         сервер сам рассылает в событии `executed` — {filename, subfolder, type}
         созданного файла. Файл берём из output/temp, делаем 512px PNG и
-        встраиваем workflow (он уже есть в записи). Уже готовое превью не
-        перетираем (только с force=true).
+        встраиваем workflow (он уже есть в записи). Видео (mp4/webm/…) — первый
+        кадр через PyAV (v1.26): до этого такой прогон оставался без обложки,
+        потому что PIL медиафайл не открывает.
+
+        Второй источник — `preview_data` (PNG-dataURL от браузера): так приходит
+        кадр видеофайла, выбранного на диске (сервер такого файла не видит),
+        и замена обложки существующей записи. Уже готовое превью не перетираем
+        без `force`.
         """
         body = await _req_body(request)
         entry_id = str(body.get("id") or "").strip()
         filename = str(body.get("filename") or "").strip()
         subfolder = str(body.get("subfolder") or "").strip()
         kind = str(body.get("type") or "output").strip() or "output"
+        preview_data = str(body.get("preview_data") or "").strip()
+        media_hint = str(body.get("media") or "").strip().lower()
+        if media_hint not in ("image", "video"):
+            media_hint = ""
         force = bool(body.get("force"))
-        if not entry_id or not filename:
-            return web.json_response({"error": "id and filename required"}, status=400)
-        src = _resolve_output_file(filename, subfolder, kind)
-        if src is None:
-            return web.json_response({"error": "file not found"}, status=404)
+        if not entry_id or not (filename or preview_data):
+            return web.json_response(
+                {"error": "id and filename or preview_data required"}, status=400)
+        src = None
+        if filename:
+            src = _resolve_output_file(filename, subfolder, kind)
+            if src is None:
+                return web.json_response({"error": "file not found"}, status=404)
         entries, folders = _load_db()
         target = None
         for e in entries:
@@ -775,20 +843,32 @@ try:
                 target = e
                 break
         if target is None:
-            # Запись могли удалить между Queue и завершением прогона — не ошибка
+            # Запись могли удалить между Queue и завершением прогона — не ошибка.
+            # Для ручной замены (force) этого не должно случаться — говорим прямо.
+            if force:
+                return web.json_response({"error": "entry not found"}, status=404)
             return web.json_response({"ok": True, "skipped": "no_entry"})
         if target.get("preview") and not force:
             return web.json_response({"ok": True, "skipped": "has_preview"})
-        try:
-            arr = _load_image_file(src)
-        except Exception as exc:
-            return web.json_response({"error": f"image read failed: {exc}"}, status=400)
-        prev = _save_thumbnail(arr, entry_id, target.get("workflow") or None)
-        if not prev:
-            return web.json_response({"error": "thumbnail failed"}, status=500)
+        if preview_data:
+            # Кадр, снятый браузером: первый кадр видео с диска или замена обложки
+            media = media_hint or "image"
+            prev = _save_preview_upload(preview_data, entry_id, target.get("workflow") or None)
+            if not prev:
+                return web.json_response({"error": "preview_data rejected"}, status=400)
+        else:
+            media = media_hint or ("video" if _is_video_file(src) else "image")
+            try:
+                arr = _load_media_frame(src)
+            except Exception as exc:
+                return web.json_response({"error": f"media read failed: {exc}"}, status=400)
+            prev = _save_thumbnail(arr, entry_id, target.get("workflow") or None)
+            if not prev:
+                return web.json_response({"error": "thumbnail failed"}, status=500)
         target["preview"] = prev
-        if not target.get("media"):
-            target["media"] = "image"
+        # Метка типа описывает ТЕКУЩУЮ обложку: заменили видео на картинку —
+        # метка меняется, иначе фильтр «Видео» показывал бы не то.
+        target["media"] = media
         try:
             _save_db(entries, folders)
         except Exception as exc:
@@ -876,9 +956,14 @@ try:
             print(f"[PromptLibrary] duplicate skipped (already in '{dup.get('folder', '') or 'root'}')", flush=True)
             return web.json_response({"ok": True, "id": dup.get("id"), "duplicate": True,
                                       "folder": dup.get("folder", "")})
-        entry_id, created = _add_entry(entries, prompt, folder, title=title)
+        # Тип превью: браузер уже знает, картинку он выбрал или видео (снял кадр),
+        # и передаёт метку — по ней работают 🎬/📷-бейдж и фильтр «Тип».
+        media = str(body.get("media") or "").strip().lower()
+        if media not in ("image", "video"):
+            media = None
+        entry_id, created = _add_entry(entries, prompt, folder, title=title, media=media)
         if created:
-            # Ручное превью с диска (без провода): прикрепляем как PNG 512px
+            # Превью с диска (без провода): прикрепляем как PNG 512px
             prev = _save_preview_upload(body.get("preview_data"), entry_id)
             if prev:
                 for e in entries:
