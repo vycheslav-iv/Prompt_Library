@@ -385,93 +385,6 @@ ComfyUI WebSocket-события; `app.api` (ComfyApi extends EventTarget) ко�
 2. Постраничность списка (по ~20 записей, «дальше/назад»).
 3. Вынести воркфлоу из `library.json` (2.9 МБ / 92 записи, лимит 500).
 
----
-
-# 26. Автообновление Library-нод (v1.21)
-
-## 26.1. Проблема
-
-При двух нодах (Saver — запись, Library — выдача) в одном workflow,
-создание записи через Saver-нод не обновляло Library-нод автоматически.
-Library-нод перечитывал `library.json` только при собственном `execute()`
-(который вызывается при входящем сигнале графа). Без связи «Saver → Library»
-через граф, Library молчал до нажатия «новая генерация».
-
-## 26.2. Решение: broadcast через WebSocket
-
-```text
-Saver execute() → _save_db() → _broadcast_refresh()
-  → PromptServer.instance.send_sync("prompt_library/refresh", {})
-    → WebSocket → все подключённые клиенты
-      → ComfyApi (EventTarget) рассылает CustomEvent(type, {detail})
-        → JS: app.api.addEventListener("prompt_library/refresh", ...)
-          → this._pl.reload() → GET /prompt_library/list → обновлённый UI
-```
-
-## 26.3. Python: `_broadcast_refresh()`
-
-```python
-def _broadcast_refresh():
-    try:
-        from server import PromptServer
-        PromptServer.instance.send_sync("prompt_library/refresh", {})
-    except Exception:
-        pass  # ComfyUI не запущен / тесты — молча игнорируем
-```
-
-Вызывается ТОЛЬКО при `need_broadcast=True` (новая запись создана).
-Не вызывается при backfill workflow/media или смене папки —
-эти изменения не требуют пересоздания записей в Library-нодах.
-
-## 26.4. JS: слушатель в `onNodeCreated`
-
-```js
-const plListener = (ev) => {
-    try { if (this._pl) this._pl.reload(); } catch (e) { /* silent */ }
-};
-app.api.addEventListener("prompt_library/refresh", plListener);
-```
-
-`app.api` — экземпляр `ComfyApi extends EventTarget`. При получении
-WebSocket-сообщения с `type="prompt_library/refresh"`:
-- `this._registered.has("prompt_library/refresh")` → `true` (потому что
-  `addEventListener` добавляет в `_registered`)
-- `super.dispatchEvent(new CustomEvent("prompt_library/refresh", {detail}))`
-- JS-слушатель получает `ev` (CustomEvent), вызывает `reload()`
-
-**Почему не `window.addEventListener`:** ComfyUI WebSocket-сообщения
-рассылаются через `ComfyApi` (EventTarget), а не через `window.dispatchEvent`.
-`window.addEventListener` ловит только DOM-события и никогда не получит
-WebSocket-сообщение от ComfyUI. Мёртвый код — убран.
-
-## 26.5. Флаг `need_broadcast`
-
-```python
-need_broadcast = False
-if not issue and incoming:
-    dup = _find_text_match(entries, incoming)
-    if dup is not None:
-        entry_id, added = dup.get("id"), False
-    else:
-        entry_id, added = _add_entry(...)
-    if added:
-        need_broadcast = True   # ← новая запись!
-        ...
-    elif wf_copy:
-        dirty = True   # backfill — broadcast НЕ нужен
-```
-
-Гарантирует, что broadcast идёт только при реальном добавлении записи.
-
-## 26.6. Потокобезопасность
-
-`send_sync()` вызывает `self.loop.call_soon_threadsafe(messages.put_nowait, ...)`.
-`execute()` работает в worker thread ComfyUI — `call_soon_threadsafe`
-потокобезопасен. Если `PromptServer.instance` недоступен (тесты, ранняя
-загрузка) — `except Exception: pass` молча проглатывает.
-
----
-
 # 18. Sizing DOM-виджета: анализ и решения (2026-09-15)
 
 ## 18.1. Три найденные проблемы и их корни
@@ -1180,3 +1093,90 @@ ComfyUI сохраняет изображение вместе с воркфло
   свой — `stopImmediatePropagation`, чтобы файловый хендлер не сработал).
 - Кнопка «📥 Воркфлоу» в панели книги (видна при `full.workflow`);
   title-подсказки на карточках; без workflow — warn-toast с объяснением.
+
+---
+
+# 26. Автообновление Library-нод (v1.21)
+
+## 26.1. Проблема
+
+При двух нодах (Saver — запись, Library — выдача) в одном workflow,
+создание записи через Saver-нод не обновляло Library-нод автоматически.
+Library-нод перечитывал `library.json` только при собственном `execute()`
+(который вызывается при входящем сигнале графа). Без связи «Saver → Library»
+через граф, Library молчал до нажатия «новая генерация».
+
+## 26.2. Решение: broadcast через WebSocket
+
+```text
+Saver execute() → _save_db() → _broadcast_refresh()
+  → PromptServer.instance.send_sync("prompt_library/refresh", {})
+    → WebSocket → все подключённые клиенты
+      → ComfyApi (EventTarget) рассылает CustomEvent(type, {detail})
+        → JS: app.api.addEventListener("prompt_library/refresh", ...)
+          → this._pl.reload() → GET /prompt_library/list → обновлённый UI
+```
+
+## 26.3. Python: `_broadcast_refresh()`
+
+```python
+def _broadcast_refresh():
+    try:
+        from server import PromptServer
+        PromptServer.instance.send_sync("prompt_library/refresh", {})
+    except Exception:
+        pass  # ComfyUI не запущен / тесты — молча игнорируем
+```
+
+Вызывается ТОЛЬКО при `need_broadcast=True` (новая запись создана).
+Не вызывается при backfill workflow/media или смене папки —
+эти изменения не требуют пересоздания записей в Library-нодах.
+
+## 26.4. JS: слушатель в `onNodeCreated`
+
+```js
+const plListener = (ev) => {
+    try { if (this._pl) this._pl.reload(); } catch (e) { /* silent */ }
+};
+app.api.addEventListener("prompt_library/refresh", plListener);
+```
+
+`app.api` — экземпляр `ComfyApi extends EventTarget`. При получении
+WebSocket-сообщения с `type="prompt_library/refresh"`:
+- `this._registered.has("prompt_library/refresh")` → `true` (потому что
+  `addEventListener` добавляет в `_registered`)
+- `super.dispatchEvent(new CustomEvent("prompt_library/refresh", {detail}))`
+- JS-слушатель получает `ev` (CustomEvent), вызывает `reload()`
+
+**Почему не `window.addEventListener`:** ComfyUI WebSocket-сообщения
+рассылаются через `ComfyApi` (EventTarget), а не через `window.dispatchEvent`.
+`window.addEventListener` ловит только DOM-события и никогда не получит
+WebSocket-сообщение от ComfyUI. Мёртвый код — убран.
+
+## 26.5. Флаг `need_broadcast`
+
+```python
+need_broadcast = False
+if not issue and incoming:
+    dup = _find_text_match(entries, incoming)
+    if dup is not None:
+        entry_id, added = dup.get("id"), False
+    else:
+        entry_id, added = _add_entry(...)
+    if added:
+        need_broadcast = True   # ← новая запись!
+        ...
+    elif wf_copy:
+        dirty = True   # backfill — broadcast НЕ нужен
+```
+
+Гарантирует, что broadcast идёт только при реальном добавлении записи.
+
+## 26.6. Потокобезопасность
+
+`send_sync()` вызывает `self.loop.call_soon_threadsafe(messages.put_nowait, ...)`.
+`execute()` работает в worker thread ComfyUI — `call_soon_threadsafe`
+потокобезопасен. Если `PromptServer.instance` недоступен (тесты, ранняя
+загрузка) — `except Exception: pass` молча проглатывает.
+
+
