@@ -1104,35 +1104,70 @@ await run("preview: замена обложки существующей зап�
 
     st.full.set("e1", { id: "e1", title: "t", folder: "", prompt: "p", media: "video" });
     await st.fillDetail("e1");
+    check("просмотр: кнопка замены СКРЫТА (обложка — содержимое записи, не действие просмотра)",
+      st.bPreview.style.display === "none", String(st.bPreview.style.display));
     check("media=video: подпись кнопки 🎬", String(st.bPreview.textContent).startsWith("🎬"),
       st.bPreview.textContent);
     check("формуляр несёт метку типа", String(st.dMeta.textContent).includes("🎬 видео"),
       st.dMeta.textContent);
 
-    st.full.delete("e1");
     st.full.set("e1", { id: "e1", title: "t", folder: "", prompt: "p", media: "image" });
     await st.fillDetail("e1");
     check("media=image: подпись кнопки 🖼", String(st.bPreview.textContent).startsWith("🖼"),
       st.bPreview.textContent);
 
-    // Файл выбран → кадр снят → force-POST с preview_data и меткой
+    // Возвращаем видео-запись: на ней проверяем отмену и подтверждение
+    st.full.set("e1", { id: "e1", title: "t", folder: "", prompt: "p", media: "video" });
+    await st.fillDetail("e1");
+    st.bEdit.onclick();
+    check("режим ✏️ Редактировать: кнопка замены показана", st.bPreview.style.display === "",
+      String(st.bPreview.style.display));
+
     const fileInput = st.detail.children
       .flatMap((c) => (Array.isArray(c.children) ? c.children : []))
       .find((el) => el.tagName === "INPUT" && el.type === "file" && String(el.accept).includes("video"));
     check("в панели есть скрытый input для картинки/видео", !!fileInput, String(fileInput?.accept));
+    const pickFrame = async (name) => {
+      fileInput.files = [{ name, type: "video/mp4" }];
+      const pending = fileInput.onchange();
+      const vid = madeEls.filter((e) => e.tagName === "VIDEO").pop();
+      vid.onloadeddata?.();
+      vid.onseeked?.();
+      await pending;
+    };
     st.detailId = "e1";
-    fileInput.files = [{ name: "clip.mp4", type: "video/mp4" }];
-    const pending = fileInput.onchange();
-    const vid = madeEls.filter((e) => e.tagName === "VIDEO").pop();
-    vid.onloadeddata?.();
-    vid.onseeked?.();
-    await pending;
+
+    // Отказ в подтверждении — обложка не меняется (замена необратима)
+    const origConfirm = appStub.extensionManager.dialog.confirm;
+    appStub.extensionManager.dialog.confirm = async () => false;
+    try {
+      await pickFrame("clip.mp4");
+      check("отмена подтверждения: POST не уходит", posts.length === 0, JSON.stringify(posts));
+      check("отмена подтверждения: подпись вернулась к текущему типу",
+        String(st.bPreview.textContent).startsWith("🎬"), st.bPreview.textContent);
+    } finally {
+      appStub.extensionManager.dialog.confirm = origConfirm;
+    }
+
+    // Согласие — кадр уходит с force и меткой
+    await pickFrame("clip2.mp4");
     const post = posts.find((p) => p.url.includes("attach_preview"));
     check("замена: POST attach_preview с preview_data + force",
       !!post && post.body.id === "e1" && post.body.force === true
         && post.body.media === "video" && String(post.body.preview_data).startsWith("data:"),
       JSON.stringify(post?.body));
     check("замена: локальная метка кэша превью поставлена", st.previewStamp.has("e1"));
+    check("замена: метка формуляра обновилась", String(st.dMeta.textContent).includes("🎬 видео"),
+      st.dMeta.textContent);
+    check("замена не сбрасывает режим редактирования (несохранённый текст не теряется)",
+      st.bPreview.style.display === "" && st.dText.readOnly === false,
+      `${st.bPreview.style.display} / readOnly=${st.dText.readOnly}`);
+
+    // Выход из редактирования (💾) — кнопка замены снова скрыта
+    st.bSave.onclick();
+    await new Promise((r) => setImmediate(r));
+    check("после 💾 Сохранить кнопка замены скрыта", st.bPreview.style.display === "none",
+      String(st.bPreview.style.display));
   } finally {
     sandbox.fetch = origFetch;
   }

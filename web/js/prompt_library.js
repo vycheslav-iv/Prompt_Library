@@ -455,7 +455,10 @@ app.registerExtension({
             // Замена обложки существующей записи (v1.26): картинка или видео
             // с диска, у видео — первый кадр. Провод и новый прогон не нужны.
             const bPreviewLabel = (media) => (media === "video" ? "🎬 Заменить превью" : "🖼 Заменить превью");
-            const bPreview = mkBtn("🖼 Заменить превью", "Заменить обложку записи: картинка или видео с диска (у видео — первый кадр)");
+            const bPreview = mkBtn("🖼 Заменить превью", "Заменить обложку записи: картинка или видео с диска (у видео — первый кадр). Появляется в режиме редактирования");
+            // Скрыта до ✏️ Редактировать: обложка — содержимое записи, а не действие
+            // просмотра (рядом с 💾, а не с 📋/🗂).
+            bPreview.style.display = "none";
             const dPreviewFile = document.createElement("input");
             dPreviewFile.type = "file";
             dPreviewFile.accept = "image/*,video/*";
@@ -465,6 +468,10 @@ app.registerExtension({
                 const f = (dPreviewFile.files && dPreviewFile.files[0]) || null;
                 if (!f || !st.detailId) return;
                 const id = st.detailId;
+                // Снимок ДО замены: подпись кнопки восстанавливаем по нему
+                // (свежая запись ещё не перечитана, если запрос упал).
+                const cur = st.full.get(id) || {};
+                const restore = () => { bPreview.textContent = bPreviewLabel(cur.media); };
                 bPreview.textContent = "⏳ Читаю файл...";
                 try {
                     const prev = await st.readPreviewFile(f);
@@ -474,9 +481,24 @@ app.registerExtension({
                         st.hintSticky = `Превью не заменено: браузер не смог прочитать «${f.name}».`;
                         st.renderHint?.();
                         bPreview.textContent = "⚠️ Файл не прочитался";
-                        setTimeout(() => { bPreview.textContent = bPreviewLabel((st.full.get(id) || {}).media); }, 1500);
+                        setTimeout(restore, 1500);
                         return;
                     }
+                    // Замена НЕОБРАТИМА: старый файл обложки перезаписывается на месте,
+                    // вернуть его нельзя. Спрашиваем — как перед удалением записи.
+                    let ok = false;
+                    const what = prev.media === "video" ? "первый кадр видео" : "картинка";
+                    try {
+                        ok = await app.extensionManager.dialog.confirm({
+                            title: "Заменить превью",
+                            message: `Обложка записи «${st.dTitle.value || id}» будет перезаписана (${what}). `
+                                + "Вернуть прежнюю обложку нельзя.",
+                        });
+                    } catch (e) {
+                        ok = confirm(`Заменить обложку записи «${st.dTitle.value || id}» (${what})? `
+                            + "Прежняя обложка будет потеряна.");
+                    }
+                    if (!ok) { restore(); return; }
                     const r = await st.apiPost("/prompt_library/attach_preview",
                         { id, preview_data: prev.dataUrl, media: prev.media, force: true });
                     if (!r.ok) {
@@ -484,16 +506,19 @@ app.registerExtension({
                         try { out = await r.json(); } catch (e) { /* silent */ }
                         console.warn("[PromptLibrary] replace preview failed:", r.status, out);
                         bPreview.textContent = `❌ Ошибка ${r.status}`;
-                        setTimeout(() => { bPreview.textContent = bPreviewLabel((st.full.get(id) || {}).media); }, 1500);
+                        setTimeout(restore, 1500);
                         return;
                     }
                     // Тот же URL превью кэшируется по created_at — без локальной
                     // метки карточка показала бы старую обложку
                     st.previewStamp.set(id, Date.now());
-                    st.full.delete(id);
+                    // Режим редактирования НЕ сбрасываем: в полях может быть
+                    // несохранённый текст, а обложка к нему отношения не имеет.
+                    const known = st.full.get(id);
+                    if (known) known.media = prev.media;
+                    st.fillMeta?.(known || { id, media: prev.media });
+                    bPreview.textContent = bPreviewLabel(prev.media);
                     await reload();
-                    await st.fillDetail?.(id);
-                    bPreview.textContent = "✅ Превью заменено";
                     st.hintSticky = prev.media === "video"
                         ? "Обложка заменена: сохранён первый кадр видео, метка 🎬 видео."
                         : "Обложка заменена: метка 📷 фото.";
@@ -501,8 +526,8 @@ app.registerExtension({
                 } catch (err) {
                     console.warn("[PromptLibrary] replace preview error:", err);
                     bPreview.textContent = "❌ Ошибка";
+                    setTimeout(restore, 1500);
                 }
-                setTimeout(() => { bPreview.textContent = bPreviewLabel((st.full.get(id) || {}).media); }, 1500);
             };
             dBtns.appendChild(dPreviewFile);
             dBtns.appendChild(bCopy);
@@ -537,7 +562,7 @@ app.registerExtension({
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
                 pickupRow, pickupSel,
                 bulkCount, bulkDel, bulkClear,
-                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview,
+                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit,
                 entries: [], folders: [], full: new Map(),
                 // Локальная метка «обложка заменена» (v1.26): URL превью кэшируется
                 // по created_at, без метки браузер показал бы старую картинку.
@@ -1833,6 +1858,7 @@ app.registerExtension({
             bEdit.onclick = () => {
                 for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = false;
                 st.bSave.style.display = "";
+                if (st.bPreview) st.bPreview.style.display = "";
                 st.dTitle.focus();
             };
             bSave.onclick = async () => {
@@ -1843,13 +1869,23 @@ app.registerExtension({
                     st.full.delete(st.detailId);
                     for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
                     st.bSave.style.display = "none";
+                    if (st.bPreview) st.bPreview.style.display = "none";
                     await reload();
                 } catch (err) { /* silent */ }
             };
 
-            // Открыть/обновить панель книги по id: одна точка для клика по карточке
-            // и для замены обложки (после неё формуляр и кнопка обязаны обновиться,
-            // иначе метка показала бы старое).
+            // Формуляр панели книги — одна точка: клик по карточке И замена обложки
+            // (после неё меняется только метка типа).
+            st.fillMeta = (full) => {
+                try {
+                    const f = full || {};
+                    const mediaLabel = f.media === "video" ? " · 🎬 видео" : f.media === "image" ? " · 📷 фото" : "";
+                    st.dMeta.textContent = `№ ${f.id} · создана ${f.created_at || "—"} · выдана ${f.last_used || "—"}${mediaLabel}`;
+                } catch (e) { /* silent */ }
+            };
+
+            // Открыть/обновить панель книги по id (режим ПРОСМОТРА: поля только
+            // для чтения, кнопки правки скрыты).
             st.fillDetail = async (id) => {
                 if (!id) return null;
                 try {
@@ -1867,9 +1903,11 @@ app.registerExtension({
                 for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
                 st.bSave.style.display = "none";
                 st.bWorkflow.style.display = full.workflow ? "" : "none";
-                const mediaLabel = full.media === "video" ? " · 🎬 видео" : full.media === "image" ? " · 📷 фото" : "";
-                st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}${mediaLabel}`;
-                if (st.bPreview) st.bPreview.textContent = bPreviewLabel(full.media);
+                st.fillMeta(full);
+                if (st.bPreview) {
+                    st.bPreview.textContent = bPreviewLabel(full.media);
+                    st.bPreview.style.display = "none";
+                }
                 st.panelOpened?.();
                 st.detail.style.display = "flex";
                 st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача» или «📤📥 Выдача + запись».";
