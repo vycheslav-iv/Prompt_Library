@@ -70,7 +70,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.24-one-node";
+const PL_JS_VERSION = "1.24b-one-node";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -783,8 +783,24 @@ app.registerExtension({
             // Наша нода уже отчиталась в этом же событии своим saved_id —
             // значит знаем, какой записи ждать картинку. Кладём её после
             // `execution_success` (когда файл точно записан) через apiPost.
-            st.nodeId = this.id;
+            // ВАЖНО: свой id читаем В МОМЕНТ события, а не кэшируем здесь.
+            // В onNodeCreated id ещё НЕ назначен: конструктор LGraphNode ставит
+            // UNASSIGNED_NODE_ID (-1), реальный id появляется при graph.add/
+            // configure. Кэш "-1" ломал рукопожатие saved_id → обложка не
+            // прикреплялась (живая проверка v1.24).
+            const ownId = () => {
+                try {
+                    const v = this && this.id;
+                    if (v === undefined || v === null || String(v) === "-1") return "";
+                    return String(v);
+                } catch (e) { return ""; }
+            };
+            st.ownId = ownId;
             st.pendingPreview = new Map(); // prompt_id -> { id, image }
+            // prompt_id -> первая картинка прогона. Нужно, если нода стоит ПОСЛЕ
+            // узлов вывода (позиция старого сейвера): тогда saved_id приходит
+            // позже картинок, и без этого запаса обложки бы не было.
+            st.runImages = new Map();
             const PL_PENDING_LIMIT = 20;   // без таймеров: чистим по количеству
             st.rememberPending = (pid, rec) => {
                 try {
@@ -801,12 +817,21 @@ app.registerExtension({
                     const r = await st.apiPost("/prompt_library/attach_preview", {
                         id, filename: image.filename, subfolder: image.subfolder, type: image.type,
                     });
-                    if (r && r.ok) {
-                        let out = {};
-                        try { out = await r.json(); } catch (e) { /* silent */ }
-                        if (out && out.preview) await reload();
+                    let out = {};
+                    try { out = await r.json(); } catch (e) { /* silent */ }
+                    if (!r.ok) {
+                        // Диагностика на живую (F12): сервер не принял файл
+                        console.warn("[PromptLibrary] attach_preview failed:", r.status, out);
+                        return;
                     }
-                } catch (e) { /* silent */ }
+                    if (out && out.skipped) {
+                        console.log("[PromptLibrary] attach_preview skipped:", out.skipped);
+                        return;
+                    }
+                    if (out && out.preview) await reload();
+                } catch (e) {
+                    console.warn("[PromptLibrary] attach_preview error:", e);
+                }
             };
             try {
                 const plExecuted = (ev) => {
@@ -815,22 +840,39 @@ app.registerExtension({
                         if (!d || !d.prompt_id) return;
                         // Нода внутри subgraph приходит с префиксом ("5:12") —
                         // сверяем и по display_node, и по последнему сегменту id.
-                        const mine = String(st.nodeId);
-                        const isMine = [String(d.node || ""), String(d.display_node || "")]
-                            .some((v) => v === mine || v.endsWith(":" + mine));
+                        const mine = ownId();
+                        const isMine = mine !== ""
+                            && [String(d.node || ""), String(d.display_node || "")]
+                                .some((v) => v === mine || v.endsWith(":" + mine));
                         if (isMine) {
-                            // Наша нода сохранила запись — ждём обложку для неё
+                            // Наша нода сохранила запись — ждём обложку для неё.
+                            // Картинка может быть уже в запасе (нода после
+                            // SaveImage) — тогда берём её сразу.
                             const sid = (d.output && d.output.saved_id && d.output.saved_id[0]) || "";
-                            if (sid) st.rememberPending(d.prompt_id, { id: String(sid), image: null });
+                            if (!sid) return;
+                            const prev = st.pendingPreview.get(d.prompt_id);
+                            if (prev && prev.id === String(sid) && prev.image) return;
+                            st.rememberPending(d.prompt_id, {
+                                id: String(sid), image: st.runImages.get(d.prompt_id) || null,
+                            });
                             return;
                         }
-                        const rec = st.pendingPreview.get(d.prompt_id);
-                        if (!rec || rec.image) return;
                         const imgs = d.output && d.output.images;
                         if (!Array.isArray(imgs) || !imgs.length) return;
                         const im = imgs[0] || {};
                         if (!im.filename) return;
-                        rec.image = { filename: im.filename, subfolder: im.subfolder || "", type: im.type || "output" };
+                        const shot = { filename: im.filename, subfolder: im.subfolder || "", type: im.type || "output" };
+                        // Первый файл прогона — в запас (и в ожидание, если оно есть)
+                        if (!st.runImages.has(d.prompt_id)) {
+                            st.runImages.set(d.prompt_id, shot);
+                            while (st.runImages.size > PL_PENDING_LIMIT) {
+                                const first = st.runImages.keys().next().value;
+                                if (first === undefined) break;
+                                st.runImages.delete(first);
+                            }
+                        }
+                        const rec = st.pendingPreview.get(d.prompt_id);
+                        if (rec && !rec.image) rec.image = shot;
                     } catch (e) { /* silent */ }
                 };
                 const plDone = (ev) => {
@@ -839,13 +881,24 @@ app.registerExtension({
                         if (!pid) return;
                         const rec = st.pendingPreview.get(pid);
                         st.pendingPreview.delete(pid);
-                        if (rec && rec.image) st.attachPreview(rec.id, rec.image);
+                        st.runImages.delete(pid);
+                        if (!rec) return;
+                        if (rec.image) {
+                            st.attachPreview(rec.id, rec.image);
+                        } else {
+                            // Прогон без картинок (видео-выход, только текст) —
+                            // обложку не из чего взять, это не ошибка
+                            console.log("[PromptLibrary] cover: прогон без картинок, обложка не прикреплена", rec.id);
+                        }
                     } catch (e) { /* silent */ }
                 };
                 const plFailed = (ev) => {
                     try {
                         const pid = ev && ev.detail && ev.detail.prompt_id;
-                        if (pid) st.pendingPreview.delete(pid);
+                        if (pid) {
+                            st.pendingPreview.delete(pid);
+                            st.runImages.delete(pid);
+                        }
                     } catch (e) { /* silent */ }
                 };
                 app.api.addEventListener("executed", plExecuted);
@@ -1748,6 +1801,7 @@ app.registerExtension({
                     st.apiTarget?.removeEventListener?.(name, fn);
                 }
                 st.pendingPreview?.clear?.();
+                st.runImages?.clear?.();
             } catch (e) { /* silent */ }
             try {
                 if (st?.settingsListener && st.settingsTarget?.removeEventListener) {

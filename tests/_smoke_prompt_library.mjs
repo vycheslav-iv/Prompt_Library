@@ -226,7 +226,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.24-one-node");
+  check(`${tag}: версия JS видна`, st.version === "1.24b-one-node");
 }
 
 // Канвас: панели СЖИМАЮТСЯ (flex 1 1 0 + min-height:0) — тот же clamp, что в Vue.
@@ -612,8 +612,16 @@ await run("folder: префикс __ отклоняется на клиенте"
 // картинку и после `execution_success` зовёт /attach_preview.
 await run("preview: автоподхват обложки из прогона", async () => {
   const node = makeNode();
+  // Живой жизненный цикл: в onNodeCreated id ещё не назначен (LGraphNode
+  // ставит UNASSIGNED_NODE_ID = -1), реальный id приходит при graph.add.
+  // Старый смоук давал id сразу — и был зелёным при сломанном рукопожатии.
+  node.id = -1;
   proto.onNodeCreated.call(node);
   const st = node._pl;
+  check("id в onNodeCreated не назначен — свой id не кэширован как -1",
+    st.ownId() === "", st.ownId());
+  node.id = 12;
+  check("после назначения id ownId читается живьём", st.ownId() === "12", st.ownId());
   check("ожидание подхвата пусто на старте", st.pendingPreview.size === 0);
   const origFetch = sandbox.fetch;
   const posts = [];
@@ -625,10 +633,10 @@ await run("preview: автоподхват обложки из прогона", 
   };
   try {
     // 1. наша нода сохранила запись e9 в прогоне p1
-    apiStub.dispatch("executed", { node: String(st.nodeId), prompt_id: "p1", output: { saved_id: ["e9"] } });
+    apiStub.dispatch("executed", { node: "12", prompt_id: "p1", output: { saved_id: ["e9"] } });
     check("saved_id запомнен", st.pendingPreview.get("p1")?.id === "e9");
     // 2. SaveImage отчитался о файле (тут же прогон)
-    apiStub.dispatch("executed", { node: "12", prompt_id: "p1",
+    apiStub.dispatch("executed", { node: "77", prompt_id: "p1",
       output: { images: [{ filename: "ComfyUI_0001.png", subfolder: "", type: "output" }] } });
     // 3. прогон завершён
     apiStub.dispatch("execution_success", { prompt_id: "p1" });
@@ -642,7 +650,7 @@ await run("preview: автоподхват обложки из прогона", 
 
     // 4. без saved_id (прогон без записи в базу) — ничего не отправляем
     posts.length = 0;
-    apiStub.dispatch("executed", { node: "12", prompt_id: "p2",
+    apiStub.dispatch("executed", { node: "77", prompt_id: "p2",
       output: { images: [{ filename: "x.png", subfolder: "", type: "output" }] } });
     apiStub.dispatch("execution_success", { prompt_id: "p2" });
     await new Promise((r) => setImmediate(r));
@@ -650,7 +658,7 @@ await run("preview: автоподхват обложки из прогона", 
 
     // 5. упавший/прерванный прогон — ожидание снимается, запросов нет
     posts.length = 0;
-    apiStub.dispatch("executed", { node: String(st.nodeId), prompt_id: "p3", output: { saved_id: ["e7"] } });
+    apiStub.dispatch("executed", { node: "12", prompt_id: "p3", output: { saved_id: ["e7"] } });
     apiStub.dispatch("execution_error", { prompt_id: "p3" });
     apiStub.dispatch("execution_success", { prompt_id: "p3" });
     await new Promise((r) => setImmediate(r));
@@ -658,11 +666,11 @@ await run("preview: автоподхват обложки из прогона", 
 
     // 6. нода внутри subgraph: id приходит с префиксом ("5:12")
     posts.length = 0;
-    apiStub.dispatch("executed", { node: "5:" + st.nodeId, display_node: "5:" + st.nodeId,
+    apiStub.dispatch("executed", { node: "5:12", display_node: "5:12",
       prompt_id: "p5", output: { saved_id: ["e6"] } });
     check("subgraph: своя нода узнана по префиксному id", st.pendingPreview.get("p5")?.id === "e6",
       JSON.stringify([...st.pendingPreview.keys()]));
-    apiStub.dispatch("executed", { node: "12", prompt_id: "p5",
+    apiStub.dispatch("executed", { node: "77", prompt_id: "p5",
       output: { images: [{ filename: "sub.png", subfolder: "", type: "output" }] } });
     apiStub.dispatch("execution_success", { prompt_id: "p5" });
     await new Promise((r) => setImmediate(r));
@@ -672,8 +680,8 @@ await run("preview: автоподхват обложки из прогона", 
 
     // 7. картинка не первая — используем первую (стабильно)
     posts.length = 0;
-    apiStub.dispatch("executed", { node: String(st.nodeId), prompt_id: "p4", output: { saved_id: ["e5"] } });
-    apiStub.dispatch("executed", { node: "12", prompt_id: "p4",
+    apiStub.dispatch("executed", { node: "12", prompt_id: "p4", output: { saved_id: ["e5"] } });
+    apiStub.dispatch("executed", { node: "77", prompt_id: "p4",
       output: { images: [{ filename: "a.png", subfolder: "S", type: "temp" }, { filename: "b.png", subfolder: "", type: "output" }] } });
     apiStub.dispatch("execution_success", { prompt_id: "p4" });
     await new Promise((r) => setImmediate(r));
@@ -693,11 +701,14 @@ await run("preview: onRemoved снимает exec-слушатели", async () 
   check("executed/execution_success сняты",
     (apiListeners["executed"] ?? []).length === before - 1
     && !(apiListeners["execution_success"] ?? []).includes(st.execListeners[1][1]));
+  // id уникален именно для этой ноды: в предыдущих фазах уже живут ноды с id 12,
+  // их слушатели не сняты — иначе проверка ловит не эту ноду.
+  node.id = 33;
   let posts = 0;
   const origFetch = sandbox.fetch;
   sandbox.fetch = async (u) => { if (String(u).includes("attach_preview")) posts++; return jsonResponse({}); };
   try {
-    apiStub.dispatch("executed", { node: String(st.nodeId), prompt_id: "p9", output: { saved_id: ["e1"] } });
+    apiStub.dispatch("executed", { node: "33", prompt_id: "p9", output: { saved_id: ["e1"] } });
     apiStub.dispatch("execution_success", { prompt_id: "p9" });
     await new Promise((r) => setImmediate(r));
     check("удалённая нода не дёргает attach_preview", posts === 0 && st.pendingPreview.size === 0);
@@ -720,6 +731,37 @@ await run("mode: три режима — выдающие требуют отк�
   modeW.value = "📤📥 Выдача + запись";
   await modeW.callback(modeW.value);
   check("«Выдача + запись» проверяет кольцо", safeCalls === 2);
+});
+
+await run("preview: нода ПОСЛЕ узлов вывода (позиция старого сейвера)", async () => {
+  const node = makeNode();
+  node.id = -1;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  node.id = 21;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    return jsonResponse({ ok: true, preview: "previews/e3.png" });
+  };
+  try {
+    // 1. Сначала картинки прогона (нода ниже SaveImage, saved_id ещё не пришёл)
+    apiStub.dispatch("executed", { node: "77", prompt_id: "q1",
+      output: { images: [{ filename: "late.png", subfolder: "", type: "output" }] } });
+    check("картинка отложена в запас прогона", st.runImages.get("q1")?.filename === "late.png");
+    // 2. Теперь отчиталась наша нода
+    apiStub.dispatch("executed", { node: "21", prompt_id: "q1", output: { saved_id: ["e3"] } });
+    check("запас подхвачен в ожидание", st.pendingPreview.get("q1")?.image?.filename === "late.png");
+    apiStub.dispatch("execution_success", { prompt_id: "q1" });
+    await new Promise((r) => setImmediate(r));
+    check("обложка прикреплена из запасённой картинки",
+      posts.some((p) => p.url.includes("attach_preview") && p.body.id === "e3" && p.body.filename === "late.png"),
+      JSON.stringify(posts));
+    check("запас прогона очищен", st.runImages.size === 0);
+  } finally { sandbox.fetch = origFetch; }
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
