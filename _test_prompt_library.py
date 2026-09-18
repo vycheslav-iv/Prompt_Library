@@ -485,6 +485,52 @@ try:
 except ImportError:
     check("PIL доступен для теста загрузки", False, "no pillow")
 
+# --- 12. глобальный дубль по тексту --------------------------------------------
+print("\n12. Глобальный дубль (тот же текст в другой папке)")
+r = h("POST", "/prompt_library/add", Req({"prompt": "глобал-текст", "folder": "ПапкаА"}))
+gid = r["json"]["id"]
+check("/add новое создаёт без флага дубля", r["json"].get("duplicate") is False)
+n0 = len(mod._load_db()[0])
+r2 = h("POST", "/prompt_library/add", Req({"prompt": "глобал-текст", "folder": "ПапкаБ"}))
+check("/add тот же текст в другую папку -> duplicate + та же id + папка оригинала",
+      r2["json"].get("duplicate") is True and r2["json"].get("id") == gid
+      and r2["json"].get("folder") == "ПапкаА" and len(mod._load_db()[0]) == n0, str(r2))
+res_d = node.execute(mode=node.MODE_WRITE, selected="", save_folder="ПапкаВ",
+                     source="глобал-текст", image=None, extra_pnginfo=pnginfo, unique_id=7)
+check("execute тот же текст в другую папку -> без новой записи",
+      len(mod._load_db()[0]) == n0)
+check("ui skipped_duplicate несёт id и папку оригинала",
+      res_d["ui"].get("skipped_duplicate", {}).get("id") == gid
+      and res_d["ui"].get("skipped_duplicate", {}).get("folder") == "ПапкаА")
+res_d2 = node.execute(mode=node.MODE_WRITE, selected="", save_folder="ПапкаА",
+                      source="глобал-текст", image=None, extra_pnginfo=pnginfo, unique_id=7)
+check("тот же текст в ту же папку -> тоже skipped",
+      res_d2["ui"].get("skipped_duplicate", {}).get("id") == gid
+      and len(mod._load_db()[0]) == n0)
+res_ok = node.execute(mode=node.MODE_WRITE, selected="", save_folder="ПапкаА",
+                      source="свежий уникальный текст", image=None,
+                      extra_pnginfo=pnginfo, unique_id=7)
+check("уникальный текст сохраняется, skipped_duplicate пуст ({})",
+      res_ok["ui"].get("skipped_duplicate") == {}
+      and any(e["prompt"] == "свежий уникальный текст" for e in mod._load_db()[0]))
+
+
+def _ui_merge_ok(ui):
+    """Регрессия краша Queue: точная копия слияния ui из ComfyUI
+    (execution.py get_output_from_returns) — все значения обязаны быть
+    итерируемыми, иначе 'NoneType' object is not iterable."""
+    try:
+        {k: [y for x in [ui] for y in x[k]] for k in ui.keys()}
+        return True
+    except TypeError:
+        return False
+
+
+res_iss = node.execute(mode=node.MODE_ISSUE, selected=gid, save_folder="", source="",
+                       extra_pnginfo=pnginfo, unique_id=7)
+check("ui-пакеты переживают слияние ComfyUI (запись/дубль/выдача)",
+      _ui_merge_ok(res_d["ui"]) and _ui_merge_ok(res_ok["ui"]) and _ui_merge_ok(res_iss["ui"]))
+
 # --- итог -------------------------------------------------------------------
 print(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
 if fails:

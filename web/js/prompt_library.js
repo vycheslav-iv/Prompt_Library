@@ -55,7 +55,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.18-multiselect";
+const PL_JS_VERSION = "1.20-dup-warn";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -244,6 +244,8 @@ app.registerExtension({
                 inputVisible = !inputVisible;
                 inputArea.style.display = inputVisible ? "flex" : "none";
                 inputToggle.style.background = inputVisible ? "#2c4a73" : "#2a2a2a";
+                if (inputVisible) st.panelOpened?.();
+                else st.shrinkBack?.();
                 // Vue: высоту ноды владеет layout (computeLayoutSize + CSS-цепочка),
                 // подгонять её из JS не нужно и вредно (SPEC §22.9).
                 if (!st._vuePanes) st.syncNodeSize?.();
@@ -267,9 +269,20 @@ app.registerExtension({
                             ...(previewData ? { preview_data: previewData } : {}) }),
                     });
                     if (r.ok) {
+                        let dup = null;
+                        try { dup = await r.json(); } catch (e) { /* silent */ }
                         await reload();
-                        inputSaveBtn.textContent = "✅ Сохранено";
-                        inputText.value = "";
+                        if (dup && dup.duplicate) {
+                            const where = dup.folder || "корне";
+                            inputSaveBtn.textContent = `⚠️ Уже есть в «${where}»`;
+                            try {
+                                st.toast("warn", "Prompt Library: дубликат",
+                                    `Такой промпт уже есть в «${where}» — новая запись не создана.`);
+                            } catch (e) { /* silent */ }
+                        } else {
+                            inputSaveBtn.textContent = "✅ Сохранено";
+                            inputText.value = "";
+                        }
                         attachedFile = null;
                         try { inputFile.value = ""; } catch (e) { /* silent */ }
                         renderAttach();
@@ -306,9 +319,10 @@ app.registerExtension({
 
             const list = document.createElement("div");
             list.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;flex-shrink:0;";
-            // Заголовок списка (пустой, для выравнивания с treeHead)
+            // Заголовок списка: пустой (выравнивание с treeHead), при метках —
+            // bulk-бар. Место уже зарезервировано (22px), раскладка не двигается.
             const listHead = document.createElement("div");
-            listHead.style.cssText = "display:flex;align-items:center;height:22px;";
+            listHead.style.cssText = "display:flex;align-items:center;gap:4px;height:22px;overflow:hidden;white-space:nowrap;";
             list.appendChild(listHead);
             // Контент списка (скроллируемый)
             // flex:1 тянется с нодой, min-height:480px — пол (= старый фикс. размер)
@@ -321,7 +335,9 @@ app.registerExtension({
             main.appendChild(treeBox);
 
             const hint = document.createElement("div");
-            hint.style.cssText = "color:#888;font-size:11px;";
+            // Строго одна строка: рост подсказки отжимал бы место у списка
+            // (схлопывание контента при bulk-баре) — кнопки живут в listHead.
+            hint.style.cssText = "color:#888;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
             hint.textContent = "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
 
             // --- Панель книги: название, полка, полный текст ---
@@ -384,7 +400,7 @@ app.registerExtension({
             root.appendChild(hint);
 
             const st = {
-                root, search, sortSel, viewSel, mediaSel, tree, list: listContent, hint, detail,
+                root, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hint, detail,
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow,
                 entries: [], folders: [], full: new Map(),
                 detailId: null, selFolder: "__all",
@@ -668,6 +684,20 @@ app.registerExtension({
             };
             st.reload = reload;
 
+            // Глобальный слушатель: при сохранении записи на любой ноде
+            // (через _broadcast_refresh → send_sync) все Library-ноды
+            // автоматически перечитывают library.json без запуска Queue.
+            try {
+                const plListener = (ev) => {
+                    try { if (this._pl) this._pl.reload(); } catch (e) { /* silent */ }
+                };
+                if (typeof app.api.addEventListener === "function") {
+                    app.api.addEventListener("prompt_library/refresh", plListener);
+                } else if (window.addEventListener) {
+                    window.addEventListener("prompt_library/refresh", plListener);
+                }
+            } catch (e) { /* silent */ }
+
             // --- Drag & Drop: книги → на категории, категории → в другие категории (или в корень) ---
             st.plDrop = async (d, target) => {
                 if (!d) return;
@@ -813,6 +843,7 @@ app.registerExtension({
                     st.detailId = null;
                     if (selWidget) selWidget.value = "";
                     st.detail.style.display = "none";
+                    st.shrinkBack?.();
                     st.hintMsg = "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
                     renderTree();
                     render();
@@ -1000,7 +1031,7 @@ app.registerExtension({
                             });
                             st.entries = st.entries.filter((x) => x.id !== e.id);
                             st.full.delete(e.id);
-                            if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; }
+                            if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; st.shrinkBack?.(); }
                             renderTree(); render();
                             if (!st._vuePanes) st.syncNodeSize?.();
                         } catch (err) { /* silent */ }
@@ -1033,6 +1064,7 @@ app.registerExtension({
                                 st.bWorkflow.style.display = full.workflow ? "" : "none";
                                 const mediaLabel = full.media === "video" ? " · 🎬 видео" : full.media === "image" ? " · 📷 фото" : "";
                                 st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}${mediaLabel}`;
+                                st.panelOpened?.();
                                 st.detail.style.display = "flex";
                                 st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача».";
                             }
@@ -1140,7 +1172,7 @@ app.registerExtension({
                 } catch (err) { /* silent */ }
                 st.markEntries.clear(); st.markFolders.clear();
                 st.anchorEntry = null; st.anchorFolder = null;
-                if (st.detailId && ids.includes(st.detailId)) { st.detailId = null; st.detail.style.display = "none"; }
+                if (st.detailId && ids.includes(st.detailId)) { st.detailId = null; st.detail.style.display = "none"; st.shrinkBack?.(); }
                 if (selWidget && ids.includes(selWidget.value)) selWidget.value = "";
                 if (paths.some((p) => st.selFolder === p || st.selFolder.startsWith(p + "/"))) {
                     st.selFolder = "__all";
@@ -1176,37 +1208,37 @@ app.registerExtension({
                 inp.onblur = () => finish(true);
                 inp.onclick = (ev) => { if (ev) ev.stopPropagation(); };
             };
-            // Строка-подсказка: шпаргалка по умолчанию, bulk-бар при метках.
-            // Только текст и кнопки — высоту ноды не трогаем (минимум из computeLayoutSize).
+            // Строка-подсказка — всегда только текст в одну строку (hint режет
+            // излишки). Bulk-бар живёт в listHead: там уже зарезервированы 22px,
+            // поэтому появление кнопок не отжимает место у списка/дерева.
             st.renderHint = (shown) => {
-                st.hint.innerHTML = "";
-                const nE = st.markEntries.size, nF = st.markFolders.size;
-                if (nE + nF > 0) {
-                    const parts = [];
-                    if (nE) parts.push(`записей: ${nE}`);
-                    if (nF) parts.push(`категорий: ${nF}`);
-                    const t = document.createElement("span");
-                    t.textContent = `Помечено — ${parts.join(", ")}. `;
-                    const delB = document.createElement("button");
-                    delB.textContent = "🗑 Удалить выбранное";
-                    delB.title = "Удалить помеченные записи и категории";
-                    delB.style.cssText = "background:#5a2b2b;color:#ffd9d9;border:1px solid #a33;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:11px;";
-                    delB.onclick = () => st.bulkDelete?.();
-                    const clrB = document.createElement("button");
-                    clrB.textContent = "✖ Снять выделение";
-                    clrB.title = "Снять все метки (Esc)";
-                    clrB.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:11px;";
-                    clrB.onclick = () => st.clearMarks?.();
-                    st.hint.appendChild(t);
-                    st.hint.appendChild(delB);
-                    st.hint.appendChild(document.createTextNode(" "));
-                    st.hint.appendChild(clrB);
-                } else if (st.detailId) {
-                    st.hint.textContent = st.hintMsg;
-                } else {
+                if (st.detailId) st.hint.textContent = st.hintMsg;
+                else {
                     const base = shown ? `Записей в категории: ${shown}. ` : "Пусто. Запустите Queue или нажмите «Сохранить промпт». ";
                     st.hint.textContent = base + "Клик — открыть · Ctrl/Shift+клик — пометить · пустое место/Esc — снять.";
                 }
+                listHead.innerHTML = "";
+                const nE = st.markEntries.size, nF = st.markFolders.size;
+                if (nE + nF === 0) return;
+                const parts = [];
+                if (nE) parts.push(`записей: ${nE}`);
+                if (nF) parts.push(`категорий: ${nF}`);
+                const t = document.createElement("span");
+                t.textContent = `Помечено — ${parts.join(", ")}. `;
+                t.style.cssText = "color:#e08a3c;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                const delB = document.createElement("button");
+                delB.textContent = "🗑 Удалить";
+                delB.title = "Удалить помеченные записи и категории";
+                delB.style.cssText = "background:#5a2b2b;color:#ffd9d9;border:1px solid #a33;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
+                delB.onclick = () => st.bulkDelete?.();
+                const clrB = document.createElement("button");
+                clrB.textContent = "✖";
+                clrB.title = "Снять все метки (Esc)";
+                clrB.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
+                clrB.onclick = () => st.clearMarks?.();
+                listHead.appendChild(t);
+                listHead.appendChild(delB);
+                listHead.appendChild(clrB);
             };
             // Esc снимает метки (слушатель на корне ноды — срабатывает при фокусе внутри неё).
             // outline:none — tabIndex делает div фокусируемым, без этого браузер
@@ -1224,6 +1256,25 @@ app.registerExtension({
                     if (ev && ev.target === zone && (st.markEntries.size || st.markFolders.size)) st.clearMarks?.();
                 };
             }
+            // Возврат высоты после закрытия панелей (деталка, ручной ввод).
+            // Проблема: syncNodeSize только растит — открыл деталку (нода +280),
+            // закрыл кликом по папке, а высота осталась → пустота внизу.
+            // Решение детерминированное (не замер DOM): открытие запоминает
+            // высоту, закрытие возвращает её. Только canvas — во Vue размером
+            // владеет layout. Ручной ресайз пользователя шире панелей не трогаем
+            // (возвращаем запомненное, а не минимум).
+            st.panelOpened = () => {
+                try { if (!st._vuePanes && st._prePanelH == null) st._prePanelH = this.size[1]; } catch (e) { /* silent */ }
+            };
+            st.shrinkBack = () => {
+                try {
+                    const detailHidden = !detail || detail.style.display === "none";
+                    const inputHidden = !inputVisible;
+                    if (!st._vuePanes && st._prePanelH != null && detailHidden && inputHidden
+                        && this.size[1] > st._prePanelH) this.setSize([this.size[0], st._prePanelH]);
+                    if (detailHidden && inputHidden) st._prePanelH = null;
+                } catch (e) { /* silent */ }
+            };
             st.render = render;
             search.oninput = render;
             sortSel.onchange = render;
@@ -1455,6 +1506,19 @@ app.registerExtension({
                 }
                 if (message?.entries && this._pl) {
                     this._pl.reload?.();
+                }
+                // Дубликат после Queue: такой текст уже есть — предупреждаем где лежит.
+                // Пустой объект {} (нет дубля) — truthy, поэтому проверяем id.
+                const sd = message?.skipped_duplicate;
+                if (sd && sd.id && this._pl) {
+                    const st = this._pl;
+                    const where = sd.folder || "корне";
+                    st.hintMsg = `Дубликат не сохранён — такой промпт уже есть в «${where}».`;
+                    try {
+                        st.toast("warn", "Prompt Library: дубликат",
+                            `Такой промпт уже есть в «${where}» — новая запись не создана.`);
+                    } catch (e) { /* silent */ }
+                    st.renderHint?.();
                 }
             } catch (e) { /* silent */ }
             return ret;

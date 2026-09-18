@@ -202,7 +202,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.18-multiselect");
+  check(`${tag}: версия JS видна`, st.version === "1.20-dup-warn");
 }
 
 // Канвас: пол 480px на панелях (фронтенд сам растёт ноду под контент).
@@ -391,8 +391,10 @@ await run("marks: диапазон + эксклюзив карточки/пап�
   check("эксклюзив: карточка с зажатым модификатором не метится, папки целы",
     st.markEntries.size === 0 && st.markFolders.size === 3);
   st.renderHint(3);
-  check("bulk-бар с кнопкой удаления",
-    st.hint.children.some((c) => c.textContent === "🗑 Удалить выбранное"));
+  check("bulk-бар в listHead (раскладку не двигает)",
+    st.listHead && st.listHead.children.some((c) => c.textContent === "🗑 Удалить"));
+  check("hint остался текстом в одну строку",
+    String(st.hint.style.cssText).includes("nowrap") && typeof st.hint.textContent === "string");
   st.clearMarks();
   check("clearMarks всё снял",
     st.markEntries.size === 0 && st.markFolders.size === 0
@@ -422,6 +424,34 @@ await run("inlineEdit: Enter/Esc/пусто", () => {
   inp3.value = "   ";
   inp3.onkeydown({ key: "Enter", stopPropagation() {} });
   check("пустое не применяется", committed === "sentinel");
+});
+
+// --- Возврат высоты после закрытия панелей (только canvas) ---
+await run("panels: panelOpened/shrinkBack", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  st._vuePanes = false;
+  node.size = [470, 900];
+  st.panelOpened();
+  node.size = [470, 1200]; // панель открылась, нода выросла
+  st.detail.style.display = "flex";
+  st.shrinkBack();
+  check("пока деталка открыта — высоту не трогаем", node.size[1] === 1200);
+  st.detail.style.display = "none";
+  st.shrinkBack();
+  check("после закрытия — вернулись к запомненной", node.size[1] === 900);
+  node.size = [470, 1500]; // ручной ресайз шире запомненного
+  st.panelOpened();
+  st.detail.style.display = "flex";
+  st.detail.style.display = "none";
+  st.shrinkBack();
+  check("ручной ресайз не срезаем ниже запомненного", node.size[1] === 1500);
+  st._vuePanes = true;
+  node.size = [470, 2000];
+  st.detail.style.display = "none";
+  st.shrinkBack();
+  check("во Vue размером владеет layout — не трогаем", node.size[1] === 2000);
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);

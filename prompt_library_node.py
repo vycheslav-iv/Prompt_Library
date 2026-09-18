@@ -136,6 +136,15 @@ def _dedup_hash(prompt, folder):
     return hashlib.md5(f"{prompt}\n{folder}".encode("utf-8")).hexdigest()
 
 
+def _find_text_match(entries, prompt):
+    """Тот же текст уже есть в базе (в любой папке)? Возвращает запись или None.
+    Сравнение по stripped-тексту: входящий уже обрезан, записи хранятся обрезанными."""
+    for e in entries:
+        if isinstance(e.get("prompt"), str) and e.get("prompt").strip() == prompt:
+            return e
+    return None
+
+
 def _new_id(*parts):
     base = "|".join(parts) + datetime.datetime.now().isoformat()
     return hashlib.md5(base.encode("utf-8")).hexdigest()[:10]
@@ -347,6 +356,16 @@ def _media_of(source):
     return "video" if callable(get_comp) else "image"
 
 
+def _broadcast_refresh():
+    """Broadcas't 'prompt_library/refresh' to all connected WebSocket
+    clients so their Library nodes auto-reload the list."""
+    try:
+        from server import PromptServer
+        PromptServer.instance.send_sync("prompt_library/refresh", {})
+    except Exception:
+        pass
+
+
 def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None, media=None):
     h = _dedup_hash(prompt, folder)
     for e in entries:
@@ -449,9 +468,18 @@ class PromptLibrary:
         # самодостаточна, drag на канвас открывает воркфлоу
         wf_copy = _snapshot_workflow(extra_pnginfo)
         fld = _norm_folder(folder)
+        skipped = None
         if not issue and incoming:
+            # Глобальный дубль: тот же текст уже есть в базе (хоть в другой папке) —
+            # не плодим запись с другим превью, а предупреждаем где лежит.
+            dup = _find_text_match(entries, incoming)
             media = _media_of(image)
-            entry_id, added = _add_entry(entries, incoming, fld, workflow=wf_copy, media=media)
+            if dup is not None:
+                skipped = {"folder": dup.get("folder", ""), "id": dup.get("id", "")}
+                print(f"[PromptLibrary] duplicate skipped (already in '{skipped['folder'] or 'root'}')", flush=True)
+                entry_id, added = dup.get("id"), False
+            else:
+                entry_id, added = _add_entry(entries, incoming, fld, workflow=wf_copy, media=media)
             if added:
                 frame = _extract_frame(image) if image is not None else None
                 preview = _save_thumbnail(frame, entry_id, wf_copy) if frame is not None else None
@@ -482,6 +510,7 @@ class PromptLibrary:
         if dirty:
             try:
                 _save_db(entries, folders)
+                _broadcast_refresh()
             except Exception as e:
                 print(f"[PromptLibrary] save failed: {e}", flush=True)
 
@@ -515,7 +544,11 @@ class PromptLibrary:
             }
             for e in entries[:200]
         ]
-        return {"ui": {"entries": ui_entries, "folders": folders, "selected": sel, "text": [display]},
+        # ВАЖНО: все значения ui обязаны быть итерируемыми — ComfyUI
+        # (get_output_from_returns) сливает их перебором; None здесь ронял
+        # Queue с TypeError: 'NoneType' object is not iterable.
+        return {"ui": {"entries": ui_entries, "folders": folders, "selected": sel, "text": [display],
+                        "skipped_duplicate": skipped or {}},
                 "result": (out_text,)}
 
 
@@ -576,6 +609,11 @@ try:
         folder = _norm_folder(body.get("folder", body.get("category", "")))
         title = str(body.get("title", "")).strip()
         entries, folders = _load_db()
+        dup = _find_text_match(entries, prompt)
+        if dup is not None:
+            print(f"[PromptLibrary] duplicate skipped (already in '{dup.get('folder', '') or 'root'}')", flush=True)
+            return web.json_response({"ok": True, "id": dup.get("id"), "duplicate": True,
+                                      "folder": dup.get("folder", "")})
         entry_id, created = _add_entry(entries, prompt, folder, title=title)
         if created:
             # Ручное превью с диска (без провода): прикрепляем как PNG 512px
@@ -589,7 +627,7 @@ try:
             if folder and folder not in folders:
                 folders = sorted(set(folders) | {folder} | set(_parent_folders(folder)))
             _save_db(entries, folders)
-        return web.json_response({"ok": True, "id": entry_id})
+        return web.json_response({"ok": True, "id": entry_id, "duplicate": False})
 
     @routes.post("/prompt_library/favorite")
     async def _pl_favorite(request):
@@ -616,7 +654,7 @@ try:
             if e.get("id") == entry_id:
                 found = True
                 if "prompt" in body and str(body["prompt"]).strip():
-                    e["prompt"] = str(body["prompt"])
+                    e["prompt"] = str(body["prompt"]).strip()
                 if "title" in body:
                     e["title"] = str(body["title"]).strip() or _auto_title(e["prompt"])
                 if "folder" in body or "category" in body:
