@@ -70,7 +70,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.23-panes-fit";
+const PL_JS_VERSION = "1.24-one-node";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -775,6 +775,85 @@ app.registerExtension({
                 st.apiTarget = app.api;
             } catch (e) { /* silent */ }
 
+            // --- Автоподхват обложки из прогона (§29, v1.24) ------------------
+            // Провод IMAGE для обложки больше не нужен (именно он давал кольцо
+            // «prompt_out → CLIP → ... → image → сюда»). Вместо провода берём
+            // файл, который сервер сам рассылает в событии `executed`:
+            //   { node, prompt_id, output: { images: [{filename, subfolder, type}] } }
+            // Наша нода уже отчиталась в этом же событии своим saved_id —
+            // значит знаем, какой записи ждать картинку. Кладём её после
+            // `execution_success` (когда файл точно записан) через apiPost.
+            st.nodeId = this.id;
+            st.pendingPreview = new Map(); // prompt_id -> { id, image }
+            const PL_PENDING_LIMIT = 20;   // без таймеров: чистим по количеству
+            st.rememberPending = (pid, rec) => {
+                try {
+                    st.pendingPreview.set(pid, rec);
+                    while (st.pendingPreview.size > PL_PENDING_LIMIT) {
+                        const first = st.pendingPreview.keys().next().value;
+                        if (first === undefined) break;
+                        st.pendingPreview.delete(first);
+                    }
+                } catch (e) { /* silent */ }
+            };
+            st.attachPreview = async (id, image) => {
+                try {
+                    const r = await st.apiPost("/prompt_library/attach_preview", {
+                        id, filename: image.filename, subfolder: image.subfolder, type: image.type,
+                    });
+                    if (r && r.ok) {
+                        let out = {};
+                        try { out = await r.json(); } catch (e) { /* silent */ }
+                        if (out && out.preview) await reload();
+                    }
+                } catch (e) { /* silent */ }
+            };
+            try {
+                const plExecuted = (ev) => {
+                    try {
+                        const d = ev && ev.detail;
+                        if (!d || !d.prompt_id) return;
+                        if (String(d.node) === String(st.nodeId)) {
+                            // Наша нода сохранила запись — ждём обложку для неё
+                            const sid = (d.output && d.output.saved_id && d.output.saved_id[0]) || "";
+                            if (sid) st.rememberPending(d.prompt_id, { id: String(sid), image: null });
+                            return;
+                        }
+                        const rec = st.pendingPreview.get(d.prompt_id);
+                        if (!rec || rec.image) return;
+                        const imgs = d.output && d.output.images;
+                        if (!Array.isArray(imgs) || !imgs.length) return;
+                        const im = imgs[0] || {};
+                        if (!im.filename) return;
+                        rec.image = { filename: im.filename, subfolder: im.subfolder || "", type: im.type || "output" };
+                    } catch (e) { /* silent */ }
+                };
+                const plDone = (ev) => {
+                    try {
+                        const pid = ev && ev.detail && ev.detail.prompt_id;
+                        if (!pid) return;
+                        const rec = st.pendingPreview.get(pid);
+                        st.pendingPreview.delete(pid);
+                        if (rec && rec.image) st.attachPreview(rec.id, rec.image);
+                    } catch (e) { /* silent */ }
+                };
+                const plFailed = (ev) => {
+                    try {
+                        const pid = ev && ev.detail && ev.detail.prompt_id;
+                        if (pid) st.pendingPreview.delete(pid);
+                    } catch (e) { /* silent */ }
+                };
+                app.api.addEventListener("executed", plExecuted);
+                app.api.addEventListener("execution_success", plDone);
+                app.api.addEventListener("execution_error", plFailed);
+                app.api.addEventListener("execution_interrupted", plFailed);
+                st.execListeners = [
+                    ["executed", plExecuted], ["execution_success", plDone],
+                    ["execution_error", plFailed], ["execution_interrupted", plFailed],
+                ];
+                st.apiTarget = app.api;
+            } catch (e) { /* silent */ }
+
             // --- Drag & Drop: книги → на категории, категории → в другие категории (или в корень) ---
             st.plDrop = async (d, target) => {
                 if (!d) return;
@@ -1138,7 +1217,7 @@ app.registerExtension({
                                 st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}${mediaLabel}`;
                                 st.panelOpened?.();
                                 st.detail.style.display = "flex";
-                                st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача».";
+                                st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача» или «📤📥 Выдача + запись».";
                                 st.hintSticky = null;
                             }
                         } catch (err) { /* silent */ }
@@ -1450,7 +1529,7 @@ app.registerExtension({
                         let ok = false;
                         try {
                             ok = await app.extensionManager.dialog.confirm({
-                                title: "Режим «📤 Выдача»",
+                                title: "Режим выдачи",
                                 message: "IMAGE-провод вместе с выходом в CLIP создаст цикл и Queue упадёт. Отключить IMAGE-провод?",
                             });
                         } catch (e) {
@@ -1470,7 +1549,9 @@ app.registerExtension({
             const modeW = this.widgets?.find((w) => w.name === "mode");
             if (modeW) {
                 modeW.callback = async (val) => {
-                    if (val === "📤 Выдача") {
+                    // Оба выдающих режима (v1.24) несут текст в CLIP — кольцо
+                    // с IMAGE-проводом нужно предупредить до Queue.
+                    if (val === "📤 Выдача" || val === "📤📥 Выдача + запись") {
                         const ok = await st.ensureIssueSafe();
                         if (!ok) {
                             modeW.value = "📥 Запись";
@@ -1555,6 +1636,12 @@ app.registerExtension({
                 }
                 // Дубликат после Queue: такой текст уже есть — предупреждаем где лежит.
                 // Пустой объект {} (нет дубля) — truthy, поэтому проверяем id.
+                // Подсказка о неочевидном выходе (совместимость: «Запись» с проводом)
+                const notice = message?.mode_notice && message.mode_notice[0];
+                if (notice && this._pl) {
+                    this._pl.hintSticky = String(notice);
+                    this._pl.renderHint?.();
+                }
                 const sd = message?.skipped_duplicate;
                 if (sd && sd.id && this._pl) {
                     const st = this._pl;
@@ -1652,6 +1739,10 @@ app.registerExtension({
                 if (st?.apiListener && st.apiTarget?.removeEventListener) {
                     st.apiTarget.removeEventListener("prompt_library/refresh", st.apiListener);
                 }
+                for (const [name, fn] of (st?.execListeners || [])) {
+                    st.apiTarget?.removeEventListener?.(name, fn);
+                }
+                st.pendingPreview?.clear?.();
             } catch (e) { /* silent */ }
             try {
                 if (st?.settingsListener && st.settingsTarget?.removeEventListener) {

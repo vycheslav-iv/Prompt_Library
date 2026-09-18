@@ -130,7 +130,7 @@ const apiStub = {
     const i = arr.indexOf(cb);
     if (i >= 0) arr.splice(i, 1);
   },
-  dispatch(type) { for (const cb of [...(apiListeners[type] ?? [])]) cb({ type, detail: {} }); },
+  dispatch(type, detail) { for (const cb of [...(apiListeners[type] ?? [])]) cb({ type, detail: detail || {} }); },
 };
 
 const appStub = {
@@ -226,7 +226,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.23-panes-fit");
+  check(`${tag}: версия JS видна`, st.version === "1.24-one-node");
 }
 
 // Канвас: панели СЖИМАЮТСЯ (flex 1 1 0 + min-height:0) — тот же clamp, что в Vue.
@@ -604,6 +604,108 @@ await run("folder: префикс __ отклоняется на клиенте"
     check("запрос на сервер не ушёл", posts === 0, `posts=${posts}`);
     check("пользователь предупреждён", toasts === 1, `toasts=${toasts}`);
   } finally { sandbox.fetch = origFetch; sandbox.prompt = origPrompt; }
+});
+
+// --- v1.24: автоподхват обложки из прогона (без IMAGE-провода) ---
+// Механика: сервер рассылает `executed` с файлами созданных картинок
+// ({filename, subfolder, type}) — JS ждёт saved_id от нашей ноды, берёт первую
+// картинку и после `execution_success` зовёт /attach_preview.
+await run("preview: автоподхват обложки из прогона", async () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  check("ожидание подхвата пусто на старте", st.pendingPreview.size === 0);
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    return jsonResponse({ ok: true, preview: "previews/e9.png" });
+  };
+  try {
+    // 1. наша нода сохранила запись e9 в прогоне p1
+    apiStub.dispatch("executed", { node: String(st.nodeId), prompt_id: "p1", output: { saved_id: ["e9"] } });
+    check("saved_id запомнен", st.pendingPreview.get("p1")?.id === "e9");
+    // 2. SaveImage отчитался о файле (тут же прогон)
+    apiStub.dispatch("executed", { node: "12", prompt_id: "p1",
+      output: { images: [{ filename: "ComfyUI_0001.png", subfolder: "", type: "output" }] } });
+    // 3. прогон завершён
+    apiStub.dispatch("execution_success", { prompt_id: "p1" });
+    await new Promise((r) => setImmediate(r));
+    const post = posts.find((p) => p.url.includes("/prompt_library/attach_preview"));
+    check("attach_preview вызван", !!post, JSON.stringify(posts.map((p) => p.url)));
+    check("payload: запись + файл прогона",
+      post && post.body.id === "e9" && post.body.filename === "ComfyUI_0001.png" && post.body.type === "output",
+      JSON.stringify(post?.body));
+    check("ожидание очищено после успеха", st.pendingPreview.size === 0);
+
+    // 4. без saved_id (прогон без записи в базу) — ничего не отправляем
+    posts.length = 0;
+    apiStub.dispatch("executed", { node: "12", prompt_id: "p2",
+      output: { images: [{ filename: "x.png", subfolder: "", type: "output" }] } });
+    apiStub.dispatch("execution_success", { prompt_id: "p2" });
+    await new Promise((r) => setImmediate(r));
+    check("без записи в базу обложка не прикрепляется", posts.length === 0, JSON.stringify(posts));
+
+    // 5. упавший/прерванный прогон — ожидание снимается, запросов нет
+    posts.length = 0;
+    apiStub.dispatch("executed", { node: String(st.nodeId), prompt_id: "p3", output: { saved_id: ["e7"] } });
+    apiStub.dispatch("execution_error", { prompt_id: "p3" });
+    apiStub.dispatch("execution_success", { prompt_id: "p3" });
+    await new Promise((r) => setImmediate(r));
+    check("ошибка прогона чистит ожидание", st.pendingPreview.size === 0 && posts.length === 0);
+
+    // 6. картинка не первая — используем первую (стабильно)
+    posts.length = 0;
+    apiStub.dispatch("executed", { node: String(st.nodeId), prompt_id: "p4", output: { saved_id: ["e5"] } });
+    apiStub.dispatch("executed", { node: "12", prompt_id: "p4",
+      output: { images: [{ filename: "a.png", subfolder: "S", type: "temp" }, { filename: "b.png", subfolder: "", type: "output" }] } });
+    apiStub.dispatch("execution_success", { prompt_id: "p4" });
+    await new Promise((r) => setImmediate(r));
+    const p4 = posts.find((p) => p.url.includes("/prompt_library/attach_preview"));
+    check("берётся первый файл прогона (temp → output не путается)",
+      p4 && p4.body.filename === "a.png" && p4.body.subfolder === "S" && p4.body.type === "temp",
+      JSON.stringify(p4?.body));
+  } finally { sandbox.fetch = origFetch; }
+});
+
+await run("preview: onRemoved снимает exec-слушатели", async () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const before = (apiListeners["executed"] ?? []).length;
+  proto.onRemoved.call(node);
+  check("executed/execution_success сняты",
+    (apiListeners["executed"] ?? []).length === before - 1
+    && !(apiListeners["execution_success"] ?? []).includes(st.execListeners[1][1]));
+  let posts = 0;
+  const origFetch = sandbox.fetch;
+  sandbox.fetch = async (u) => { if (String(u).includes("attach_preview")) posts++; return jsonResponse({}); };
+  try {
+    apiStub.dispatch("executed", { node: String(st.nodeId), prompt_id: "p9", output: { saved_id: ["e1"] } });
+    apiStub.dispatch("execution_success", { prompt_id: "p9" });
+    await new Promise((r) => setImmediate(r));
+    check("удалённая нода не дёргает attach_preview", posts === 0 && st.pendingPreview.size === 0);
+  } finally { sandbox.fetch = origFetch; }
+});
+
+await run("mode: три режима — выдающие требуют отключить IMAGE-провод", async () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  let safeCalls = 0;
+  st.ensureIssueSafe = async () => { safeCalls++; return true; };
+  modeW.value = "📥 Запись";
+  await modeW.callback(modeW.value);
+  check("«Запись» не трогает провод", safeCalls === 0);
+  modeW.value = "📤 Выдача";
+  await modeW.callback(modeW.value);
+  check("«Выдача» проверяет кольцо", safeCalls === 1);
+  modeW.value = "📤📥 Выдача + запись";
+  await modeW.callback(modeW.value);
+  check("«Выдача + запись» проверяет кольцо", safeCalls === 2);
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);

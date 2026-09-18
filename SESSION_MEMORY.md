@@ -16,12 +16,21 @@
   панели теперь сжимаются; кнопки массового удаления вернулись в нижнюю строку. SPEC §28.
 - **Тесты перенесены в `Prompt_Library/tests/`** (правило AGENTS.md §1.1: в каждом
   проекте своя папка `tests/`, в корне проекта их больше нет; sync.py их не копирует).
+- **v1.24 (§29): одна нода вместо двух.** Третий режим «📤📥 Выдача + запись»;
+  обложка сохранённой записи подтягивается ИЗ ПРОГОНА (файл из output/temp по
+  событию `executed`) — IMAGE-провод больше не обязателен, кольца в графе нет.
+  Совместимость: «Запись» с уже подключённым выходом отдаёт текст сквозь + подсказка.
 - Коммиты `17a1794` (v1.22+v1.23) и этот — запушены в `origin master`.
   Тесты 133/133, смоук 53/53, аудит чист.
 
 ## 2. Итоговое состояние кода
 
 - `prompt_library_node.py`
+  - `MODE_WRITE / MODE_ISSUE / MODE_BOTH`; `execute()` → `issue/both/save_on`,
+    `_output_linked(extra_pnginfo, unique_id)` → авто-сквозь для старых графов,
+    `preview_target` → `ui.saved_id`, `ui.mode_notice`
+  - `_load_image_file()` (декадер, подменяется в тестах) + `_resolve_output_file()`
+    (output/temp/input с защитой от traversal) + роут `/prompt_library/attach_preview`
   - `_broadcast_refresh()` вызывается в `execute()` (только `added=True`) и во ВСЕХ
     мутирующих роутах: `/add`, `/favorite`, `/update`, `/delete`, `/delete_many`,
     `/folder_create`, `/folder_rename`, `/folder_delete*` (§26.7)
@@ -29,7 +38,12 @@
     `/folder_create` и `/folder_rename` → 400 на `__`-имя
   - `_find_text_match()` — глобальный дубль; бэкфилл превью у найденной записи
   - `_snapshot_workflow()` — только в ветке записи
-- `web/js/prompt_library.js` — `PL_JS_VERSION = "1.23-panes-fit"`
+- `web/js/prompt_library.js` — `PL_JS_VERSION = "1.24-one-node"`
+  - `st.pendingPreview` (Map prompt_id → {id, image}) + слушатели `executed` /
+    `execution_success` / `execution_error` / `execution_interrupted` →
+    `st.attachPreview()` → POST `/prompt_library/attach_preview` + `reload()`
+  - `st.execListeners` снимаются в `onRemoved`; в `modeW.callback` оба выдающих
+    режима идут через `ensureIssueSafe()`
   - `applyPaneLayout()` (~L603): ОБЕ ветки — `tree`/`listContent` `flex:1 1 0` + `min-height:0`,
     `main` `1 1 0` + `min-height:0` + `overflow:hidden`; разница режимов ровно одна:
     в Vue `main`+`detail` живут в `scrollArea`, в канвасе — прямые дети `root`
@@ -39,9 +53,10 @@
   - `onRemoved` — снимает WS-слушатель, settings-слушатель, убирает ноду из `plLiveStates`
   - `computeLayoutSize` → `{minHeight: st.minH(), minWidth: MIN_W}`; `BASE_H=596`,
     `DETAIL_H=280`, `INPUT_H=170`
-- `tests/_test_prompt_library.py` — 133 проверки (§13 broadcast, §14 `__`, §15 бэкфилл)
-- `tests/_smoke_prompt_library.mjs` — 53 фазы (в т.ч. broadcast→reload, снятие слушателя,
-  сжатие панелей, bulk-бар внизу)
+- `tests/_test_prompt_library.py` — 173 проверки (§13 broadcast, §14 `__`, §15 бэкфилл,
+  §16 три режима + `_output_linked`, §17 `attach_preview` + `_resolve_output_file`)
+- `tests/_smoke_prompt_library.mjs` — 56 фаз (в т.ч. broadcast→reload, снятие слушателя,
+  сжатие панелей, bulk-бар внизу, автоподхват обложки, три режима)
 - `tests/_audit_prompt_library.mjs` — 12 роутов JS↔Python, 66 обращений `st.*`, локали, PNG-патч
 - Все три — в `Prompt_Library/tests/` (AGENTS.md §1.1), пути внутри — от файла
   (`Path(__file__).parent.parent`, `new URL("..", import.meta.url)`), запуск из папки проекта

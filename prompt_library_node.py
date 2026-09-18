@@ -2,8 +2,14 @@
 
 Проводник: папки/подпапки (путь "Фото/Портреты"), имена записей, превью.
 Хранение: ComfyUI/user/prompt_library/library.json + previews/.
-Режимы execute: запись (сквозной выход + автосейв) / выдача (текст выбранной
-записи). См. SPECIFICATION.md.
+Режимы execute (v1.24 — одна нода на оба дела):
+  📥 Запись             — только сохранение, выход пуст (совместимость: если
+                          prompt_out уже подключён проводом, текст идёт сквозь)
+  📤 Выдача             — только выдача текста выбранной записи
+  📤📥 Выдача + запись  — выдаёт и сохраняет
+Обложка сохранённой записи подтягивается ПОСЛЕ прогона (файл из output/temp
+по событию `executed`), поэтому IMAGE-провод не нужен и кольцо в графе
+невозможно. См. SPECIFICATION.md.
 """
 
 import datetime
@@ -364,6 +370,71 @@ def _media_of(source):
     return "video" if callable(get_comp) else "image"
 
 
+def _output_linked(extra_pnginfo, unique_id):
+    """Есть ли провод из prompt_out этой ноды (по сериализованному графу).
+
+    Нужно для совместимости: до v1.24 режим «Запись» был сквозным — ноду
+    ставили в разрыв перед CLIP и архивировали каждый прогон. Теперь «Запись»
+    молчит, но если провод уже есть — ведём себя как раньше (и говорим об этом).
+    Читаем только workflow JSON из extra_pnginfo, живые ссылки LiteGraph не трогаем.
+    """
+    try:
+        wf = (extra_pnginfo or {}).get("workflow") or {}
+        for nd in wf.get("nodes", []) or []:
+            if str(nd.get("id")) != str(unique_id):
+                continue
+            outs = nd.get("outputs") or []
+            if not outs:
+                return False
+            first = outs[0] or {}
+            links = first.get("links")
+            if isinstance(links, (list, tuple)):
+                return len(links) > 0
+            return first.get("link") is not None
+    except Exception:
+        pass
+    return False
+
+
+def _load_image_file(path):
+    """Прочитать картинку с диска в RGB-массив (обложка из прогона).
+
+    Отдельная функция, чтобы песочница без PIL/numpy могла подменить декодер
+    и проверять логику роута отдельно от декодирования.
+    """
+    from PIL import Image
+    import numpy as np
+    with Image.open(str(path)) as im:
+        return np.asarray(im.convert("RGB"))
+
+
+def _resolve_output_file(filename, subfolder, kind):
+    """Найти файл прогона в output/input/temp, не выходя за пределы папки.
+
+    JS присылает `{filename, subfolder, type}` из события `executed` — ровно то,
+    что сервер отдаёт для SaveImage/PreviewImage. Защита от traversal: имя +
+    подпапка склеиваются, приводятся к realpath и проверяются на вложенность
+    в базовую директорию типа.
+    """
+    try:
+        import folder_paths  # type: ignore
+        base = folder_paths.get_directory_by_type(kind or "output")
+        if not base:
+            base = folder_paths.get_output_directory()
+    except Exception:
+        return None
+    try:
+        base = os.path.realpath(str(base))
+        cand = os.path.realpath(os.path.join(base, subfolder or "", filename))
+        if os.path.commonpath([base, cand]) != base:
+            return None
+        if not os.path.isfile(cand):
+            return None
+        return Path(cand)
+    except Exception:
+        return None
+
+
 def _broadcast_refresh():
     """Broadcast 'prompt_library/refresh' to all connected WebSocket
     clients so their Library nodes auto-reload the list. Вызывается и из
@@ -404,12 +475,15 @@ class PromptLibrary:
 
     MODE_WRITE = "📥 Запись"
     MODE_ISSUE = "📤 Выдача"
+    # v1.24: третий режим — выдать и сохранить в один прогон (раньше это
+    # требовало двух нод из-за кольца IMAGE-провода).
+    MODE_BOTH = "📤📥 Выдача + запись"
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mode": ([cls.MODE_WRITE, cls.MODE_ISSUE], {"default": cls.MODE_WRITE}),
+                "mode": ([cls.MODE_WRITE, cls.MODE_ISSUE, cls.MODE_BOTH], {"default": cls.MODE_WRITE}),
                 "selected": ("STRING", {"multiline": False, "default": ""}),
                 "save_folder": ("STRING", {"multiline": False, "default": ""}),
             },
@@ -449,7 +523,16 @@ class PromptLibrary:
                 mode = self.MODE_ISSUE
             else:
                 mode = self.MODE_WRITE
+        # v1.24: три режима — «Запись» (только сохраняет), «Выдача» (только
+        # выдаёт), «Выдача + запись» (и то и другое в одном прогоне).
         issue = (mode == self.MODE_ISSUE)
+        both = (mode == self.MODE_BOTH)
+        save_on = (mode == self.MODE_WRITE) or both
+        # Совместимость: раньше «Запись» была сквозной (её ставили в разрыв
+        # перед CLIP и архивировали каждый прогон) — если у выхода уже есть
+        # провод, продолжаем пропускать текст сквозь и говорим об этом в UI.
+        # Смотрим сериализованный граф, а не живые ссылки LiteGraph.
+        out_linked = _output_linked(extra_pnginfo, unique_id)
         entries, folders = _load_db()
 
         # Входящий текст: провод source.
@@ -460,10 +543,15 @@ class PromptLibrary:
         display = incoming
 
         # 1. Исходящий текст (выдача книги с полки — фиксируем дату)
+        #  • Выдача / Выдача+запись — текст выбранной записи (иначе входящий);
+        #  • Запись — пусто, чтобы нода-сейвер ничего не выдавала дальше
+        #    (кроме случая провода на выходе, см. out_linked выше).
         out_text = incoming
+        if mode == self.MODE_WRITE and not out_linked:
+            out_text = ""
         sel = (selected or "").strip()
         dirty = False
-        if issue and sel:
+        if (issue or both) and sel:
             for e in entries:
                 if e.get("id") == sel:
                     out_text = e.get("prompt", "")
@@ -471,11 +559,13 @@ class PromptLibrary:
                     dirty = True
                     break
 
-        # 2. Автосохранение входящего промпта в папку из виджета (только в режиме записи)
+        # 2. Автосохранение входящего промпта в папку из виджета
+        #    (в режимах «Запись» и «Выдача + запись»)
         fld = _storage_folder(folder)
         need_broadcast = False
         skipped = None
-        if not issue and incoming:
+        preview_target = ""  # запись, которой стоит прикрепить обложку из прогона
+        if save_on and incoming:
             # Снапшот воркфлоу — в запись и в PNG-превью (как SaveImage): карточка
             # самодостаточна, drag на канвас открывает воркфлоу. Считаем его только
             # здесь: в режиме выдачи и без входящего текста он не нужен — иначе
@@ -500,6 +590,9 @@ class PromptLibrary:
                         if e.get("id") == entry_id:
                             e["preview"] = preview
                             break
+                # Обложки нет (провода тоже нет) — подтянем картинку ЭТОГО
+                # прогона после его окончания (JS -> attach_preview, §29).
+                preview_target = entry_id
                 dirty = True  # новая запись — сохраняем всегда
             else:
                 # Backfill существующей записи (дубль по тексту или тот же hash):
@@ -520,6 +613,9 @@ class PromptLibrary:
                         if prev:
                             e["preview"] = prev
                             dirty = True
+                    if not e.get("preview"):
+                        # Старая/ручная запись без обложки — возьмём картинку прогона
+                        preview_target = entry_id
                     break
             if fld and fld not in folders:
                 folders.append(fld)
@@ -548,6 +644,13 @@ class PromptLibrary:
             except Exception:
                 pass
 
+        # Подсказка о неочевидном поведении выхода (совместимость со старыми
+        # графами, где «Запись» стояла в разрыв перед CLIP).
+        notice = ""
+        if mode == self.MODE_WRITE and out_linked:
+            notice = ("Режим «Запись»: провод от выхода подключён — текст идёт сквозь, "
+                      "как раньше. Отключите провод, чтобы нода только сохраняла.")
+
         # 4. Лёгкий UI-пакет (без полных текстов — только заголовки, полный текст по клику)
         ui_entries = [
             {
@@ -567,8 +670,13 @@ class PromptLibrary:
         # ВАЖНО: все значения ui обязаны быть итерируемыми — ComfyUI
         # (get_output_from_returns) сливает их перебором; None здесь ронял
         # Queue с TypeError: 'NoneType' object is not iterable.
+        # saved_id — запись, которой стоит прикрепить обложку из этого прогона
+        # (JS ждёт `executed` с картинками и зовёт /attach_preview после успеха).
+        # mode_notice — подсказка в нижней строке ноды.
         return {"ui": {"entries": ui_entries, "folders": folders, "selected": sel, "text": [display],
-                        "skipped_duplicate": skipped or {}},
+                        "skipped_duplicate": skipped or {},
+                        "saved_id": [preview_target] if preview_target else [],
+                        "mode_notice": [notice]},
                 "result": (out_text,)}
 
 
@@ -593,6 +701,55 @@ try:
         c = {k: v for k, v in e.items() if k != "workflow"}
         c["has_workflow"] = bool(e.get("workflow"))
         return c
+
+    @routes.post("/prompt_library/attach_preview")
+    async def _pl_attach_preview(request):
+        """Обложка записи из файла прогона (автоподхват, v1.24).
+
+        Провода IMAGE для этого не нужно: после Queue клиент присылает то, что
+        сервер сам рассылает в событии `executed` — {filename, subfolder, type}
+        созданного файла. Файл берём из output/temp, делаем 512px PNG и
+        встраиваем workflow (он уже есть в записи). Уже готовое превью не
+        перетираем (только с force=true).
+        """
+        body = await _req_body(request)
+        entry_id = str(body.get("id") or "").strip()
+        filename = str(body.get("filename") or "").strip()
+        subfolder = str(body.get("subfolder") or "").strip()
+        kind = str(body.get("type") or "output").strip() or "output"
+        force = bool(body.get("force"))
+        if not entry_id or not filename:
+            return web.json_response({"error": "id and filename required"}, status=400)
+        src = _resolve_output_file(filename, subfolder, kind)
+        if src is None:
+            return web.json_response({"error": "file not found"}, status=404)
+        entries, folders = _load_db()
+        target = None
+        for e in entries:
+            if e.get("id") == entry_id:
+                target = e
+                break
+        if target is None:
+            # Запись могли удалить между Queue и завершением прогона — не ошибка
+            return web.json_response({"ok": True, "skipped": "no_entry"})
+        if target.get("preview") and not force:
+            return web.json_response({"ok": True, "skipped": "has_preview"})
+        try:
+            arr = _load_image_file(src)
+        except Exception as exc:
+            return web.json_response({"error": f"image read failed: {exc}"}, status=400)
+        prev = _save_thumbnail(arr, entry_id, target.get("workflow") or None)
+        if not prev:
+            return web.json_response({"error": "thumbnail failed"}, status=500)
+        target["preview"] = prev
+        if not target.get("media"):
+            target["media"] = "image"
+        try:
+            _save_db(entries, folders)
+        except Exception as exc:
+            return web.json_response({"error": f"save failed: {exc}"}, status=500)
+        _broadcast_refresh()
+        return web.json_response({"ok": True, "preview": prev})
 
     @routes.get("/prompt_library/list")
     async def _pl_list(request):

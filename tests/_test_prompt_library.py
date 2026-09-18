@@ -2,11 +2,12 @@
 
 Песочница: `folder_paths` подменяется на временную папку, `server`/`aiohttp` —
 заглушки, поэтому регистрируются все HTTP-роуты и их можно вызвать напрямую.
-Запуск: python _test_prompt_library.py   (из корня бандла)
+Запуск: cd Prompt_Library && python tests/_test_prompt_library.py
 """
 import asyncio
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -32,6 +33,16 @@ user_dir.mkdir(parents=True)
 
 folder_paths = types.ModuleType("folder_paths")
 folder_paths.get_user_directory = lambda: str(user_dir)
+# Папки прогонов для attach_preview (§17): output/temp/input внутри песочницы
+out_dir = TMP / "out"
+temp_dir = TMP / "tmp"
+in_dir = TMP / "in"
+for _d in (out_dir, temp_dir, in_dir):
+    _d.mkdir(parents=True, exist_ok=True)
+_DIRS_BY_TYPE = {"output": str(out_dir), "temp": str(temp_dir), "input": str(in_dir)}
+folder_paths.get_directory_by_type = lambda kind: _DIRS_BY_TYPE.get(kind)
+folder_paths.get_output_directory = lambda: str(out_dir)
+folder_paths.get_temp_directory = lambda: str(temp_dir)
 sys.modules["folder_paths"] = folder_paths
 
 handlers = {}
@@ -166,7 +177,10 @@ pnginfo = {"workflow": workflow}
 res = node.execute(mode=node.MODE_WRITE, selected="", save_folder="Фото",
                    source="  Портрет девушки  ", image=None,
                    extra_pnginfo=pnginfo, unique_id=7)
-check("возврат — результат + ui", res["result"] == ("Портрет девушки",) and "ui" in res)
+# v1.24: «Запись» — только сохранение, выход пуст (сквозной проход остался
+# только для старых графов с проводом — §16)
+check("«Запись»: выход пуст + ui на месте", res["result"] == ("",) and "ui" in res,
+      str(res["result"]))
 check("входной текст обрезан", res["ui"]["text"] == ["Портрет девушки"])
 check("PNG-патч записал widgets_values позиционно",
       workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото"],
@@ -658,6 +672,167 @@ try:
           len(_thumb_calls) == 1, str(_thumb_calls))
 finally:
     mod._save_thumbnail = _orig_thumb
+
+# --- 16. три режима одной ноды (v1.24) ---------------------------------------
+print("\n16. Режимы одной ноды: Запись / Выдача / Выдача+запись")
+node2 = mod.PromptLibrary()
+
+
+def _entry(text):
+    return next((e for e in mod._load_db()[0] if e.get("prompt") == text), None)
+
+
+res_w = node2.execute(mode=node2.MODE_WRITE, selected="", save_folder="Режимы",
+                      source="режим-запись-1", extra_pnginfo=None, unique_id=1)
+e_w = _entry("режим-запись-1")
+check("« Запись » сохраняет входящий", e_w is not None)
+check("« Запись » выход пустой", res_w["result"] == ("",), str(res_w["result"]))
+check("« Запись » saved_id — запись для обложки",
+      res_w["ui"]["saved_id"] == [e_w["id"]], str(res_w["ui"]["saved_id"]))
+check("« Запись » без провода — нет подсказки", res_w["ui"]["mode_notice"] == [""],
+      str(res_w["ui"]["mode_notice"]))
+
+# Совместимость: старый граф держит провод prompt_out в разрыв перед CLIP
+png_linked = {"workflow": {"nodes": [{"id": 5, "outputs": [{"links": [11]}]}]}}
+res_wl = node2.execute(mode=node2.MODE_WRITE, selected="", save_folder="Режимы",
+                       source="режим-запись-2", extra_pnginfo=png_linked, unique_id=5)
+check("« Запись » + провод: текст идёт сквозь (совместимость)",
+      res_wl["result"] == ("режим-запись-2",), str(res_wl["result"]))
+check("« Запись » + провод: подсказка в UI",
+      "сквозь" in (res_wl["ui"]["mode_notice"][0] or ""), str(res_wl["ui"]["mode_notice"]))
+
+png_empty = {"workflow": {"nodes": [{"id": 5, "outputs": [{"links": []}]}]}}
+res_we = node2.execute(mode=node2.MODE_WRITE, selected="", save_folder="Режимы",
+                       source="режим-запись-3", extra_pnginfo=png_empty, unique_id=5)
+check("« Запись » с пустым links: выход пуст", res_we["result"] == ("",), str(res_we["result"]))
+png_other = {"workflow": {"nodes": [{"id": 5, "outputs": [{"links": [11]}]}, {"id": 9, "outputs": [{}]}]}}
+res_wo = node2.execute(mode=node2.MODE_WRITE, selected="", save_folder="Режимы",
+                       source="режим-запись-4", extra_pnginfo=png_other, unique_id=6)
+check("_output_linked ищет именно свою ноду",
+      res_wo["result"] == ("",) and mod._output_linked(png_other, 9) is False)
+
+# Выдача: только выдаёт, ничего не сохраняет
+res_i = node2.execute(mode=node2.MODE_ISSUE, selected=e_w["id"], save_folder="Режимы",
+                       source="режим-выдача-входящий", extra_pnginfo=None, unique_id=1)
+check("« Выдача » выдаёт текст выбранной записи",
+      res_i["result"] == ("режим-запись-1",), str(res_i["result"]))
+check("« Выдача » ничего не сохраняет", _entry("режим-выдача-входящий") is None)
+check("« Выдача » saved_id пуст (обложка не нужна)", res_i["ui"]["saved_id"] == [],
+      str(res_i["ui"]["saved_id"]))
+
+# Выдача + запись: и выдаёт, и сохраняет входящий
+res_b = node2.execute(mode=node2.MODE_BOTH, selected=e_w["id"], save_folder="Режимы",
+                      source="режим-оба-1", extra_pnginfo=None, unique_id=1)
+e_b = _entry("режим-оба-1")
+check("« Выдача + запись » выдаёт выбранную запись",
+      res_b["result"] == ("режим-запись-1",), str(res_b["result"]))
+check("« Выдача + запись » сохраняет входящий", e_b is not None)
+check("« Выдача + запись » saved_id на новую запись",
+      res_b["ui"]["saved_id"] == [e_b["id"]], str(res_b["ui"]["saved_id"]))
+check("« Выдача + запись » папка из виджета", e_b["folder"] == "Режимы", str(e_b["folder"]))
+res_b2 = node2.execute(mode=node2.MODE_BOTH, selected="", save_folder="Режимы",
+                       source="режим-оба-2", extra_pnginfo=None, unique_id=1)
+check("« Выдача + запись » без выбора выдаёт входящий",
+      res_b2["result"] == ("режим-оба-2",), str(res_b2["result"]))
+check("« Выдача + запись » без выбора тоже сохраняет", _entry("режим-оба-2") is not None)
+# Дубль по тексту: saved_id пуст ТОЛЬКО если у записи уже есть превью
+_bcast_before = len(_broadcasts)
+res_dup = node2.execute(mode=node2.MODE_BOTH, selected="", save_folder="Режимы",
+                        source="режим-оба-2", extra_pnginfo=None, unique_id=1)
+check("повторный прогон: записи не плодятся",
+      len([e for e in mod._load_db()[0] if e["prompt"] == "режим-оба-2"]) == 1)
+check("повторный прогон: обложку для существующей записи ждём",
+      res_dup["ui"]["saved_id"] == [e_b2_id] if (e_b2_id := _entry("режим-оба-2")["id"]) else False,
+      str(res_dup["ui"]["saved_id"]))
+check("повторный прогон без новой записи — без broadcast",
+      len(_broadcasts) == _bcast_before, str(_broadcasts[-2:]))
+
+# mode=[] (старые графы) не должен падать
+res_old = node2.execute(mode="", selected="", save_folder="Режимы", source="режим-старый",
+                        extra_pnginfo=None, unique_id=1)
+check("старый вызов без mode = «Запись»",
+      res_old["result"] == ("",) and _entry("режим-старый") is not None)
+
+# --- 17. attach_preview: обложка из файла прогона ----------------------------
+print("\n17. Автоподхват обложки: /attach_preview + _resolve_output_file")
+(out_dir / "sub").mkdir(parents=True, exist_ok=True)
+(out_dir / "a.png").write_bytes(b"x")
+(out_dir / "sub" / "b.png").write_bytes(b"x")
+(temp_dir / "t.png").write_bytes(b"x")
+(TMP / "secret.png").write_bytes(b"x")
+
+
+def _rp(p):
+    return os.path.realpath(str(p)) if p is not None else None
+
+
+check("_resolve_output_file: файл в output",
+      _rp(mod._resolve_output_file("a.png", "", "output")) == _rp(out_dir / "a.png"))
+check("_resolve_output_file: подпапка",
+      _rp(mod._resolve_output_file("b.png", "sub", "output")) == _rp(out_dir / "sub" / "b.png"))
+check("_resolve_output_file: temp-тип",
+      _rp(mod._resolve_output_file("t.png", "", "temp")) == _rp(temp_dir / "t.png"))
+check("_resolve_output_file: '../' в имени отклонён",
+      mod._resolve_output_file("../secret.png", "", "output") is None)
+check("_resolve_output_file: '../' в subfolder отклонён",
+      mod._resolve_output_file("secret.png", "..", "output") is None)
+check("_resolve_output_file: абсолютный путь отклонён",
+      mod._resolve_output_file(str(TMP / "secret.png"), "", "output") is None)
+check("_resolve_output_file: нет файла -> None",
+      mod._resolve_output_file("nope.png", "", "output") is None)
+check("_resolve_output_file: неизвестный type -> output",
+      _rp(mod._resolve_output_file("a.png", "", "wat")) == _rp(out_dir / "a.png"))
+
+_orig_thumb2 = mod._save_thumbnail
+_orig_loader = mod._load_image_file
+_thumb2 = []
+
+
+def _thumb_stub2(img, entry_id, workflow=None):
+    _thumb2.append(entry_id)
+    return f"previews/{entry_id}.png"
+
+
+mod._save_thumbnail = _thumb_stub2
+mod._load_image_file = lambda p: object()  # декодер: в песочнице нет PIL/numpy
+try:
+    h("POST", "/prompt_library/add", Req({"prompt": "обложка-прогона", "folder": "Режимы"}))
+    eid = _entry("обложка-прогона")["id"]
+    _broadcasts.clear()
+    r_ok = h("POST", "/prompt_library/attach_preview",
+             Req({"id": eid, "filename": "a.png", "subfolder": "", "type": "output"}))
+    check("attach_preview: 200 + путь превью",
+          r_ok["status"] == 200 and r_ok["json"]["preview"] == f"previews/{eid}.png", str(r_ok))
+    check("attach_preview: превью в базе", _entry("обложка-прогона")["preview"] == f"previews/{eid}.png")
+    check("attach_preview: media проставлен", _entry("обложка-прогона").get("media") == "image")
+    check("attach_preview: broadcast разослан об изменении",
+          "prompt_library/refresh" in _broadcasts, str(_broadcasts))
+    r_dup2 = h("POST", "/prompt_library/attach_preview",
+               Req({"id": eid, "filename": "a.png", "subfolder": "", "type": "output"}))
+    check("attach_preview: готовое превью не перетирается",
+          r_dup2["status"] == 200 and r_dup2["json"].get("skipped") == "has_preview", str(r_dup2))
+    _thumb2.clear()
+    r_force = h("POST", "/prompt_library/attach_preview",
+                Req({"id": eid, "filename": "b.png", "subfolder": "sub", "type": "output", "force": True}))
+    check("attach_preview: force перетирает",
+          r_force["status"] == 200 and _thumb2 == [eid], str(_thumb2))
+    r_missing = h("POST", "/prompt_library/attach_preview",
+                  Req({"id": eid, "filename": "nope.png", "subfolder": "", "type": "output"}))
+    check("attach_preview: файла нет -> 404", r_missing["status"] == 404, str(r_missing))
+    r_trav = h("POST", "/prompt_library/attach_preview",
+               Req({"id": eid, "filename": "../secret.png", "subfolder": "", "type": "output"}))
+    check("attach_preview: traversal -> 404", r_trav["status"] == 404, str(r_trav))
+    r_bad = h("POST", "/prompt_library/attach_preview", Req({"id": "", "filename": ""}))
+    check("attach_preview: без id/filename -> 400", r_bad["status"] == 400, str(r_bad))
+    r_gone = h("POST", "/prompt_library/attach_preview",
+               Req({"id": "нет-такой", "filename": "a.png", "subfolder": "", "type": "output"}))
+    check("attach_preview: удалённая запись — не ошибка",
+          r_gone["status"] == 200 and r_gone["json"].get("skipped") == "no_entry", str(r_gone))
+    r_terr = h("POST", "/prompt_library/attach_preview", Req({"id": eid, "filename": "a.png"}))
+    check("attach_preview: пустой type по умолчанию output", r_terr["status"] == 200, str(r_terr))
+finally:
+    mod._save_thumbnail = _orig_thumb2
+    mod._load_image_file = _orig_loader
 
 # --- итог -------------------------------------------------------------------
 print(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
