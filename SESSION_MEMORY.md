@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (2026-09-17, v1.15 + тесты + скилы)
+# Память сессии — Prompt Library (2026-09-18, v1.16 + видео-сокет + скилл)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,55 +7,49 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- Закоммичили и запушили v1.15: Vue-фиксы §22.10 + аудит §25.2 (`292ceb3`).
-- Создали скилл `comfyui-node-testing` — шаблоны Python-песочницы, JS-смоук-теста,
-  статического аудита для тестирования нод без ComfyUI.
-- Создали скилл `comfyui-frontend-sources` — шлюз: где исходники фронтенда
-  (`.map` → `sourcesContent`), когда читать перед CSS/правками.
-- Расширили AGENTS.md: §5 (типичные проблемы + sizing + «НЕ ДЕЛАЙ» из §20 SPEC),
-  §4.1 (правило «читай исходники перед sizing»), таблица скилов.
-- Перенесли тесты из `tests/` (корень) → `Prompt_Library/` (рядом с кодом).
-  Каждый репозиторий теперь автономен: клонировал — получил и код, и тесты.
-- Обновили SPECIFICATION.md §25.1 (тесты теперь в папке ноды).
+- v1.16: вход `image` → `IMAGE,VIDEO` (двухцветный сокет, синий+зелёный провода); `_extract_frame()` разворачивает `VideoInput` в первый кадр; `_save_thumbnail()` закалён (батч/список/uint8/grayscale). Закоммичено и запушено (`d270d46`).
+- Создали скилл `comfyui-video-socket` (3 папки: `.opencode` + `.kilo` + `.agents`), строка в `AGENTS.md` §3.
+- SPECIFICATION.md обновлена до v1.16 (§5, §15, §17).
+- Обсудили авто-метку `media` (video/image) — следующий шаг, ещё не реализована.
 
 ## 2. Итоговое состояние кода
 
-- `web/js/prompt_library.js:52` — `PL_JS_VERSION = "1.15-vue-floor480"`
-- `_test_prompt_library.py` — 66 проверок Python (в папке ноды)
-- `_smoke_prompt_library.mjs` — 45 фаз JS (в папке ноды)
-- `_audit_prompt_library.mjs` — статический аудит (в папке ноды)
-- `SPECIFICATION.md` — v1.15, §25.1 обновлена (тесты в папке ноды)
+- `prompt_library_node.py:189` — `_extract_frame()` (VideoInput → первый кадр)
+- `prompt_library_node.py:211` — `_save_thumbnail()` (батч/список/uint8/grayscale)
+- `prompt_library_node.py:359` — `INPUT_TYPES`: `image: ("IMAGE,VIDEO", {})`
+- `prompt_library_node.py:422` — `execute()`: `frame = _extract_frame(image)`
+- `_test_prompt_library.py` — 66 проверок, тест сокета `IMAGE,VIDEO`
+- `SPECIFICATION.md` — v1.16
+- Скилл: `.opencode/.kilo/.agents/skills/comfyui-video-socket/SKILL.md` (идентичны)
 
-## 3. Новые скилы (корень бандла)
+## 3. Проблемы, которые встречались (и как решали)
 
-- `.agents/skills/comfyui-node-testing/SKILL.md` — шаблоны тестов (Python sandbox,
-  JS smoke с DOM-заглушками, статический аудит). Запуск: `cd <NodeName> && python/node`.
-- `.agents/skills/comfyui-frontend-sources/SKILL.md` — шлюз перед CSS/JS-sizing:
-  где `.map` файлы, как извлекать TS/Vue, что grep'ать.
+- Зелёный VIDEO-провод не втыкался в синий IMAGE-вход — разные типы ядра. Решение: мульти-тип через запятую (`IMAGE,VIDEO`, как `FLOAT,INT` в `node_typing.py`), фронт рисует двухцветный сокет. `*` не использовать (ядро предупреждает: ломает рероуты).
+- Системный Python без numpy/torch — видео-проверки гнали на встроенном Python ComfyUI (`python_embeded/python.exe`) + стаб `FakeVideo`.
 
 ## 4. Что важно не сломать при продолжении работы
 
 - **Canvas-ветку `applyPaneLayout` и `computeLayoutSize`** — проверены живьём
 - Порядок INPUT_TYPES `[mode, selected, save_folder]`; `widget.serialize = false` свойством
+- Сокет `image` — connector-only, в `widgets_values` не входит; JS `dropAutoSockets` по имени — не трогать
 - Не возвращать `autoFitHeight`/`calibrateFloor`/`_vueFloor`
 - Не перезаписывать `this.computeSize` на ноде
 - Синк: `python sync.py Prompt_Library` → `D:\ComfyUI_windows_portable\...` → **Ctrl+F5**
+- Дедупликация `(prompt, folder)` — поле `media` в неё НЕ входит (решено)
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-1. **Вынести воркфлоу из `library.json`** (главный риск §25.3): `workflows/{id}.json`
-   или SQLite; сейчас 2.9 МБ / 92 записи (6 воркфлоу = 1.72 МБ), лимит — 500 записей
-2. Разбить на две ноды: **Prompt Library** + **Prompt Saver**
-3. Постраничность списка (~20 записей)
-4. Создать `_test_*/_smoke_*/_audit_*` для Degg_Switch или другой ноды
+1. **Авто-метка `media`** (принято, делать первым): `video`/`image`/`null` в `_add_entry` (источник известен в `execute`); бейдж 🎬/🖼 на карточке + фильтр Все/Фото/Видео в тулбаре; старые записи без поля → unknown без бейджа; бэкфилл по workflow НЕ делать (хрупко)
+2. Вынести воркфлоу из `library.json` (2.9 МБ / 92 записи, лимит 500)
+3. Разбить на две ноды: **Prompt Library** + **Prompt Saver**
+4. Постраничность списка (~20 записей)
 
 ## 6. Связанные файлы
 
-- `web/js/prompt_library.js` — нода (JS-расширение, v1.15)
-- `prompt_library_node.py` — Python-нода
-- `_test_prompt_library.py` — Python-тест (66 проверок, в папке ноды)
-- `_smoke_prompt_library.mjs` — JS-смоук (45 фаз, в папке ноды)
-- `_audit_prompt_library.mjs` — аудит связности (в папке ноды)
-- `SPECIFICATION.md` — §22.9-11 (Vue), §25 (аудит + тесты)
-- `.agents/skills/comfyui-node-testing/` — скилл тестирования нод
-- `.agents/skills/comfyui-frontend-sources/` — скилл чтения исходников фронтенда
+- `web/js/prompt_library.js` — нода (JS-расширение, без изменений в v1.16)
+- `prompt_library_node.py` — Python-нода (сокет + extract + thumbnail)
+- `_test_prompt_library.py` — Python-тест (66 проверок)
+- `_smoke_prompt_library.mjs` — JS-смоук (45 фаз)
+- `_audit_prompt_library.mjs` — аудит связности
+- `SPECIFICATION.md` — v1.16 (§5, §15, §17)
+- Скилл `comfyui-video-socket` в корне бандла (3 папки)
