@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (2026-09-18, v1.25)
+# Память сессии — Prompt Library (2026-09-19, v1.26)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md` (полная документация).
@@ -7,6 +7,18 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
+- **v1.26 (§31): вся медиа-обложка — без провода.** Три жалобы пользователя:
+  «1) не сохраняет видео превью; 2) нельзя добавить превью из видео для ручного
+  промпта; 3) нельзя заменить превью существующей записи».
+  Корень №1: видео-прогон файл ОТДАЁТ (ядро кладёт видео в то же `images`,
+  `PreviewVideo.as_dict()` → `images` + `animated`; VHS-подобные ноды — в
+  `video`/`gifs`), но сервер декодировал файл через PIL, а PIL медиаконтейнер не
+  открывает → `400 media read failed`, снаружи выглядело как «видео не сохраняется».
+  Решено: `_load_video_frame()` через **PyAV** (штатная зависимость ComfyUI, им же
+  пользуется `SaveVideo`) + чтение трёх пулов в JS + `preview_data` в
+  `/attach_preview` (кадр снимает БРАУЗЕР: файл с диска серверу не виден) +
+  кнопка `🖼/🎬 Заменить превью` в панели книги + `media` теперь описывает текущую
+  обложку. Маркер JS: `1.26-media`.
 - **v1.24 (§29): одна нода вместо двух.** Третий режим «📤📥 Выдача + запись»;
   обложка сохранённой записи подтягивается ИЗ ПРОГОНА (файл из output/temp по
   событию `executed`) — IMAGE-провод больше не обязателен, кольца в графе нет.
@@ -22,7 +34,7 @@
   (`ComfyUI\user\default\workflows\Krea2_MY2.json`) — цикл найден в графе (2 Library-ноды:
   `1904` Выдача → `PreviewAny → Promt в LLM → … → 1622 Итоговый Promt → 1750 → 1903 Запись`;
   цикл появился, когда финальный текст подали НА ВХОД той же ноды).
-- Тесты: Python 194/194, смоук 61/61, аудит чист.
+- Тесты: Python 213/213, смоук 64/64, аудит чист (до v1.26 было 194/61).
 - **Добита спецификация v1.25** (сессия прервалась на этом): §3 (роут `save_pickup`),
   §5 (`pickup` в таблице входов + третий режим), §6 (выход в трёх режимах), §7
   (псевдокод `execute()` переписан: `out_linked`, `_pickup_stash`, PNG-патч 4 позиции),
@@ -47,16 +59,31 @@
     при `pickup` входящий текст НЕ сохраняется (+ `mode_notice`), вместо сохранения
     `_pickup_stash(node, folder, workflow)` → токен в `_PICKUP` (лимит 20, без таймеров)
     → `ui.pickup` + `ui.pickup_node`; PNG-патч `[mode, selected, save_folder, pickup]`
+  - **v1.26:** `_VIDEO_EXT`/`_is_video_file()` (по расширению), `_load_video_frame()`
+    (PyAV, первый кадр, лениво), `_load_media_frame()` (PIL → при ошибке PyAV);
+    `_save_preview_upload(data_url, entry_id, workflow=None)` — теперь встраивает
+    воркфлоу в PNG
   - `_load_image_file()` (декадер, подменяется в тестах) + `_resolve_output_file()`
     (output/temp/input с защитой от traversal)
   - роуты: `/prompt_library/save_pickup` (v1.25, токен одноразовый: нет токена → 400,
-    пустой текст → `skipped: "empty"`, дубль → `duplicate: true`) и
-    `/prompt_library/attach_preview` (v1.24)
+    пустой текст → `skipped: "empty"`, дубль → `duplicate: true`);
+    `/prompt_library/attach_preview` (v1.24 + v1.26: два источника — файл прогона
+    ИЛИ `preview_data`; `media` (hint важнее расширения) и `force`; без обоих
+    источников → 400, ручная замена у удалённой записи → 404, авто-подхват →
+    `skipped: no_entry`); `/add` принимает `media` (`image`/`video`, мусор → None)
   - `_broadcast_refresh()` — в `execute()` (только `added=True`) и во ВСЕХ
     мутирующих роутах (§26.7)
   - `_storage_folder()` — нормализация папки + `__*` → корень; `_find_text_match()` —
     глобальный дубль; `_snapshot_workflow()` — в ветке записи и в подхвате
-- `web/js/prompt_library.js` — `PL_JS_VERSION = "1.25-pickup"`
+- `web/js/prompt_library.js` — `PL_JS_VERSION = "1.26-media"`
+  - **v1.26:** `st.readPreviewFile(file)` (картинка — canvas-даунскейл 512px; видео —
+    первый кадр через `<video>`+canvas, `media` в ответе; один одноразовый
+    `setTimeout`-предохранитель вместо наблюдателей); пулы файлов прогона
+    `images → video → gifs`; ручное превью принимает `image/*,video/*` (+ миниатюра
+    `<img>`/`<video>`); `st.fillDetail(id)` (общая точка панели книги: клик по
+    карточке И обновление после замены), `st.bPreview` + скрытый `dPreviewFile`
+    (замена обложки: `preview_data` + `media` + `force: true`), `st.previewStamp`
+    (локальный `&r=` к URL превью — без него браузер показывает старую картинку)
   - **v1.25:** `pickupRow` (первый ребёнок `root`, 22px, `flex-shrink:0`) с
     `pickupSel`; `st.pickupWidget/pickupNode/setPickup/pickupCandidates/
     refreshPickupOptions` (кандидаты — STRING-выход или строковый виджет; своя нода,
@@ -72,13 +99,18 @@
   - `st.apiPost()` — единая точка мутаций (POST → `plRefreshLocal()` у соседних нод)
   - `computeLayoutSize` → `{minHeight: st.minH(), minWidth: MIN_W}`; `BASE_H=624` (v1.25),
     `DETAIL_H=280`, `INPUT_H=170`
-- `tests/_test_prompt_library.py` — 194 проверки (§16 три режима, §17 `attach_preview`,
-  §18 подхват: токен/стэш/роут/дубль/лимит; `_p()` — печать без падения на cp1251)
-- `tests/_smoke_prompt_library.mjs` — 61 фаза (в т.ч. id=-1 → назначение, subgraph-id,
-  позиция после узлов вывода, три фазы подхвата, bulk-бар, три режима)
+- `tests/_test_prompt_library.py` — 213 проверок (§16 три режима, §17 `attach_preview`,
+  §18 подхват: токен/стэш/роут/дубль/лимит, §19 медиа: снифф расширений, видео
+  через PyAV, `preview_data`/`force`/404, воркфлоу в новом превью, `media` из `/add`;
+  `_p()` — печать без падения на cp1251)
+- `tests/_smoke_prompt_library.mjs` — 64 фазы (в т.ч. id=-1 → назначение, subgraph-id,
+  позиция после узлов вывода, три фазы подхвата, bulk-бар, три режима, три фазы
+  v1.26: пулы `images`/`video`/`gifs`, кадр из файла, кнопка замены). В заглушке
+  DOM теперь есть `madeEls`-реестр и `drawImage` — иначе кадры не проверить
 - `tests/_audit_prompt_library.mjs` — роуты JS↔Python, `st.*`, локали, PNG-патч
 - Все три — в `Prompt_Library/tests/` (AGENTS.md §1.1), пути от файла, запуск из папки проекта
-- `SPECIFICATION.md` — **v1.25**: §30 (подхват), §29 (одна нода), §28 (пол на панелях)
+- `SPECIFICATION.md` — **v1.26**: §31 (медиа-обложка), §30 (подхват), §29 (одна нода),
+  §28 (пол на панелях)
 
 ## 3. Проблемы, которые встречались (и как решали)
 
@@ -95,6 +127,12 @@
 - **Кнопки массового удаления обрезались** — счётчик без `flex`/`min-width:0`
   выдавливал кнопки; строка `hintRow` фиксирована, кнопки `flex-shrink:0`.
 - **Вечный repaint канваса** — `checkCycle` в `onDrawForeground` дёргал `setDirtyCanvas`.
+- **«Видео-превью не сохраняется»** (живая жалоба) — файл прогона был на месте,
+  но сервер звал PIL (`_load_image_file`), а PIL не открывает mp4/webm: ошибка видна
+  только в F12 (`attach_preview failed: 400 media read failed`). Лечится PyAV (§31).
+- **Замена обложки не видна в карточке** — URL превью кэшируется по `t=created_at`,
+  который при замене не меняется → браузер отдаёт старую картинку. Лечится локальной
+  меткой `st.previewStamp` (`&r=`), §31.2.
 - **Python-консоль Windows:** кириллица в тестах выглядит мусором; падение
   `UnicodeEncodeError` на emoji в `extra` лечится `_p()` (encode с `replace`).
 
@@ -114,6 +152,13 @@
 - Не задавать legacy `computeSize`; не возвращать `autoFitHeight`/`_vueFloor`.
 - Broadcast — `send_sync` + `app.api.addEventListener` (НЕ `window`); из новых роутов не забывать.
 - Подхват: не тостить дубль (срабатывает на КАЖДЫЙ Queue) — только `hintSticky` + F12.
+- **PIL ≠ медиа.** Любой «файл прогона» может быть видео: сначала PIL, при ошибке
+  PyAV; не терять три пула (`images`/`video`/`gifs`) — иначе видео-прогон молча без обложки.
+- **`media` описывает ТЕКУЩУЮ обложку** и обновляется вместе с ней (заменили видео на
+  фото — метка меняется), иначе фильтр «Тип» и 🎬/📷-бейдж врут.
+- Обложка записи = ОДИН PNG 512px (файл видео в базу не копируется); новый кадр
+  обязан нести вшитый воркфлоу (`_save_preview_upload(..., workflow=)`).
+- Не удалять «лишний» `previewStamp` — без него заменённая обложка не появится в UI.
 - **Тесты — только в `NodeName/tests/`** (AGENTS.md §1.1); `sync.py` их не копирует.
 - Синк: `python sync.py Prompt_Library` из корня бандла → рестарт ComfyUI + Ctrl+F5.
   `SPECIFICATION.md`/`README.md`/`tests/`/`SESSION_MEMORY*` sync.py НЕ копирует.
@@ -121,24 +166,31 @@
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-1. **Живая проверка v1.25** — рестарт + Ctrl+F5, маркер `v1.25-pickup`; нода в режиме
-   «📤 Выдача» + поле «📎 Текст в базу» = «Итоговый Prompt» → Queue: запись с обложкой,
-   кольца нет. Диагностика при сбое — строки `[PromptLibrary] pickup: …` в F12.
-2. **Живая проверка v1.24** (если ещё не проходила): режимы, обложка без IMAGE-провода,
+1. **Живая проверка v1.26** — рестарт + Ctrl+F5, маркер `v1.26-media`:
+   (а) прогон с видео-выходом → запись с обложкой-первым кадром;
+   (б) `➕ Добавить промпт` + `📷 Прикрепить превью` с mp4 → запись с меткой 🎬;
+   (в) панель книги → `🖼 Заменить превью` картинкой и видео → обложка и метка меняются
+   (важно проверить именно СМЕНУ картинки в карточке — кэш `&r=`);
+   диагностика — `[PromptLibrary] media read failed / replace preview failed` в F12.
+2. **Живая проверка v1.25** — маркер `v1.25-pickup`; режим «📤 Выдача» +
+   «📎 Текст в базу» = «Итоговый Prompt» → Queue: запись с обложкой, кольца нет.
+3. **Живая проверка v1.24** (если ещё не проходила): режимы, обложка без IMAGE-провода,
    старый граф с Saver.
-3. Постраничность списка (~20 записей).
-4. Вынести воркфлоу из `library.json` (растёт; `MAX_ENTRIES` 500, обрезка → сироты превью).
-5. Открытое из §27.3: `threading.Lock` на read-modify-write; `/update` без проверки
+4. Постраничность списка (~20 записей).
+5. Вынести воркфлоу из `library.json` (растёт; `MAX_ENTRIES` 500, обрезка → сироты превью).
+6. Открытое из §27.3: `threading.Lock` на read-modify-write; `/update` без проверки
    глобального дубля; записи без `media` видны только во «Всё».
-6. Возможное расширение подхвата: перечислять и узлы внутри subgraph (сейчас только
+7. Возможное расширение подхвата: перечислять и узлы внутри subgraph (сейчас только
    верхний уровень графа).
 
 ## 6. Связанные файлы
 
-- `web/js/prompt_library.js` — JS-расширение ноды (маркер `1.25-pickup`)
-- `prompt_library_node.py` — Python-нода (роуты, broadcast, база, подхват)
+- `web/js/prompt_library.js` — JS-расширение ноды (маркер `1.26-media`)
+- `prompt_library_node.py` — Python-нода (роуты, broadcast, база, подхват, медиа-обложка)
 - `tests/` — `_test_prompt_library.py` / `_smoke_prompt_library.mjs` / `_audit_prompt_library.mjs`
-- `SPECIFICATION.md` — полная документация (v1.25, §28–§30)
+- `SPECIFICATION.md` — полная документация (v1.26, §28–§31)
+- Скил `comfyui-deferred-capture` (3 папки в корне бандла) — §3 дополнен видео
+  (PyAV, три пула, кадр из браузера) и ловушками 10–11 (кэш замены, метка типа)
 - `README.md` — пользовательское описание
 - `SESSION_MEMORY-history/2026-09-18-v1.24-one-node.md` — снапшот предыдущей памяти
 - `sync.py` — в корне бандла `F:\AI_projects\Custom_node_ComfyUI\`
@@ -147,6 +199,8 @@
 
 | Хэш | Описание |
 |-----|----------|
+| `d72a685` | feat: video covers without a wire, manual video preview, cover replacement (v1.26) |
+| `765888d` | docs: bring the pre-v1.24 spec sections up to date |
 | `a4e613d` | feat: pick up the final text from a source node after the run (v1.25) |
 | `6172e4d` | fix: cover handshake read a stale node id (v1.24b) |
 | `9dd6424` | docs: note the subgraph id prefix trap and the deferred-cover rule |
