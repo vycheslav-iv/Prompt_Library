@@ -252,6 +252,10 @@ Prompt_Library/
 ├── web/
 │   └── js/
 │       └── prompt_library.js   # DOM-виджет библиотеки
+├── tests/                      # ТОЛЬКО здесь тесты проекта (AGENTS.md §1.1)
+│   ├── _test_prompt_library.py # Python-песочница (133 проверки)
+│   ├── _smoke_prompt_library.mjs # JS-смоук (53 фазы)
+│   └── _audit_prompt_library.mjs # статический аудит
 ├── README.md                   # пользовательская дока
 ├── SPECIFICATION.md            # этот файл
 └── .gitignore                  # __pycache__/, *.pyc, .DS_Store
@@ -864,7 +868,7 @@ deadband «сошлось» → больше никогда не двигает�
 без замеров DOM). `maxHeight` НЕ задаём: он уходит в `prefHeight`, а `maxSize`
 по умолчанию `Infinity` → `distributeSpace` отдаёт виджету всё свободное место.
 
-Проверка без ComfyUI: смоук-тест `_smoke_prompt_library.mjs` (в корне бандла)
+Проверка без ComfyUI: смоук-тест `tests/_smoke_prompt_library.mjs` (в папке проекта, §25.1)
 исполняет файл в Node с заглушками DOM/LiteGraph и прогоняет жизненный цикл в
 ОБОИХ режимах, проверяя flex-цепочку. Ловит `ReferenceError`/`TypeError` в
 `onNodeCreated` за секунды — именно так были найдены потерянные `const st` и
@@ -1085,11 +1089,18 @@ ComfyUI сохраняет изображение вместе с воркфло
 
 | Инструмент | Что ловит |
 |---|---|
-| `_test_prompt_library.py` (133 проверки) | функциональные дефекты Python: миграция базы, `execute` в обоих режимах, PNG-патч, все 12 HTTP-роутов, traversal, лимиты, broadcast, служебный префикс `__`. Песочница: `folder_paths` → temp, `server`/`aiohttp` — заглушки (роуты регистрируются и вызываются напрямую; `send_sync` — счётчик вызовов). Файл лежит в папке ноды (`_`-префикс — sync.py копирует, но ComfyUI не грузит) |
-| `_audit_prompt_library.mjs` | связность `st.*` (62 обращения / 5 `this._pl.*`), мёртвые остатки удалённых механизмов, **сверка роутов JS ↔ Python**, покрытие локалей, порядок `widgets_values` |
-| `_smoke_prompt_library.mjs` (53 фазы) | падения в жизненном цикле JS, CSS-раскладка обоих режимов, живая смена режима, broadcast→reload со снятием слушателя, синхронизация двух нод страницы, отсутствие утечек rAF |
+| `tests/_test_prompt_library.py` (133 проверки) | функциональные дефекты Python: миграция базы, `execute` в обоих режимах, PNG-патч, все 12 HTTP-роутов, traversal, лимиты, broadcast, служебный префикс `__`. Песочница: `folder_paths` → temp, `server`/`aiohttp` — заглушки (роуты регистрируются и вызываются напрямую; `send_sync` — счётчик вызовов). Лежит в `tests/` (AGENTS.md §1.1): код, доки и git — в корне, проверки — в своей папке |
+| `tests/_audit_prompt_library.mjs` | связность `st.*` (62 обращения / 5 `this._pl.*`), мёртвые остатки удалённых механизмов, **сверка роутов JS ↔ Python**, покрытие локалей, порядок `widgets_values` |
+| `tests/_smoke_prompt_library.mjs` (53 фазы) | падения в жизненном цикле JS, CSS-раскладка обоих режимов, живая смена режима, broadcast→reload со снятием слушателя, синхронизация двух нод страницы, отсутствие утечек rAF |
 
-Все три лежат в папке ноды (`_`-префикс) и запускаются из неё: `cd Prompt_Library && python _test_*.py / node _smoke_*.mjs / node _audit_*.mjs`.
+Все три лежат в `Prompt_Library/tests/` (AGENTS.md §1.1) и запускаются из папки проекта:
+```bash
+cd Prompt_Library
+python tests/_test_prompt_library.py
+node tests/_smoke_prompt_library.mjs
+node tests/_audit_prompt_library.mjs
+```
+Пути внутри тестов — от самого файла (`Path(__file__).parent.parent`, `new URL("..", import.meta.url)`), поэтому они работают из любой cwd. `sync.py` папку `tests/` в рабочую копию не копирует.
 
 ### 25.2. Исправлено по итогам аудита
 
@@ -1099,14 +1110,14 @@ ComfyUI сохраняет изображение вместе с воркфло
    `execute` — нода выглядела полностью нерабочей без шанса самовосстановиться.
    Теперь не-словари и не-строки отбрасываются, база перезаписывается очищенной
    (лог ASCII-only — кириллица в Windows-консоли могла уронить сам лог).
-   Проверка: `_test_prompt_library.py`, кейсы “битые записи” и “битый JSON”.
+   Проверка: `tests/_test_prompt_library.py`, кейсы “битые записи” и “битый JSON”.
 2. **Вечный repaint канваса** (JS). `checkCycle` вызывается из
    `onDrawForeground`, а внутри был безусловный
    `this.graph.setDirtyCanvas(true, true)` → `draw → dirty → draw`: пока нода
    видна, канвас перерисовывается каждый кадр (постоянная нагрузка CPU).
    Теперь перерисовка запрашивается ТОЛЬКО при смене состояния (кольцо
    появилось/снялось); проверки в `onDrawForeground` остались читающими.
-   Проверка: новый блок фаз в `_smoke_prompt_library.mjs` (4 assertions).
+   Проверка: новый блок фаз в `tests/_smoke_prompt_library.mjs` (4 assertions).
 
 ### 25.3. Найдено, но НЕ исправлено (требует решения)
 
@@ -1283,8 +1294,8 @@ st.apiPost = async (path, payload) => {
 
 Глубокое ревью Python + JS по коду и по исходникам фронтенда
 (`api-DclbNWWy.js`, `comfyui_frontend_package` 1.52.7), плюс прогон
-`python _test_prompt_library.py` (101), `node _smoke_prompt_library.mjs` (48),
-`node _audit_prompt_library.mjs` (чист).
+`python tests/_test_prompt_library.py` (101), `node tests/_smoke_prompt_library.mjs` (48),
+`node tests/_audit_prompt_library.mjs` (чист).
 
 Подтверждено фактами (не гипотезами):
 

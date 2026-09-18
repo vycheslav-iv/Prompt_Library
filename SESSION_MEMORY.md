@@ -14,7 +14,10 @@
   дубле, защита служебного префикса `__`, бэкфилл превью.
 - **v1.23**: панель книги перекрывала низ списка с кнопками карточек (жалоба живьём) —
   панели теперь сжимаются; кнопки массового удаления вернулись в нижнюю строку. SPEC §28.
-- Коммит `17a1794`, запушен в `origin master`. Тесты 133/133, смоук 53/53, аудит чист.
+- **Тесты перенесены в `Prompt_Library/tests/`** (правило AGENTS.md §1.1: в каждом
+  проекте своя папка `tests/`, в корне проекта их больше нет; sync.py их не копирует).
+- Коммиты `17a1794` (v1.22+v1.23) и этот — запушены в `origin master`.
+  Тесты 133/133, смоук 53/53, аудит чист.
 
 ## 2. Итоговое состояние кода
 
@@ -36,10 +39,12 @@
   - `onRemoved` — снимает WS-слушатель, settings-слушатель, убирает ноду из `plLiveStates`
   - `computeLayoutSize` → `{minHeight: st.minH(), minWidth: MIN_W}`; `BASE_H=596`,
     `DETAIL_H=280`, `INPUT_H=170`
-- `_test_prompt_library.py` — 133 проверки (§13 broadcast, §14 `__`, §15 бэкфилл)
-- `_smoke_prompt_library.mjs` — 53 фазы (в т.ч. broadcast→reload, снятие слушателя,
+- `tests/_test_prompt_library.py` — 133 проверки (§13 broadcast, §14 `__`, §15 бэкфилл)
+- `tests/_smoke_prompt_library.mjs` — 53 фазы (в т.ч. broadcast→reload, снятие слушателя,
   сжатие панелей, bulk-бар внизу)
-- `_audit_prompt_library.mjs` — 12 роутов JS↔Python, 66 обращений `st.*`, локали, PNG-патч
+- `tests/_audit_prompt_library.mjs` — 12 роутов JS↔Python, 66 обращений `st.*`, локали, PNG-патч
+- Все три — в `Prompt_Library/tests/` (AGENTS.md §1.1), пути внутри — от файла
+  (`Path(__file__).parent.parent`, `new URL("..", import.meta.url)`), запуск из папки проекта
 - `SPECIFICATION.md` — v1.23: §27 (аудит v1.22), §28 (пол на панелях → перекрытие)
 
 ## 3. Проблемы, которые встречались (и как решали)
@@ -70,8 +75,11 @@
 - Broadcast — `send_sync` + `app.api.addEventListener` (НЕ `window`); из роутов не забывать.
 - Порядок INPUT_TYPES `[mode, selected, save_folder]`; `widgets_values` в PNG — позиционно.
 - Метки — session-only; `__`-префикс зарезервирован (клиент + сервер).
+- **Тесты — только в `NodeName/tests/`** (AGENTS.md §1.1): в корне проекта их быть не должно.
+  Запуск: `cd Prompt_Library && python tests/_test_prompt_library.py` (аналогично `.mjs`).
+  `sync.py` папку `tests/` и legacy `_test_*`/`_smoke_*`/`_audit_*` в корне НЕ копирует.
 - Синк: `python sync.py Prompt_Library` из корня бандла → рестарт ComfyUI + Ctrl+F5;
-  диска: `SPECIFICATION.md`/`README.md`/`_*.mjs` sync.py НЕ копирует (только `.py/.js/.json`).
+  диска: `SPECIFICATION.md`/`README.md`/`tests/` sync.py НЕ копирует (только `.py/.js/.json` без тестов).
 - Коммиты/пуши — из папки ноды (`gh` авторизован, `origin master`).
 
 ## 5. Следующие шаги (идеи, не сделано)
@@ -90,7 +98,7 @@
 
 - `web/js/prompt_library.js` — JS-расширение ноды (маркер `1.23-panes-fit`)
 - `prompt_library_node.py` — Python-нода (роуты, broadcast, база)
-- `_test_prompt_library.py` / `_smoke_prompt_library.mjs` / `_audit_prompt_library.mjs` — тесты
+- `tests/` — `_test_prompt_library.py` / `_smoke_prompt_library.mjs` / `_audit_prompt_library.mjs` (только здесь тесты проекта)
 - `SPECIFICATION.md` — полная документация (v1.23, §27–§28)
 - `README.md` — пользовательское описание
 - `SESSION_MEMORY-history/2026-09-18-1021.md` — снапшот предыдущей памяти (v1.21)

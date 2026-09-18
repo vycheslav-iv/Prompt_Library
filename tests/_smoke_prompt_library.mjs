@@ -2,9 +2,14 @@
 // в vm-контексте с заглушками DOM/LiteGraph, прогоняет жизненный цикл в обоих
 // режимах и проверяет ЖИВУЮ смену режима (canvas ↔ Nodes 2.0) обоими сигналами.
 import fs from "node:fs";
+import path from "node:path";
 import vm from "node:vm";
+import { fileURLToPath } from "node:url";
 
-const FILE = "web/js/prompt_library.js";
+// Путь от самого теста (tests/ → .. = папка проекта), а не от cwd:
+// работает и из папки проекта, и из любой другой директории (AGENTS.md §1.1).
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const FILE = path.join(ROOT, "web", "js", "prompt_library.js");
 const errors = [];
 const check = (label, cond) => { if (!cond) errors.push(`ASSERT FAIL: ${label}`); };
 

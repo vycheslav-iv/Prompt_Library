@@ -1,10 +1,14 @@
 // Аудит связности Prompt_Library: st.* (использование vs определение),
 // мёртвые остатки удалённых подходов, сверка HTTP-роутов JS ↔ Python.
-// Запуск: node _audit_prompt_library.mjs   (из корня бандла)
+// Запуск: cd Prompt_Library && node tests/_audit_prompt_library.mjs
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const JS = "web/js/prompt_library.js";
-const PY = "prompt_library_node.py";
+// Пути от самого теста (tests/ → .. = папка проекта), а не от cwd
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const JS = path.join(ROOT, "web", "js", "prompt_library.js");
+const PY = path.join(ROOT, "prompt_library_node.py");
 const jsRaw = fs.readFileSync(JS, "utf8");
 const py = fs.readFileSync(PY, "utf8");
 // Без комментариев: упоминания удалённых механизмов в пояснениях — не ошибка
@@ -72,11 +76,11 @@ console.log("D. Python");
 const required = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "OUTPUT_NODE = True",
                   "WEB_DIRECTORY", '"hidden"', "extra_pnginfo", "unique_id"];
 for (const r of required) {
-  if (!py.includes(r) && !fs.readFileSync("__init__.py", "utf8").includes(r)) bad(`нет ${r}`);
+  if (!py.includes(r) && !fs.readFileSync(path.join(ROOT, "__init__.py"), "utf8").includes(r)) bad(`нет ${r}`);
 }
 ok("обязательные атрибуты ноды на месте");
 // все INPUT_TYPES-виджеты должны иметь записи в локали
-const locale = JSON.parse(fs.readFileSync("locales/ru/nodeDefs.json", "utf8")).PromptLibrary.inputs;
+const locale = JSON.parse(fs.readFileSync(path.join(ROOT, "locales/ru/nodeDefs.json"), "utf8")).PromptLibrary.inputs;
 const inputBlock = py.match(/"required": \{([\s\S]*?)\s{12}\},\s*"optional"/);
 const widgetNames = inputBlock
   ? [...inputBlock[1].matchAll(/^\s*"?(\w+)"?: \(/gm)].map((m) => m[1])
@@ -97,7 +101,7 @@ else ok("JS restore читает позиционный индекс 2 (save_fol
 
 // RETURN_NAMES ↔ outputs локали
 const retNames = py.match(/RETURN_NAMES = \(([^)]+)\)/);
-const outLocale = JSON.parse(fs.readFileSync("locales/ru/nodeDefs.json", "utf8")).PromptLibrary.outputs;
+const outLocale = JSON.parse(fs.readFileSync(path.join(ROOT, "locales/ru/nodeDefs.json"), "utf8")).PromptLibrary.outputs;
 const outCount = retNames ? retNames[1].split(",").filter((s) => s.trim()).length : 0;
 const locCount = Object.keys(outLocale || {}).length;
 if (outCount !== locCount) bad(`выходов ${outCount}, а в локали ${locCount}`);

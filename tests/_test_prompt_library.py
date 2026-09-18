@@ -13,7 +13,8 @@ import tempfile
 import types
 from pathlib import Path
 
-NODE = Path(__file__).resolve().parent / "prompt_library_node.py"
+# tests/ лежит на уровень ниже папки проекта (AGENTS.md §1.1) → два parent
+NODE = Path(__file__).resolve().parent.parent / "prompt_library_node.py"
 
 fails = []
 oks = []
