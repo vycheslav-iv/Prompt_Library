@@ -1,81 +1,107 @@
-# Память сессии — Prompt Library (2026-09-18, v1.21 — автообновление Library)
+# Память сессии — Prompt Library (2026-09-18, v1.23)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
-> Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
+> Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md` (полная документация).
 
 ---
 
 ## 1. Что делали в этой сессии (кратко)
 
-- v1.20 (`9b83387`, запушена): глобальный дубль по тексту; фикс краша Queue; возврат высоты; bulk-бар в listHead.
-- v1.21 (`e7de7d4` — docs; `9a8dd61` — fix; `fe18635` — feature): **автообновление Library-нод** при записи через Saver — решена главная проблема: раньше Library не обновлялась без нажатия «новая генерация».
-  - Python: `_broadcast_refresh()` после `_save_db()` в `execute()`; флаг `need_broadcast` (только при `added=True`); вызов `PromptServer.instance.send_sync("prompt_library/refresh", {})`
-  - JS: `app.api.addEventListener("prompt_library/refresh", plListener)` в `onNodeCreated` → `this._pl.reload()`; мёртвый `window.addEventListener` fallback удалён
-  - Все 101 Python-тест и 48 JS-смоук проходят
-- SPECIFICATION.md обновлена: v1.21, §26 (auto-refresh), §8.2, §15, §17.
+- **Глубокий аудит** Python+JS по коду и по исходникам фронтенда 1.52.7 → 10 дефектов,
+  исправлены; SPEC §27.
+- **v1.22**: broadcast из ВСЕХ мутирующих роутов (не только Queue), синхронизация
+  Library-нод одной страницы, снятие слушателей в `onRemoved`, стойкая подсказка о
+  дубле, защита служебного префикса `__`, бэкфилл превью.
+- **v1.23**: панель книги перекрывала низ списка с кнопками карточек (жалоба живьём) —
+  панели теперь сжимаются; кнопки массового удаления вернулись в нижнюю строку. SPEC §28.
+- Коммит `17a1794`, запушен в `origin master`. Тесты 133/133, смоук 53/53, аудит чист.
 
 ## 2. Итоговое состояние кода
 
-- `prompt_library_node.py` — `_broadcast_refresh()` + `need_broadcast` flag; `_save_db()` + broadcast on new entry only; `_add_entry()` + `_broadcast_refresh` import; все эндпоинты; сокет IMAGE,VIDEO; media; bulk; `_req_body()`
-- `web/js/prompt_library.js` — `PL_JS_VERSION = "1.20-dup-warn"` (JS не менял версию в v1.21!); broadcast listener; attach-блок; `INPUT_H = 170`; мультивыделение; inlineEdit; verTag; DOM-виджет
-- `_test_prompt_library.py` — 101 проверка (§11: 4 по загрузке превью)
-- `_smoke_prompt_library.mjs` — 48 фаз
-- `_audit_prompt_library.mjs` — чист
-- `SPECIFICATION.md` — v1.21 (§26 auto-refresh, §8.2, §15, §17)
-- Скилл `comfyui-video-socket` в корне бандла (3 папки)
+- `prompt_library_node.py`
+  - `_broadcast_refresh()` вызывается в `execute()` (только `added=True`) и во ВСЕХ
+    мутирующих роутах: `/add`, `/favorite`, `/update`, `/delete`, `/delete_many`,
+    `/folder_create`, `/folder_rename`, `/folder_delete*` (§26.7)
+  - `_storage_folder()` — единая нормализация папки + `__*` → корень (`execute`, `/add`, `/update`);
+    `/folder_create` и `/folder_rename` → 400 на `__`-имя
+  - `_find_text_match()` — глобальный дубль; бэкфилл превью у найденной записи
+  - `_snapshot_workflow()` — только в ветке записи
+- `web/js/prompt_library.js` — `PL_JS_VERSION = "1.23-panes-fit"`
+  - `applyPaneLayout()` (~L603): ОБЕ ветки — `tree`/`listContent` `flex:1 1 0` + `min-height:0`,
+    `main` `1 1 0` + `min-height:0` + `overflow:hidden`; разница режимов ровно одна:
+    в Vue `main`+`detail` живут в `scrollArea`, в канвасе — прямые дети `root`
+  - `hintRow` (нижняя строка 22px, `flex-shrink:0`): подсказка ИЛИ bulk-бар
+    (`bulkCount`/`bulkDel`/`bulkClear`, переключаются в `renderHint`); `listHead` — пустой спейсер
+  - `st.apiPost()` — единая точка мутаций: любой POST → `plRefreshLocal()` у соседних нод
+  - `onRemoved` — снимает WS-слушатель, settings-слушатель, убирает ноду из `plLiveStates`
+  - `computeLayoutSize` → `{minHeight: st.minH(), minWidth: MIN_W}`; `BASE_H=596`,
+    `DETAIL_H=280`, `INPUT_H=170`
+- `_test_prompt_library.py` — 133 проверки (§13 broadcast, §14 `__`, §15 бэкфилл)
+- `_smoke_prompt_library.mjs` — 53 фазы (в т.ч. broadcast→reload, снятие слушателя,
+  сжатие панелей, bulk-бар внизу)
+- `_audit_prompt_library.mjs` — 12 роутов JS↔Python, 66 обращений `st.*`, локали, PNG-патч
+- `SPECIFICATION.md` — v1.23: §27 (аудит v1.22), §28 (пол на панелях → перекрытие)
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- **Library не обновлялась при записи через Saver** (главная проблема этой сессии): нет broadcast → `onExecuted` на Library не вызывается → список молчит. Решение: WebSocket broadcast `prompt_library/refresh` через `send_sync` + JS listener.
-- **`_broadcast_refresh()` при любом dirty**: backfill/смена папки вызывали ненужные broadcast → исправлено через `need_broadcast=True` только при `added=True`.
-- **Мёртвый `window.addEventListener` fallback**: `window` не получает ComfyUI WebSocket-события; `app.api` (ComfyApi extends EventTarget) рассылает CustomEvent для зарегистрированных типов через `_registered`.
-- Петля «выход → … → вход-картинка»: структурная, кодом не лечится → Saver без выходов.
-- 🖼 мутно на Windows → везде 📷.
-- Маркер версии забыли поднять → PL_JS_VERSION + verTag в тулбаре.
-- Системный Python без numpy/torch — видео-проверки на `python_embeded/python.exe` + стаб `FakeVideo`.
-- База в §6 забита до MAX_ENTRIES — тестовые записи через `insert(0)`.
+- **Две Library-ноды не синхронны при удалении** — сервер не рассылал событие из роутов
+  (+ на странице был свой путь) → broadcast везде + `plLiveStates`/`apiPost`.
+- **Панель книги перекрывала низ списка** (жалоба пользователем) — `min-height:480px` на
+  панелях: реального места меньше пола (панель до 320px против `DETAIL_H=280`, шрифт/зум),
+  переполнение не уходило в скролл, а перекрывалось следующим сиблингом (`detail`). Решение:
+  пол один — `computeLayoutSize`; панели сжимаются (§28).
+- **Кнопки массового удаления обрезались** — счётчик в `listHead` без `flex`/`min-width:0`
+  (в flex-строке `min-width:auto` = ширина текста) выдавливал кнопки за край. Решение:
+  счётчик `flex:1 1 auto;min-width:0`, кнопки `flex-shrink:0`, строка `hintRow` фиксирована.
+- **Вечный repaint канваса** — `checkCycle` звал `setDirtyCanvas` в `onDrawForeground`
+  каждый кадр → перерисовка только при смене состояния.
+- **Битый `library.json` ронял всё** — не-словари/не-строки отбрасываются, база
+  перезаписывается очищенной (лог ASCII-only — кириллица в Windows-консоли).
+- Python-консоль Windows: вывод кириллицы в тестах выглядит мусором (`??????`) — не баг.
 
 ## 4. Что важно не сломать при продолжении работы
 
-- **Canvas-ветку `applyPaneLayout` и `computeLayoutSize`** — проверены живьём; только boolean-стейт в sizing, никаких замеров DOM
-- `need_broadcast` flag: broadcast ТОЛЬКО при `added=True`; не трогать без причины
-- `_broadcast_refresh()` / `send_sync`: если PromptServer недоступен → pass (тесты, ранняя загрузка)
-- Порядок INPUT_TYPES `[mode, selected, save_folder]`; `widget.serialize = false` свойством
-- Сокет `image` — connector-only, в `widgets_values` не входит
-- Бейдж/метка/полоса — только текст/фон/`box-shadow: inset`; не перезаписывать `this.computeSize`
-- Неизвестный `media` — только во «Все», без бейджа; не в дедупликацию
-- Метки session-only; `ev.target === zone` для пустого места; Esc гасить на месте
-- Не возвращать `autoFitHeight`/`calibrateFloor`/`_vueFloor`
-- JS broadcast listener: `app.api.addEventListener` (НЕ window.addEventListener)
-- Синк: `python sync.py Prompt_Library` (из корня!) → рестарт ComfyUI + Ctrl+F5
-- Коммиты: из папки ноды, `gh` авторизован
+- **Правило §28**: внутри `root` (высота = `computedHeight`, `overflow:hidden`) ни один
+  ребёнок не ставит CSS-пол, не помещающийся в бюджет — дефицит не уходит в скролл,
+  а перекрывается следующим сиблингом. Пол — только в `computeLayoutSize`.
+- Sizing читает ТОЛЬКО boolean-стейт (`display`-флаги), никогда размеры DOM
+  (запрещено: `offsetHeight`/`scrollHeight`/`plScale`/`setInterval`/`MutationObserver`).
+- Не возвращать `autoFitHeight`/`calibrateFloor`/`_vueFloor`; не задавать legacy `computeSize`.
+- Broadcast — `send_sync` + `app.api.addEventListener` (НЕ `window`); из роутов не забывать.
+- Порядок INPUT_TYPES `[mode, selected, save_folder]`; `widgets_values` в PNG — позиционно.
+- Метки — session-only; `__`-префикс зарезервирован (клиент + сервер).
+- Синк: `python sync.py Prompt_Library` из корня бандла → рестарт ComfyUI + Ctrl+F5;
+  диска: `SPECIFICATION.md`/`README.md`/`_*.mjs` sync.py НЕ копирует (только `.py/.js/.json`).
+- Коммиты/пуши — из папки ноды (`gh` авторизован, `origin master`).
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-1. **Saver** (согласован в принципе): минимум vs +статус vs +ручной ввод — ждёт выбора и команды «строй»
-2. Разбить Library на выдачу / Saver на приём (стратегия из §17)
-3. Постраничность списка (~20 записей)
-4. Вынести воркфлоу из `library.json` (растёт; лимит 500)
-5. Inline-создание папки
+1. **Живая проверка v1.23** — рестарт + Ctrl+F5, маркер `v1.23-panes-fit`; открыть панель
+   книги, Ctrl+клик по карточкам → кнопки внизу, низ списка не перекрыт (§17 п.4).
+2. **Saver** (согласован в принципе): минимум / +статус / +ручной ввод — ждёт выбора.
+3. Постраничность списка (~20 записей).
+4. Вынести воркфлоу из `library.json` (растёт; `MAX_ENTRIES` 500, обрезка → сироты превью).
+5. Решённое-но-не-сделанное (SPEC §27.3): `threading.Lock` на read-modify-write;
+   `/update` не проверяет глобальный дубль; записи без метки `media` видны только во «Всё».
+6. **Предложено пользователю**: добавить ловушку §28 в скил `comfyui-dom-widget-sizing`
+   (ждёт «да»).
 
 ## 6. Связанные файлы
 
-- `web/js/prompt_library.js` — нода (JS-расширение, маркер 1.20-dup-warn, broadcast listener)
-- `prompt_library_node.py` — Python-нода (_broadcast_refresh, need_broadcast, все эндпоинты)
-- `_test_prompt_library.py` — Python-тест (101 проверка)
-- `_smoke_prompt_library.mjs` — JS-смоук (48 фаз)
-- `_audit_prompt_library.mjs` — аудит (12 роутов)
-- `SPECIFICATION.md` — v1.21 (§26, §8.2, §15, §17)
-- Скилл `comfyui-video-socket` в корне бандла (3 папки)
-- `sync.py` в корне бандла (F:\AI_projects\Custom_node_ComfyUI\)
-- `SESSION_MEMORY-history/2026-09-18-0845.md` — снапшот предыдущей сессии (v1.20)
+- `web/js/prompt_library.js` — JS-расширение ноды (маркер `1.23-panes-fit`)
+- `prompt_library_node.py` — Python-нода (роуты, broadcast, база)
+- `_test_prompt_library.py` / `_smoke_prompt_library.mjs` / `_audit_prompt_library.mjs` — тесты
+- `SPECIFICATION.md` — полная документация (v1.23, §27–§28)
+- `README.md` — пользовательское описание
+- `SESSION_MEMORY-history/2026-09-18-1021.md` — снапшот предыдущей памяти (v1.21)
+- `sync.py` — в корне бандла `F:\AI_projects\Custom_node_ComfyUI\`
 
 ## 7. Коммиты
 
 | Хэш | Описание |
 |-----|----------|
-| `fe18635` | v1.20+: auto-refresh Library nodes via broadcast refresh |
-| `9a8dd61` | fix: auto-refresh only on new entry, remove broken window fallback |
-| `e7de7d4` | docs: SPECIFICATION.md v1.21 — §26, fix notes, history |
+| `17a1794` | fix: sync all mutations, and stop panels from covering the list bottom (v1.22 + v1.23) |
+| `9fbcab5` | memory snapshot: v1.21 auto-refresh session |
+| `b2a38b3` | docs: move §26 to end of SPECIFICATION.md |
 
-Все запушены на `origin master`. Синк последний — 5 файлов.
+Все запушены в `origin master`. Синк рабочих копий — сделан (5 файлов, `__pycache__` очищен).
