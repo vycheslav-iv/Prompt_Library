@@ -1173,6 +1173,56 @@ await run("preview: замена обложки существующей зап�
   }
 });
 
+await run("редактирование: ✖ Отмена возвращает значения из базы", async () => {
+  const node = makeNode();
+  node.id = 51;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  st.full.set("e1", { id: "e1", title: "Исходное", folder: "Фото", prompt: "исходный текст", media: "image" });
+  await st.fillDetail("e1");
+  check("просмотр: кнопки правки и замены скрыты", st.bSave.style.display === "none"
+    && st.bCancel.style.display === "none" && st.bPreview.style.display === "none",
+    `${st.bSave.style.display}/${st.bCancel.style.display}/${st.bPreview.style.display}`);
+
+  st.bEdit.onclick();
+  check("правка: показаны 💾, ✖ Отмена и замена обложки", st.bSave.style.display === ""
+    && st.bCancel.style.display === "" && st.bPreview.style.display === "");
+  check("правка: поля доступны для ввода", st.dTitle.readOnly === false && st.dText.readOnly === false);
+
+  let confirms = 0;
+  const origConfirm = appStub.extensionManager.dialog.confirm;
+  try {
+    appStub.extensionManager.dialog.confirm = async () => { confirms++; return true; };
+    // «Зашёл в правку и передумал»: менять нечего — тихий возврат, без диалога
+    await st.bCancel.onclick();
+    check("отмена без правок: без диалога (не раздражаем)", confirms === 0, `confirms=${confirms}`);
+    check("отмена без правок: снова просмотр", st.bSave.style.display === "none"
+      && st.bCancel.style.display === "none" && st.dText.readOnly === true);
+
+    // Правки есть — выходим с подтверждением, значения берутся из базы
+    st.bEdit.onclick();
+    st.dText.value = "изменённый текст";
+    await st.bCancel.onclick();
+    check("отмена с правками: подтверждение запрошено", confirms === 1, `confirms=${confirms}`);
+    check("отмена с правками: текст вернулся из базы", st.dText.value === "исходный текст",
+      String(st.dText.value));
+    check("отмена с правками: поля снова только для чтения", st.dText.readOnly === true);
+    check("отмена с правками: пользователь уведомлён нижней строкой",
+      String(st.hintSticky || "").includes("отменены"), String(st.hintSticky));
+
+    // Отказ в диалоге — правки и режим остаются на месте
+    st.bEdit.onclick();
+    st.dText.value = "второй вариант";
+    appStub.extensionManager.dialog.confirm = async () => { confirms++; return false; };
+    await st.bCancel.onclick();
+    check("отказ в диалоге: остаёмся в правке с введённым текстом",
+      st.dText.value === "второй вариант" && st.dText.readOnly === false
+      && st.bCancel.style.display === "", String(st.dText.value));
+  } finally {
+    appStub.extensionManager.dialog.confirm = origConfirm;
+  }
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");

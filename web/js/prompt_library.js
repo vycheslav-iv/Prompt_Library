@@ -450,6 +450,38 @@ app.registerExtension({
             const bEdit = mkBtn("✏️ Редактировать", "Изменить название, категорию и текст");
             const bSave = mkBtn("💾 Сохранить", "Сохранить изменения");
             bSave.style.display = "none";
+            // Отмена правок: возврат к значениям из базы. Живёт только в режиме
+            // редактирования (как 💾): в просмотре отменять нечего.
+            const bCancel = mkBtn("✖ Отмена", "Выйти из редактирования, не сохраняя изменения");
+            bCancel.style.display = "none";
+            bCancel.onclick = async () => {
+                if (!st.detailId) return;
+                const full = st.full.get(st.detailId) || {};
+                // Спрашиваем только когда есть что терять: «зашёл и передумал» —
+                // тихий возврат, иначе диалог раздражал бы на ровном месте.
+                const dirty = st.dTitle.value !== (full.title || "")
+                    || st.dFolder.value !== (full.folder || "")
+                    || st.dText.value !== (full.prompt || "");
+                if (dirty) {
+                    let ok = false;
+                    try {
+                        ok = await app.extensionManager.dialog.confirm({
+                            title: "Отменить изменения",
+                            message: "Правки названия, категории и текста не сохранятся. Выйти из редактирования?",
+                        });
+                    } catch (e) {
+                        ok = confirm("Отменить изменения? Правки не сохранятся.");
+                    }
+                    if (!ok) return;
+                }
+                // Возврат — это ровно «открыть в режиме просмотра»: одна точка
+                // правды (fillDetail), а не второй ручной сброс полей.
+                await st.fillDetail?.(st.detailId);
+                if (dirty) {
+                    st.hintSticky = "Правки отменены — значения взяты из базы заново.";
+                    st.renderHint?.();
+                }
+            };
             const bWorkflow = mkBtn("📥 Воркфлоу", "Открыть сохранённый воркфлоу на канвасе (текущий будет заменён)");
             bWorkflow.style.display = "none";
             // Замена обложки существующей записи (v1.26): картинка или видео
@@ -533,6 +565,7 @@ app.registerExtension({
             dBtns.appendChild(bCopy);
             dBtns.appendChild(bEdit);
             dBtns.appendChild(bSave);
+            dBtns.appendChild(bCancel);
             dBtns.appendChild(bWorkflow);
             dBtns.appendChild(bPreview);
             bWorkflow.onclick = () => { try { st.openWorkflow?.(st.detailId); } catch (e) { /* silent */ } };
@@ -562,7 +595,7 @@ app.registerExtension({
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
                 pickupRow, pickupSel,
                 bulkCount, bulkDel, bulkClear,
-                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit,
+                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel,
                 entries: [], folders: [], full: new Map(),
                 // Локальная метка «обложка заменена» (v1.26): URL превью кэшируется
                 // по created_at, без метки браузер показал бы старую картинку.
@@ -1858,6 +1891,7 @@ app.registerExtension({
             bEdit.onclick = () => {
                 for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = false;
                 st.bSave.style.display = "";
+                if (st.bCancel) st.bCancel.style.display = "";
                 if (st.bPreview) st.bPreview.style.display = "";
                 st.dTitle.focus();
             };
@@ -1869,6 +1903,7 @@ app.registerExtension({
                     st.full.delete(st.detailId);
                     for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
                     st.bSave.style.display = "none";
+                    if (st.bCancel) st.bCancel.style.display = "none";
                     if (st.bPreview) st.bPreview.style.display = "none";
                     await reload();
                 } catch (err) { /* silent */ }
@@ -1904,6 +1939,7 @@ app.registerExtension({
                 st.bSave.style.display = "none";
                 st.bWorkflow.style.display = full.workflow ? "" : "none";
                 st.fillMeta(full);
+                if (st.bCancel) st.bCancel.style.display = "none";
                 if (st.bPreview) {
                     st.bPreview.textContent = bPreviewLabel(full.media);
                     st.bPreview.style.display = "none";
