@@ -50,6 +50,14 @@ def _norm_folder(path):
     return "/".join(parts)
 
 
+def _storage_folder(path):
+    """Папка для ЗАПИСИ: нормализация + служебные ветки дерева
+    (__all/__fav/__root) → корень. Один путь для execute() и роутов,
+    иначе " __fav " проходил бы мимо проверки префикса."""
+    fld = _norm_folder(path)
+    return "" if fld.startswith("__") else fld
+
+
 def _parent_folders(folder):
     parts = folder.split("/") if folder else []
     return ["/".join(parts[:i]) for i in range(1, len(parts))]
@@ -357,8 +365,10 @@ def _media_of(source):
 
 
 def _broadcast_refresh():
-    """Broadcas't 'prompt_library/refresh' to all connected WebSocket
-    clients so their Library nodes auto-reload the list."""
+    """Broadcast 'prompt_library/refresh' to all connected WebSocket
+    clients so their Library nodes auto-reload the list. Вызывается и из
+    execute() (новая запись), и из мутирующих роутов (/add, /favorite,
+    /update, /delete*, /folder_*) — иначе соседние Library-ноды молчат."""
     try:
         from server import PromptServer
         PromptServer.instance.send_sync("prompt_library/refresh", {})
@@ -433,9 +443,7 @@ class PromptLibrary:
         # Совместимость: старые workflow несли folder/category виджетом
         folder = save_folder or kwargs.get("folder", "") or kwargs.get("category", "")
         # Служебные ключи дерева (__all/__fav/__root) — не папки: виджет несёт их
-        # для round-trip выбора, но записи сохраняем в корень
-        if str(folder).startswith("__"):
-            folder = ""
+        # для round-trip выбора, но записи сохраняем в корень (_storage_folder)
         if not mode:
             if kwargs.get("use_selected"):
                 mode = self.MODE_ISSUE
@@ -464,17 +472,20 @@ class PromptLibrary:
                     break
 
         # 2. Автосохранение входящего промпта в папку из виджета (только в режиме записи)
-        # Снапшот воркфлоу — в запись и в PNG-превью (как SaveImage): карточка
-        # самодостаточна, drag на канвас открывает воркфлоу
-        wf_copy = _snapshot_workflow(extra_pnginfo)
-        fld = _norm_folder(folder)
+        fld = _storage_folder(folder)
         need_broadcast = False
         skipped = None
         if not issue and incoming:
+            # Снапшот воркфлоу — в запись и в PNG-превью (как SaveImage): карточка
+            # самодостаточна, drag на канвас открывает воркфлоу. Считаем его только
+            # здесь: в режиме выдачи и без входящего текста он не нужен — иначе
+            # deep-copy целого графа делался на каждом Queue впустую.
+            wf_copy = _snapshot_workflow(extra_pnginfo)
             # Глобальный дубликат: тот же текст уже есть в базе (хоть в другой папке) —
             # не плодим запись с другим превью, а предупреждаем где лежит.
             dup = _find_text_match(entries, incoming)
             media = _media_of(image)
+            frame = _extract_frame(image) if image is not None else None
             if dup is not None:
                 skipped = {"folder": dup.get("folder", ""), "id": dup.get("id", "")}
                 print(f"[PromptLibrary] duplicate skipped (already in '{skipped['folder'] or 'root'}')", flush=True)
@@ -483,7 +494,6 @@ class PromptLibrary:
                 entry_id, added = _add_entry(entries, incoming, fld, workflow=wf_copy, media=media)
             if added:
                 need_broadcast = True
-                frame = _extract_frame(image) if image is not None else None
                 preview = _save_thumbnail(frame, entry_id, wf_copy) if frame is not None else None
                 if preview:
                     for e in entries:
@@ -491,19 +501,26 @@ class PromptLibrary:
                             e["preview"] = preview
                             break
                 dirty = True  # новая запись — сохраняем всегда
-            elif wf_copy:
-                # Backfill: у старых записей (и ручных) workflow не было —
-                # прикрепляем при первом же прогоне того же промпта. media
-                # добиваем по тому же правилу, но только если пусто (не затираем).
+            else:
+                # Backfill существующей записи (дубль по тексту или тот же hash):
+                # у старых и ручных записей workflow/превью нет — прикрепляем при
+                # первом же прогоне того же промпта. Только в пустое — не затираем.
                 for e in entries:
-                    if e.get("id") == entry_id and (not e.get("workflow") or (not e.get("media") and media)):
-                        if not e.get("workflow"):
-                            e["workflow"] = wf_copy
-                            _upgrade_preview_to_png(e, wf_copy)
-                        if not e.get("media") and media:
-                            e["media"] = media
+                    if e.get("id") != entry_id:
+                        continue
+                    if not e.get("workflow") and wf_copy:
+                        e["workflow"] = wf_copy
+                        _upgrade_preview_to_png(e, wf_copy)
                         dirty = True
-                        break
+                    if not e.get("media") and media:
+                        e["media"] = media
+                        dirty = True
+                    if not e.get("preview") and frame is not None:
+                        prev = _save_thumbnail(frame, entry_id, wf_copy)
+                        if prev:
+                            e["preview"] = prev
+                            dirty = True
+                    break
             if fld and fld not in folders:
                 folders.append(fld)
                 folders = sorted(set(folders) | set(_parent_folders(fld)))
@@ -609,7 +626,7 @@ try:
         prompt = str(body.get("prompt", "")).strip()
         if not prompt:
             return web.json_response({"error": "empty prompt"}, status=400)
-        folder = _norm_folder(body.get("folder", body.get("category", "")))
+        folder = _storage_folder(body.get("folder", body.get("category", "")))
         title = str(body.get("title", "")).strip()
         entries, folders = _load_db()
         dup = _find_text_match(entries, prompt)
@@ -630,6 +647,9 @@ try:
             if folder and folder not in folders:
                 folders = sorted(set(folders) | {folder} | set(_parent_folders(folder)))
             _save_db(entries, folders)
+            # Ручное сохранение (кнопка) рассылает тот же сигнал, что и Queue:
+            # без него соседние Library-ноды и другие вкладки остаются со старым списком.
+            _broadcast_refresh()
         return web.json_response({"ok": True, "id": entry_id, "duplicate": False})
 
     @routes.post("/prompt_library/favorite")
@@ -645,6 +665,7 @@ try:
                 break
         if found:
             _save_db(entries, folders)
+            _broadcast_refresh()
         return web.json_response({"ok": True})
 
     @routes.post("/prompt_library/update")
@@ -661,7 +682,7 @@ try:
                 if "title" in body:
                     e["title"] = str(body["title"]).strip() or _auto_title(e["prompt"])
                 if "folder" in body or "category" in body:
-                    e["folder"] = _norm_folder(body.get("folder", body.get("category", "")))
+                    e["folder"] = _storage_folder(body.get("folder", body.get("category", "")))
                     e["category"] = e["folder"]
                 e["hash"] = _dedup_hash(e["prompt"], e.get("folder", ""))
                 if e["folder"]:
@@ -669,6 +690,7 @@ try:
                 break
         if found:
             _save_db(entries, folders)
+            _broadcast_refresh()
         return web.json_response({"ok": True})
 
     def _remove_preview_file(victim):
@@ -696,6 +718,7 @@ try:
         if len(new_entries) < len(entries):
             _save_db(new_entries, folders)
             _remove_preview_file(victim)
+            _broadcast_refresh()
         return web.json_response({"ok": True})
 
     @routes.post("/prompt_library/delete_many")
@@ -717,19 +740,26 @@ try:
             _save_db(new_entries, folders)
             for v in victims:
                 _remove_preview_file(v)
+            _broadcast_refresh()
         return web.json_response({"ok": True, "deleted": deleted})
 
     @routes.post("/prompt_library/folder_create")
     async def _pl_folder_create(request):
         body = await _req_body(request)
-        parent = _norm_folder(body.get("parent", ""))
+        parent = _storage_folder(body.get("parent", ""))
         name = str(body.get("name", "")).strip().replace("/", " ").replace("\\", " ")
         if not name:
             return web.json_response({"error": "empty name"}, status=400)
+        # Префикс "__" зарезервирован под служебные ветки дерева (__all/__fav/__root):
+        # такая «папка» стала бы призраком — записи в неё не попадают (execute режет
+        # их в корень), клик перехватывает служебная ветка, а из UI её не удалить.
+        if name.startswith("__"):
+            return web.json_response({"error": "reserved name"}, status=400)
         path = f"{parent}/{name}" if parent else name
         entries, folders = _load_db()
         folders = sorted(set(folders) | {path} | set(_parent_folders(path)))
         _save_db(entries, folders)
+        _broadcast_refresh()
         return web.json_response({"ok": True, "path": path})
 
     @routes.post("/prompt_library/folder_rename")
@@ -739,7 +769,9 @@ try:
         new = _norm_folder(body.get("new", ""))
         if not old or not new or old == new:
             return web.json_response({"error": "bad rename"}, status=400)
-        if new == old or new.startswith(old + "/"):
+        if new.startswith("__"):
+            return web.json_response({"error": "reserved name"}, status=400)
+        if new.startswith(old + "/"):
             return web.json_response({"error": "cannot move into itself"}, status=400)
         entries, folders = _load_db()
         new_folders = set()
@@ -757,6 +789,7 @@ try:
                 e["category"] = e["folder"]
                 e["hash"] = _dedup_hash(e["prompt"], e["folder"])
         _save_db(entries, sorted(new_folders))
+        _broadcast_refresh()
         return web.json_response({"ok": True, "path": new})
 
     @routes.post("/prompt_library/folder_delete")
@@ -775,6 +808,7 @@ try:
                 e["category"] = ""
                 e["hash"] = _dedup_hash(e["prompt"], "")
         _save_db(entries, folders)
+        _broadcast_refresh()
         return web.json_response({"ok": True})
 
     @routes.post("/prompt_library/folder_delete_many")
@@ -801,6 +835,7 @@ try:
                 e["category"] = ""
                 e["hash"] = _dedup_hash(e["prompt"], "")
         _save_db(entries, folders)
+        _broadcast_refresh()
         return web.json_response({"ok": True, "deleted_folders": len(paths)})
 
 except Exception as e:

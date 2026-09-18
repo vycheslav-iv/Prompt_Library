@@ -21,6 +21,21 @@ function plBadge(e) {
     return e.media === "video" ? "🎬 " : e.media === "image" ? "📷 " : "";
 }
 
+// --- Синхронизация Library-нод одной страницы -------------------------------
+// WS-сигнал (§26) ходит кругом через сервер и доходит до соседней ноды с
+// задержкой; пока он идёт, второй экземпляр ноды показывает устаревший список —
+// удалённые карточки и папки «остаются». Держим реестр живых нод и после любой
+// мутации (POST) перечитываем базу у всех, кроме инициатора — он обновляет себя
+// сам. Никаких таймеров и наблюдателей: только вызовы из хендлеров (st.apiPost).
+const plLiveStates = new Set();
+
+function plRefreshLocal(except) {
+    for (const s of [...plLiveStates]) {
+        if (s === except) continue;
+        try { s.reload?.(); } catch (e) { /* silent */ }
+    }
+}
+
 // --- Смена режима рендера (canvas ↔ Nodes 2.0) без перезагрузки страницы ------
 // Настройка `Comfy.VueNodes.Enabled` превращается фронтендом в авторитетный флаг
 // `LiteGraph.vueNodesMode` (useVueFeatureFlags: watch → LiteGraph.vueNodesMode),
@@ -55,7 +70,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.20-dup-warn";
+const PL_JS_VERSION = "1.23-panes-fit";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -263,11 +278,8 @@ app.registerExtension({
                 inputSaveBtn.textContent = "⏳ Сохраняю...";
                 try {
                     const previewData = await readAttachedPreview();
-                    const r = await fetch("/prompt_library/add", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ prompt: text, folder: dest,
-                            ...(previewData ? { preview_data: previewData } : {}) }),
-                    });
+                    const r = await st.apiPost("/prompt_library/add", { prompt: text, folder: dest,
+                        ...(previewData ? { preview_data: previewData } : {}) });
                     if (r.ok) {
                         let dup = null;
                         try { dup = await r.json(); } catch (e) { /* silent */ }
@@ -312,33 +324,62 @@ app.registerExtension({
             treeHead.appendChild(treeTitle);
             treeHead.appendChild(newFolderBtn);
             const tree = document.createElement("div");
-            // flex:1 тянется с нодой, min-height:480px — пол (= старый фикс. размер)
-            tree.style.cssText = "display:flex;flex-direction:column;gap:2px;flex:1 1 auto;min-height:480px;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:4px;background:#191919;";
+            // Тянется с нодой и СЖИМАЕТСЯ до отведённого места (min-height:0):
+            // пол даёт минимальная высота ноды (computeLayoutSize), а не CSS.
+            // С полом на панелях контент вылезал за root и его перекрывал
+            // следующий сосед (detail) — «область с кнопками стала перекрыта»
+            // (номинальный DETAIL_H=280 < реальной высоты панели + разница шрифтов).
+            tree.style.cssText = "display:flex;flex-direction:column;gap:2px;flex:1 1 0;min-height:0;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:4px;background:#191919;";
             treeBox.appendChild(treeHead);
             treeBox.appendChild(tree);
 
             const list = document.createElement("div");
             list.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;flex-shrink:0;";
-            // Заголовок списка: пустой (выравнивание с treeHead), при метках —
-            // bulk-бар. Место уже зарезервировано (22px), раскладка не двигается.
+            // Заголовок списка: пустой распорник — верх первой карточки совпадает
+            // с верхом дерева (treeHead). Bulk-бар живёт в нижней строке (hintRow).
             const listHead = document.createElement("div");
-            listHead.style.cssText = "display:flex;align-items:center;gap:4px;height:22px;overflow:hidden;white-space:nowrap;";
+            listHead.style.cssText = "height:22px;flex-shrink:0;";
             list.appendChild(listHead);
-            // Контент списка (скроллируемый)
-            // flex:1 тянется с нодой, min-height:480px — пол (= старый фикс. размер)
+            // Контент списка (скроллируемый). Сжимается (min-height:0), см. tree.
             const listContent = document.createElement("div");
-            listContent.style.cssText = "display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-height:480px;overflow-y:auto;";
+            listContent.style.cssText = "display:flex;flex-direction:column;gap:4px;flex:1 1 0;min-height:0;overflow-y:auto;";
             list.appendChild(listContent);
 
             // Слева список книг, справа проводник категорий
             main.appendChild(list);
             main.appendChild(treeBox);
 
+            // Нижняя строка: ОДНА фиксированная (22px) — в ней либо подсказка,
+            // либо bulk-бар с метками. Кнопки массовых действий — внизу, как
+            // раньше, но рост строки исключён (height + flex-shrink:0), поэтому
+            // появление кнопок не отжимает место у списка/дерева. Счётчик
+            // сжимается с многоточием (flex:1 1 auto + min-width:0), кнопки
+            // (flex-shrink:0) остаются видны всегда — в listHead их выдавливало
+            // за правый край строки и резало overflow:hidden.
+            const hintRow = document.createElement("div");
+            hintRow.style.cssText = "display:flex;align-items:center;gap:4px;height:22px;flex-shrink:0;overflow:hidden;white-space:nowrap;";
             const hint = document.createElement("div");
-            // Строго одна строка: рост подсказки отжимал бы место у списка
-            // (схлопывание контента при bulk-баре) — кнопки живут в listHead.
-            hint.style.cssText = "color:#888;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+            // Строго одна строка: рост подсказки отжимал бы место у списка.
+            hint.style.cssText = "flex:1 1 auto;min-width:0;color:#888;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
             hint.textContent = "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
+            // Элементы bulk-бара создаются один раз (без пересоздания на каждый
+            // рендер) и только переключают видимость.
+            const bulkCount = document.createElement("span");
+            bulkCount.style.cssText = "flex:1 1 auto;min-width:0;color:#e08a3c;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:none;";
+            const bulkDel = document.createElement("button");
+            bulkDel.textContent = "🗑 Удалить";
+            bulkDel.title = "Удалить помеченные записи и категории";
+            bulkDel.style.cssText = "display:none;background:#5a2b2b;color:#ffd9d9;border:1px solid #a33;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
+            bulkDel.onclick = () => st.bulkDelete?.();
+            const bulkClear = document.createElement("button");
+            bulkClear.textContent = "✖";
+            bulkClear.title = "Снять все метки (Esc)";
+            bulkClear.style.cssText = "display:none;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
+            bulkClear.onclick = () => st.clearMarks?.();
+            hintRow.appendChild(hint);
+            hintRow.appendChild(bulkCount);
+            hintRow.appendChild(bulkDel);
+            hintRow.appendChild(bulkClear);
 
             // --- Панель книги: название, полка, полный текст ---
             const detail = document.createElement("div");
@@ -397,10 +438,11 @@ app.registerExtension({
             root.appendChild(toolbar);
             root.appendChild(main);
             root.appendChild(detail);
-            root.appendChild(hint);
+            root.appendChild(hintRow);
 
             const st = {
-                root, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hint, detail,
+                root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
+                bulkCount, bulkDel, bulkClear,
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow,
                 entries: [], folders: [], full: new Map(),
                 detailId: null, selFolder: "__all",
@@ -410,14 +452,31 @@ app.registerExtension({
                 markEntries: new Set(), markFolders: new Set(),
                 anchorEntry: null, anchorFolder: null, folderOrder: [],
                 hintMsg: "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.",
+                // Стойкое сообщение (например, «дубликат не сохранён»): hintMsg виден
+                // только при открытой панели книги, а этот — всегда, до действия
+                // пользователя (клик по папке/карточке сбрасывает).
+                hintSticky: null,
             };
             this._pl = st;
+            plLiveStates.add(st);
             st.version = PL_JS_VERSION;
 
             st.toast = (severity, summary, detail) => {
                 try {
                     app.extensionManager.toast.add({ severity, summary, detail, life: 6000 });
                 } catch (e) { /* silent */ }
+            };
+            // Единая точка для всех POST, меняющих базу: ответ пришёл — сервер уже
+            // записал (и разослал WS-сигнал), но соседняя нода этой страницы получит
+            // его с задержкой — перечитываем её сразу. Забыть вызов в новом хендлере
+            // невозможно: мутации идут только через st.apiPost (§26.9).
+            st.apiPost = async (path, payload) => {
+                const r = await fetch(path, {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload || {}),
+                });
+                if (r && r.ok) { try { plRefreshLocal(st); } catch (e) { /* silent */ } }
+                return r;
             };
 
             // Открыть воркфлоу записи на канвасе (как дроп PNG с workflow).
@@ -556,7 +615,7 @@ app.registerExtension({
                         // канвасе (§22.3). Фиксированные 480px оставляли пустоту снизу.
                         // main+detail — в scrollArea: переполнение уходит в скролл.
                         if (scrollArea.parentNode !== root) {
-                            root.insertBefore(scrollArea, hint);
+                            root.insertBefore(scrollArea, hintRow);
                             scrollArea.appendChild(main);
                             scrollArea.appendChild(detail);
                         }
@@ -577,23 +636,35 @@ app.registerExtension({
                         scrollArea.style.minHeight = PANES_MIN_H + "px";
                         scrollArea.style.overflowY = "auto";
                     } else {
-                        // Канвас: без изменений — stretch через computeLayoutSize
-                        // (проверено живьём, §22.4). Пол 480px на панелях здесь
-                        // работает и без scrollArea: фронтенд сам растёт ноду под
-                        // контент (`!vueNodesMode && l > t && setSize(...)`).
+                        // Канвас: раскладка ТА ЖЕ, что в Vue (высота виджета = его
+                        // computedHeight, т.е. root всегда заполнен), но переполнение
+                        // некуда уводить — поэтому панели ОБЯЗАНЫ сжиматься до
+                        // отведённого места (flex 1 1 0 + min-height:0).
+                        // Раньше здесь стоял пол min-height:480px на панелях: когда
+                        // реального места было меньше пола (панель книги максимум
+                        // 320px против номинальных DETAIL_H=280, другой шрифт/зум),
+                        // контент вылезал за root и его перекрывал следующий сосед
+                        // (detail рисуется позже) — низ списка с кнопками карточек
+                        // оказывался «перекрыт». Минимальный РАЗМЕР ноды теперь задаёт
+                        // только computeLayoutSize.minHeight (BASE_H) — он же в обоих
+                        // режимах, поэтому панели получают ≈PANES_MIN_H при ноде
+                        // минимального размера и растут вместе с ней.
                         if (scrollArea.parentNode === root) {
                             root.insertBefore(main, scrollArea);
                             root.insertBefore(detail, scrollArea);
                             root.removeChild(scrollArea);
                         }
                         for (const el of [tree, listContent]) {
-                            el.style.flex = "1 1 auto";
-                            el.style.minHeight = PANES_MIN_H + "px";
+                            el.style.flex = "1 1 0";
+                            el.style.minHeight = "0";
                             el.style.height = "";
                         }
-                        main.style.flex = "1 1 auto";
+                        main.style.flex = "1 1 0";
                         main.style.minHeight = "0";
                     }
+                    // Страховка: ничего внутри main не может нарисоваться поверх
+                    // соседа (detail/hintRow) — панели скроллятся сами.
+                    main.style.overflow = "hidden";
                 } catch (e) { /* silent */ }
             };
             // Замер пола по root.offsetHeight (_vueFloor) УДАЛЁН по той же причине:
@@ -628,11 +699,14 @@ app.registerExtension({
             try {
                 const s = app.ui && app.ui.settings;
                 if (s && typeof s.addEventListener === "function") {
-                    s.addEventListener("Comfy.VueNodes.Enabled.change", (ev) => {
+                    const onVueSetting = (ev) => {
                         // detail.value = новое значение (стор обновляется до события)
                         const v = ev && ev.detail ? ev.detail.value : undefined;
                         st.onModeChange(typeof v === "boolean" ? v : undefined);
-                    });
+                    };
+                    s.addEventListener("Comfy.VueNodes.Enabled.change", onVueSetting);
+                    st.settingsListener = onVueSetting;
+                    st.settingsTarget = s;
                 }
             } catch (e) { /* silent */ }
 
@@ -689,11 +763,16 @@ app.registerExtension({
             // автоматически перечитывают library.json без запуска Queue.
             // app.api — ComfyApi (extends EventTarget). При неизвестном
             // типе сообщения ComfyApi рассылает CustomEvent(type, {detail}).
+            // Слушатель храним в st и СНИМАЕМ в onRemoved: app.api живёт всю сессию,
+            // иначе удалённые ноды не собираются GC и продолжают тянуть
+            // /prompt_library/list на каждый broadcast.
             try {
                 const plListener = (ev) => {
                     try { if (this._pl) this._pl.reload(); } catch (e) { /* silent */ }
                 };
                 app.api.addEventListener("prompt_library/refresh", plListener);
+                st.apiListener = plListener;
+                st.apiTarget = app.api;
             } catch (e) { /* silent */ }
 
             // --- Drag & Drop: книги → на категории, категории → в другие категории (или в корень) ---
@@ -705,10 +784,7 @@ app.registerExtension({
                         if (dest === null) return;
                         const e = st.entries.find((x) => x.id === d.id);
                         if (!e || e.folder === dest) return;
-                        await fetch("/prompt_library/update", {
-                            method: "POST", headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ id: d.id, folder: dest }),
-                        });
+                        await st.apiPost("/prompt_library/update", { id: d.id, folder: dest });
                         st.full.delete(d.id);
                         await reload();
                     } else if (d.kind === "folder") {
@@ -717,10 +793,7 @@ app.registerExtension({
                             ? src.split("/").pop()
                             : target + "/" + src.split("/").pop();
                         if (dest === src || dest.startsWith(src + "/")) return;
-                        const r = await fetch("/prompt_library/folder_rename", {
-                            method: "POST", headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ old: src, new: dest }),
-                        });
+                        const r = await st.apiPost("/prompt_library/folder_rename", { old: src, new: dest });
                         if (r.ok) {
                             if (st.selFolder === src || st.selFolder.startsWith(src + "/")) {
                                 st.selFolder = dest + st.selFolder.slice(src.length);
@@ -787,13 +860,18 @@ app.registerExtension({
                         const leaf = key.split("/").pop();
                         row.draggable = false; // пока правим — строку нельзя утащить
                         st.inlineEdit(name, leaf, async (next) => {
+                            // Та же защита служебного префикса, что и при создании:
+                            // иначе переименование увело бы папку в призрак.
+                            if (next.startsWith("__")) {
+                                st.toast("warn", "Prompt Library: имя категории",
+                                    "Имя не может начинаться с «__» — это служебный префикс дерева.");
+                                renderTree();
+                                return;
+                            }
                             const parent = key.split("/").slice(0, -1).join("/");
                             const newPath = parent ? `${parent}/${next}` : next;
                             try {
-                                const r = await fetch("/prompt_library/folder_rename", {
-                                    method: "POST", headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ old: key, new: newPath }),
-                                });
+                                const r = await st.apiPost("/prompt_library/folder_rename", { old: key, new: newPath });
                                 if (r.ok) {
                                     if (st.selFolder === key) st.selFolder = newPath;
                                     // Метки/якорь переименованного пути едут следом
@@ -812,10 +890,7 @@ app.registerExtension({
                         ev.stopPropagation();
                         if (!confirm(`Удалить категорию «${key}» с подкатегориями? Записи не пропадут — переедут в корень.`)) return;
                         try {
-                            const r = await fetch("/prompt_library/folder_delete", {
-                                method: "POST", headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ path: key }),
-                            });
+                            const r = await st.apiPost("/prompt_library/folder_delete", { path: key });
                             if (r.ok) {
                                 if (st.selFolder === key || st.selFolder.startsWith(key + "/")) st.selFolder = "__all";
                                 st.syncSaveFolder();
@@ -843,6 +918,7 @@ app.registerExtension({
                     st.detail.style.display = "none";
                     st.shrinkBack?.();
                     st.hintMsg = "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
+                    st.hintSticky = null;
                     renderTree();
                     render();
                 };
@@ -879,16 +955,23 @@ app.registerExtension({
                 const parent = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
                 const name = prompt(parent ? `Новая подкатегория в «${parent}»: ` : "Новая категория:");
                 if (!name || !name.trim()) return;
+                // Префикс "__" — служебные ветки дерева (__all/__fav/__root): такая
+                // «категория» стала бы призраком (записи в неё не попадают, из UI
+                // её не удалить). Сервер это тоже проверяет — здесь понятное сообщение.
+                if (name.trim().startsWith("__")) {
+                    st.toast("warn", "Prompt Library: имя категории",
+                        "Имя не может начинаться с «__» — это служебный префикс дерева.");
+                    return;
+                }
                 try {
-                    const r = await fetch("/prompt_library/folder_create", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ parent, name: name.trim() }),
-                    });
+                    const r = await st.apiPost("/prompt_library/folder_create", { parent, name: name.trim() });
                     if (r.ok) {
                         const data = await r.json();
                         st.selFolder = data.path;
                         st.syncSaveFolder();
                         await reload();
+                    } else {
+                        st.toast("warn", "Prompt Library", "Не удалось создать категорию.");
                     }
                 } catch (e) { /* silent */ }
             };
@@ -987,10 +1070,7 @@ app.registerExtension({
                         e.favorite = !prev;
                         render();
                         try {
-                            const r = await fetch("/prompt_library/favorite", {
-                                method: "POST", headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ id: e.id, favorite: e.favorite }),
-                            });
+                            const r = await st.apiPost("/prompt_library/favorite", { id: e.id, favorite: e.favorite });
                             if (!r.ok) { e.favorite = prev; render(); }
                         } catch (err) { e.favorite = prev; render(); }
                     };
@@ -1004,10 +1084,7 @@ app.registerExtension({
                         card.draggable = false; // пока правим — карточку нельзя утащить
                         st.inlineEdit(title, e.title || e.head || "", async (next) => {
                             try {
-                                await fetch("/prompt_library/update", {
-                                    method: "POST", headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ id: e.id, title: next }),
-                                });
+                                await st.apiPost("/prompt_library/update", { id: e.id, title: next });
                                 e.title = next;
                                 st.full.delete(e.id);
                             } catch (err) { /* silent */ }
@@ -1023,10 +1100,7 @@ app.registerExtension({
                         ev.stopPropagation();
                         if (!confirm(`Удалить «${e.title || e.head}»?`)) return;
                         try {
-                            await fetch("/prompt_library/delete", {
-                                method: "POST", headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ id: e.id }),
-                            });
+                            await st.apiPost("/prompt_library/delete", { id: e.id });
                             st.entries = st.entries.filter((x) => x.id !== e.id);
                             st.full.delete(e.id);
                             if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; st.shrinkBack?.(); }
@@ -1065,6 +1139,7 @@ app.registerExtension({
                                 st.panelOpened?.();
                                 st.detail.style.display = "flex";
                                 st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача».";
+                                st.hintSticky = null;
                             }
                         } catch (err) { /* silent */ }
                         render();
@@ -1156,16 +1231,10 @@ app.registerExtension({
                 if (!confirm(`Удалить ${parts.join(" и ")}?${extra}`)) return;
                 try {
                     if (ids.length) {
-                        await fetch("/prompt_library/delete_many", {
-                            method: "POST", headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ ids }),
-                        });
+                        await st.apiPost("/prompt_library/delete_many", { ids });
                     }
                     if (paths.length) {
-                        await fetch("/prompt_library/folder_delete_many", {
-                            method: "POST", headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ paths }),
-                        });
+                        await st.apiPost("/prompt_library/folder_delete_many", { paths });
                     }
                 } catch (err) { /* silent */ }
                 st.markEntries.clear(); st.markFolders.clear();
@@ -1206,37 +1275,29 @@ app.registerExtension({
                 inp.onblur = () => finish(true);
                 inp.onclick = (ev) => { if (ev) ev.stopPropagation(); };
             };
-            // Строка-подсказка — всегда только текст в одну строку (hint режет
-            // излишки). Bulk-бар живёт в listHead: там уже зарезервированы 22px,
-            // поэтому появление кнопок не отжимает место у списка/дерева.
+            // Строка-подсказка (внизу) — одна фиксированная строка 22px:
+            // есть метки → показываем bulk-бар (счётчик + кнопки) ВМЕСТО
+            // подсказки; меток нет → подсказка. Высота не меняется → список
+            // не дёргается. Счётчик сжимается, кнопки не выдавливаются вон.
             st.renderHint = (shown) => {
-                if (st.detailId) st.hint.textContent = st.hintMsg;
+                if (st.hintSticky) st.hint.textContent = st.hintSticky;
+                else if (st.detailId) st.hint.textContent = st.hintMsg;
                 else {
                     const base = shown ? `Записей в категории: ${shown}. ` : "Пусто. Запустите Queue или нажмите «Сохранить промпт». ";
                     st.hint.textContent = base + "Клик — открыть · Ctrl/Shift+клик — пометить · пустое место/Esc — снять.";
                 }
-                listHead.innerHTML = "";
                 const nE = st.markEntries.size, nF = st.markFolders.size;
-                if (nE + nF === 0) return;
+                const on = (nE + nF) > 0;
+                st.hint.style.display = on ? "none" : "";
+                st.bulkCount.style.display = on ? "" : "none";
+                st.bulkDel.style.display = on ? "" : "none";
+                st.bulkClear.style.display = on ? "" : "none";
+                if (!on) return;
                 const parts = [];
                 if (nE) parts.push(`записей: ${nE}`);
                 if (nF) parts.push(`категорий: ${nF}`);
-                const t = document.createElement("span");
-                t.textContent = `Помечено — ${parts.join(", ")}. `;
-                t.style.cssText = "color:#e08a3c;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                const delB = document.createElement("button");
-                delB.textContent = "🗑 Удалить";
-                delB.title = "Удалить помеченные записи и категории";
-                delB.style.cssText = "background:#5a2b2b;color:#ffd9d9;border:1px solid #a33;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
-                delB.onclick = () => st.bulkDelete?.();
-                const clrB = document.createElement("button");
-                clrB.textContent = "✖";
-                clrB.title = "Снять все метки (Esc)";
-                clrB.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
-                clrB.onclick = () => st.clearMarks?.();
-                listHead.appendChild(t);
-                listHead.appendChild(delB);
-                listHead.appendChild(clrB);
+                st.bulkCount.textContent = `Помечено — ${parts.join(", ")}.`;
+                st.bulkCount.title = st.bulkCount.textContent;
             };
             // Esc снимает метки (слушатель на корне ноды — срабатывает при фокусе внутри неё).
             // outline:none — tabIndex делает div фокусируемым, без этого браузер
@@ -1307,10 +1368,8 @@ app.registerExtension({
             bSave.onclick = async () => {
                 if (!st.detailId) return;
                 try {
-                    await fetch("/prompt_library/update", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ id: st.detailId, title: st.dTitle.value, prompt: st.dText.value, folder: st.dFolder.value }),
-                    });
+                    await st.apiPost("/prompt_library/update", { id: st.detailId, title: st.dTitle.value,
+                        prompt: st.dText.value, folder: st.dFolder.value });
                     st.full.delete(st.detailId);
                     for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
                     st.bSave.style.display = "none";
@@ -1352,12 +1411,6 @@ app.registerExtension({
             };
             st.checkCycle = checkCycle;
 
-            // Высота ноды: в окне при проводе только голова текста (стабильно ~5 строк),
-            // полный текст — в базе и панели книги. Только публичный widget.value.
-            // Списки фиксированы (320px, внутренний скролл); рамка обнимает контент
-            // Никаких подгонок под ресайз, CSS и таймеров.
-            st.HEAD_CHARS = 300;
-            st.lastFullText = "";
             // computeLayoutSize отдаёт минимальную высоту — фронтенд сам управляет
             // размером ноды и растягивает виджет (никаких offsetHeight/scrollHeight/plScale).
             // Минимальная ширина: ноду нельзя сжать уже контента.
@@ -1497,11 +1550,6 @@ app.registerExtension({
         nodeType.prototype.onExecuted = function (message) {
             const ret = origOnExecuted?.apply(this, arguments);
             try {
-                if (message?.text?.[0] !== undefined) {
-                    const full = message.text[0] || "";
-                    const st = this._pl;
-                    if (st) st.lastFullText = full;
-                }
                 if (message?.entries && this._pl) {
                     this._pl.reload?.();
                 }
@@ -1511,7 +1559,10 @@ app.registerExtension({
                 if (sd && sd.id && this._pl) {
                     const st = this._pl;
                     const where = sd.folder || "корне";
-                    st.hintMsg = `Дубликат не сохранён — такой промпт уже есть в «${where}».`;
+                    // Стойкое сообщение: hintMsg показывается только при открытой
+                    // панели книги, поэтому пишем в отдельное поле — иначе
+                    // предупреждение о дубле после Queue вообще не видно.
+                    st.hintSticky = `Дубликат не сохранён — такой промпт уже есть в «${where}».`;
                     try {
                         st.toast("warn", "Prompt Library: дубликат",
                             `Такой промпт уже есть в «${where}» — новая запись не создана.`);
@@ -1589,8 +1640,24 @@ app.registerExtension({
 
         const origOnRemoved = nodeType.prototype.onRemoved;
         nodeType.prototype.onRemoved = function () {
-            try { this._pl?.full?.clear?.(); } catch (e) { /* silent */ }
-            try { plModeWatchers.delete(this._pl?.onModeChange); } catch (e) { /* silent */ }
+            const st = this._pl;
+            try { st?.full?.clear?.(); } catch (e) { /* silent */ }
+            try { plLiveStates.delete(st); } catch (e) { /* silent */ }
+            try { plModeWatchers.delete(st?.onModeChange); } catch (e) { /* silent */ }
+            // Снимаем слушатели с ДОЛГОЖИВУЩИХ объектов (app.api / настройки).
+            // Без этого удалённая нода не собирается GC и продолжает отвечать
+            // reload() на каждый broadcast — запрос /prompt_library/list на каждую
+            // выгрузку воркфлоу за сессию.
+            try {
+                if (st?.apiListener && st.apiTarget?.removeEventListener) {
+                    st.apiTarget.removeEventListener("prompt_library/refresh", st.apiListener);
+                }
+            } catch (e) { /* silent */ }
+            try {
+                if (st?.settingsListener && st.settingsTarget?.removeEventListener) {
+                    st.settingsTarget.removeEventListener("Comfy.VueNodes.Enabled.change", st.settingsListener);
+                }
+            } catch (e) { /* silent */ }
             return origOnRemoved?.apply(this, arguments);
         };
     },

@@ -89,6 +89,11 @@ const settingsStub = {
   get: (id) => (id === "Comfy.VueNodes.Enabled" ? settingsVueEnabled : undefined),
   set() {}, setSettingValue() {}, getSettingValue: (id) => settingsStub.get(id),
   addEventListener(type, cb) { (settingsListeners[type] ??= []).push(cb); },
+  removeEventListener(type, cb) {
+    const arr = settingsListeners[type] ?? [];
+    const i = arr.indexOf(cb);
+    if (i >= 0) arr.splice(i, 1);
+  },
   dispatchChange(id, value) {
     for (const cb of settingsListeners[id + ".change"] ?? []) cb({ detail: { value } });
   },
@@ -109,6 +114,20 @@ const flushRaf = (label) => {
   }
 };
 
+// app.api — ComfyApi (EventTarget) в реальном фронтенде 1.52: addEventListener
+// добавляет тип в его _registered, а WS-сообщение приходит CustomEvent'ом.
+const apiListeners = {};
+const apiStub = {
+  fetchApi: async () => ({}),
+  addEventListener(type, cb) { (apiListeners[type] ??= []).push(cb); },
+  removeEventListener(type, cb) {
+    const arr = apiListeners[type] ?? [];
+    const i = arr.indexOf(cb);
+    if (i >= 0) arr.splice(i, 1);
+  },
+  dispatch(type) { for (const cb of [...(apiListeners[type] ?? [])]) cb({ type, detail: {} }); },
+};
+
 const appStub = {
   registerExtension(ext) { captured = ext; },
   extensionManager: {
@@ -121,7 +140,7 @@ const appStub = {
   graph: { setDirtyCanvas() {}, links: {}, getNodeById: () => null, _nodes: [] },
   canvas: { ds: { scale: 1, offset: [0, 0] }, draw() {}, setDirty() {}, canvas: makeEl("canvas") },
   ui: { dialog: {}, settings: settingsStub },
-  api: { fetchApi: async () => ({}) },
+  api: apiStub,
   workflowManager: { activeWorkflow: null, openWorkflow: async () => {} },
   loadGraphData: async () => {},
 };
@@ -202,13 +221,18 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.20-dup-warn");
+  check(`${tag}: версия JS видна`, st.version === "1.23-panes-fit");
 }
 
-// Канвас: пол 480px на панелях (фронтенд сам растёт ноду под контент).
+// Канвас: панели СЖИМАЮТСЯ (flex 1 1 0 + min-height:0) — тот же clamp, что в Vue.
+// Полом был min-height:480px на панелях: когда реального места меньше пола
+// (панель книги до 320px против номинальных DETAIL_H=280, другой шрифт/зум),
+// контент вылезал за root и detail его перекрывал — низ списка с кнопками.
 function checkCanvasPanes(tag, st) {
-  check(`${tag}: tree пол 480px`, st.tree.style.flex === "1 1 auto" && st.tree.style.minHeight === "480px");
-  check(`${tag}: list пол 480px`, st.list.style.flex === "1 1 auto" && st.list.style.minHeight === "480px");
+  check(`${tag}: tree сжимается (без пола)`, st.tree.style.flex === "1 1 0" && st.tree.style.minHeight === "0");
+  check(`${tag}: list сжимается (без пола)`, st.list.style.flex === "1 1 0" && st.list.style.minHeight === "0");
+  check(`${tag}: main сжимается и обрезает`,
+    st.main.style.flex === "1 1 0" && st.main.style.minHeight === "0" && st.main.style.overflow === "hidden");
 }
 
 // Vue: пол перенесён на scrollArea (только он попадает в замер min-content,
@@ -277,12 +301,12 @@ for (const vue of [false, true]) {
     check(`${tag}: main+detail в scrollArea`, st.detail.parentNode !== st.root && scrollAreaOf() !== undefined);
     const area = scrollAreaOf();
     checkVuePanes(tag, st, area);
-    check(`${tag}: scrollArea перед hint`, st.root.children.indexOf(area) < st.root.children.indexOf(st.hint));
+    check(`${tag}: scrollArea перед нижней строкой`, st.root.children.indexOf(area) < st.root.children.indexOf(st.hintRow));
     check(`${tag}: min-width ноды = MIN_W`, nodeElStub.style.minWidth === `${470}px`);
   } else {
     check(`${tag}: main+detail прямые дети root`, st.detail.parentNode === st.root);
     check(`${tag}: scrollArea нет в root`, scrollAreaOf() === undefined);
-    check(`${tag}: 6 детей root`, st.root.children.length === 6 && st.root.children[5] === st.hint);
+    check(`${tag}: 6 детей root`, st.root.children.length === 6 && st.root.children[5] === st.hintRow);
     checkCanvasPanes(tag, st);
   }
   console.log(`--- ${tag}: ok, root children=${st.root.children.length} ---`);
@@ -391,10 +415,21 @@ await run("marks: диапазон + эксклюзив карточки/пап�
   check("эксклюзив: карточка с зажатым модификатором не метится, папки целы",
     st.markEntries.size === 0 && st.markFolders.size === 3);
   st.renderHint(3);
-  check("bulk-бар в listHead (раскладку не двигает)",
-    st.listHead && st.listHead.children.some((c) => c.textContent === "🗑 Удалить"));
+  check("bulk-бар в нижней строке (hintRow)",
+    st.hintRow && st.hintRow.children.some((c) => c.textContent === "🗑 Удалить"));
+  check("метки: строка внизу фиксирована, счётчик сжимается, кнопки видны",
+    String(st.hintRow.style.cssText).includes("height:22px")
+    && String(st.hintRow.style.cssText).includes("flex-shrink:0")
+    && String(st.bulkCount.style.cssText).includes("min-width:0")
+    && String(st.bulkClear.style.cssText).includes("flex-shrink:0"));
+  check("метки: hint скрыт, кнопки показаны",
+    st.hint.style.display === "none" && st.bulkDel.style.display === "" && st.bulkCount.textContent === "Помечено — категорий: 3.");
   check("hint остался текстом в одну строку",
     String(st.hint.style.cssText).includes("nowrap") && typeof st.hint.textContent === "string");
+  st.clearMarks();
+  st.renderHint(0);
+  check("метки сняты: hint вернулся, кнопки скрыты",
+    st.hint.style.display === "" && st.bulkDel.style.display === "none" && st.bulkClear.style.display === "none");
   st.clearMarks();
   check("clearMarks всё снял",
     st.markEntries.size === 0 && st.markFolders.size === 0
@@ -452,6 +487,118 @@ await run("panels: panelOpened/shrinkBack", () => {
   st.detail.style.display = "none";
   st.shrinkBack();
   check("во Vue размером владеет layout — не трогаем", node.size[1] === 2000);
+});
+
+// --- Синхронизация ДВУХ нод на одной странице (удаление карточек/папок) ---
+// Сценарий пользователя: две Library-ноды в одном графе, в одной удалили
+// карточку — вторая должна перечитать базу, а не показывать удалённое.
+await run("sync: удаление карточки обновляет соседнюю ноду", async () => {
+  const a = makeNode(); const b = makeNode();
+  proto.onNodeCreated.call(a); proto.onNodeCreated.call(b);
+  // стартовый reload() каждой ноды асинхронный — даём ему осесть, иначе он
+  // перезапишет st.entries, который тест выставляет вручную
+  await new Promise((r) => setImmediate(r));
+  const sa = a._pl; const sb = b._pl;
+  const mk = (id) => ({ id, title: id, head: id, folder: "", favorite: false,
+    created_at: "2026-09-18T01:00:00", last_used: null,
+    has_preview: false, has_workflow: false, media: "image" });
+  sa.entries = [mk("e1"), mk("e2")];
+  sa.selFolder = "__all";
+  sa.renderTree(); sa.render();
+  let bReloads = 0;
+  sb.reload = () => { bReloads++; };
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push(url);
+    return jsonResponse({ ok: true });
+  };
+  try {
+    const cards = sa.list.children.filter((c) => c.draggable);
+    check("карточки отрисованы", cards.length === 2, `cards=${cards.length}`);
+    const buttons = [];
+    const walk = (el) => { if (!el?.children) return; for (const c of el.children) { if (typeof c.onclick === "function") buttons.push(c); walk(c); } };
+    walk(cards[0]);
+    const del = buttons.find((x) => x.textContent === "🗑");
+    check("кнопка 🗑 найдена", !!del);
+    await del.onclick({ stopPropagation() {} });
+    check("запрос удаления ушёл", posts.some((u) => u.includes("/prompt_library/delete")), posts.join(","));
+    check("соседняя нода перечитала базу", bReloads === 1, `b=${bReloads}`);
+    check(`карточка убрана локально (n=${sa.entries.length}, [${sa.entries.map((x) => x.id).join(",")}])`, sa.entries.length === 1);
+  } finally { sandbox.fetch = origFetch; }
+});
+
+await run("sync: onRemoved убирает ноду из реестра", async () => {
+  const a = makeNode(); const b = makeNode();
+  proto.onNodeCreated.call(a); proto.onNodeCreated.call(b);
+  const sa = a._pl;
+  let aReloads = 0;
+  sa.reload = () => { aReloads++; };
+  proto.onRemoved.call(a);
+  await b._pl.apiPost("/prompt_library/delete", { id: "нет-такого" });
+  check("снятая нода не перечитывается", aReloads === 0, `a=${aReloads}`);
+});
+
+// --- Автообновление: broadcast prompt_library/refresh (v1.21/v1.22) ---
+await run("broadcast: app.api → reload, onRemoved отписывает", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  let reloads = 0;
+  st.reload = () => { reloads++; };
+  check("слушатель подписан на app.api",
+    (apiListeners["prompt_library/refresh"] ?? []).includes(st.apiListener));
+  apiStub.dispatch("prompt_library/refresh");
+  check("событие вызывает reload", reloads === 1, `reloads=${reloads}`);
+  proto.onRemoved.call(node);
+  apiStub.dispatch("prompt_library/refresh");
+  check("после onRemoved мёртвая нода не грузит базу", reloads === 1, `reloads=${reloads}`);
+  check("слушатель снят из app.api",
+    !(apiListeners["prompt_library/refresh"] ?? []).includes(st.apiListener));
+});
+
+// --- Подсказка о дубликате видна без открытой панели книги ---
+await run("hint: стойкое сообщение о дубле", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  proto.onExecuted.call(node, { entries: [{}], skipped_duplicate: { id: "x1", folder: "Фото" } });
+  check("дубль виден в hint без открытой панели",
+    String(st.hint.textContent).includes("Фото"), st.hint.textContent);
+  st.render(0);
+  check("стойкое сообщение переживает обычный рендер",
+    String(st.hint.textContent).includes("Фото"), st.hint.textContent);
+  st.hintSticky = null;
+  st.render(0);
+  check("после сброса hint снова обычный",
+    !String(st.hint.textContent).includes("Фото"), st.hint.textContent);
+});
+
+// --- Служебный префикс __ не создаётся из UI ---
+await run("folder: префикс __ отклоняется на клиенте", async () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  let toasts = 0; let posts = 0;
+  st.toast = () => { toasts++; };
+  const origFetch = sandbox.fetch; const origPrompt = sandbox.prompt;
+  sandbox.fetch = async (u) => {
+    if (String(u).includes("folder_create")) posts++;
+    return jsonResponse({ ok: true, path: "x" });
+  };
+  sandbox.prompt = () => "__fav";
+  try {
+    const found = [];
+    const walk = (el) => { if (!el?.children) return; for (const c of el.children) { found.push(c); walk(c); } };
+    walk(st.root);
+    const btn = found.find((b) => b.textContent === "+ Категория");
+    check("кнопка «+ Категория» найдена", !!btn);
+    await btn.onclick();
+    check("запрос на сервер не ушёл", posts === 0, `posts=${posts}`);
+    check("пользователь предупреждён", toasts === 1, `toasts=${toasts}`);
+  } finally { sandbox.fetch = origFetch; sandbox.prompt = origPrompt; }
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);

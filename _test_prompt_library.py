@@ -54,6 +54,19 @@ class _PromptServer:
     instance = types.SimpleNamespace(routes=_Routes())
 
 
+# Broadcast (§26): _broadcast_refresh() дергает PromptServer.instance.send_sync.
+# Раньше в стабе его не было вообще — фича автообновления v1.21 не проверялась ни
+# одним тестом (101/101 оставались зелёными при неработающем автообновлении).
+_broadcasts = []
+
+
+def _fake_send_sync(event, data=None, sid=None):
+    _broadcasts.append(event)
+
+
+_PromptServer.instance.send_sync = _fake_send_sync
+
+
 server_mod = types.ModuleType("server")
 server_mod.PromptServer = _PromptServer
 sys.modules["server"] = server_mod
@@ -530,6 +543,120 @@ res_iss = node.execute(mode=node.MODE_ISSUE, selected=gid, save_folder="", sourc
                        extra_pnginfo=pnginfo, unique_id=7)
 check("ui-пакеты переживают слияние ComfyUI (запись/дубль/выдача)",
       _ui_merge_ok(res_d["ui"]) and _ui_merge_ok(res_ok["ui"]) and _ui_merge_ok(res_iss["ui"]))
+
+# --- 13. автообновление Library-нод (broadcast, v1.21/v1.22) -------------------
+print("\n13. Автообновление (broadcast prompt_library/refresh)")
+_broadcasts.clear()
+node.execute(mode=node.MODE_WRITE, selected="", save_folder="Bc", source="бродкаст-новый",
+             extra_pnginfo=pnginfo, unique_id=7)
+check("execute: новая запись -> broadcast", _broadcasts == ["prompt_library/refresh"], str(_broadcasts))
+_broadcasts.clear()
+node.execute(mode=node.MODE_WRITE, selected="", save_folder="Bc", source="бродкаст-новый",
+             extra_pnginfo=pnginfo, unique_id=7)
+check("execute: повторный текст без изменений -> без broadcast", _broadcasts == [], str(_broadcasts))
+_broadcasts.clear()
+node.execute(mode=node.MODE_ISSUE, selected="", save_folder="", source="выдача",
+             extra_pnginfo=pnginfo, unique_id=7)
+check("execute: режим выдачи -> без broadcast", _broadcasts == [], str(_broadcasts))
+
+# backfill существующей записи: файл меняется (dirty), но новой книги нет
+db = json.loads(lib_file.read_text(encoding="utf-8"))
+db["entries"].insert(0, {"id": "bf-broadcast", "hash": "h-bf-broadcast",
+                         "prompt": "бэкфилл-без-бродкаста", "folder": "", "title": "бэкфилл"})
+lib_file.write_text(json.dumps(db, ensure_ascii=False), encoding="utf-8")
+_broadcasts.clear()
+node.execute(mode=node.MODE_WRITE, selected="", save_folder="", source="бэкфилл-без-бродкаста",
+             extra_pnginfo=pnginfo, unique_id=7)
+check("execute: backfill workflow -> без broadcast", _broadcasts == [], str(_broadcasts))
+check("execute: backfill при этом записан",
+      bool(next(e for e in mod._load_db()[0] if e["id"] == "bf-broadcast").get("workflow")))
+
+# Ручные роуты: без broadcast соседние Library-ноды и другие вкладки молчат
+_broadcasts.clear()
+r_new = h("POST", "/prompt_library/add", Req({"prompt": "роут-бродкаст", "folder": "Bc"}))
+nid = r_new["json"]["id"]
+check("/add -> broadcast", _broadcasts == ["prompt_library/refresh"], str(_broadcasts))
+_broadcasts.clear()
+r_dup2 = h("POST", "/prompt_library/add", Req({"prompt": "роут-бродкаст", "folder": "Bc"}))
+check("/add дубль -> без broadcast",
+      _broadcasts == [] and r_dup2["json"].get("duplicate") is True, str(_broadcasts))
+_broadcasts.clear()
+h("POST", "/prompt_library/delete", Req({"id": "нет-такого"}))
+check("/delete несуществующей записи -> без broadcast", _broadcasts == [], str(_broadcasts))
+_broadcasts.clear()
+h("POST", "/prompt_library/delete_many", Req({"ids": ["нет-такого"]}))
+check("/delete_many без изменений -> без broadcast", _broadcasts == [], str(_broadcasts))
+_broadcasts.clear()
+h("POST", "/prompt_library/folder_delete_many", Req({"paths": []}))
+check("/folder_delete_many с пустым списком -> без broadcast", _broadcasts == [], str(_broadcasts))
+for _label, _method, _path, _body in [
+    ("/favorite", "POST", "/prompt_library/favorite", {"id": nid, "favorite": True}),
+    ("/update", "POST", "/prompt_library/update", {"id": nid, "title": "переименовано"}),
+    ("/folder_create", "POST", "/prompt_library/folder_create", {"parent": "", "name": "Bc2"}),
+    ("/folder_rename", "POST", "/prompt_library/folder_rename", {"old": "Bc2", "new": "Bc3"}),
+    ("/folder_delete", "POST", "/prompt_library/folder_delete", {"path": "Bc3"}),
+    ("/delete", "POST", "/prompt_library/delete", {"id": nid}),
+]:
+    _broadcasts.clear()
+    h(_method, _path, Req(_body))
+    check(f"{_label} -> broadcast", _broadcasts == ["prompt_library/refresh"], str(_broadcasts))
+
+# --- 14. служебный префикс __ --------------------------------------------------
+print("\n14. Служебный префикс __ (призрачные категории)")
+r = h("POST", "/prompt_library/folder_create", Req({"parent": "", "name": "__fav"}))
+check("/folder_create с '__fav' -> 400", r["status"] == 400, str(r))
+check("папка '__fav' не создана", "__fav" not in mod._load_db()[1])
+r = h("POST", "/prompt_library/folder_create", Req({"parent": "", "name": "__all"}))
+check("/folder_create с '__all' -> 400", r["status"] == 400, str(r))
+r = h("POST", "/prompt_library/folder_create", Req({"parent": "__fav", "name": "Под"}))
+check("/folder_create с parent '__fav' -> папка в корне", r["json"].get("path") == "Под", str(r))
+r = h("POST", "/prompt_library/folder_rename", Req({"old": "Под", "new": "__root"}))
+check("/folder_rename в '__root' -> 400", r["status"] == 400, str(r))
+check("папка '__root' не появилась", "__root" not in mod._load_db()[1])
+h("POST", "/prompt_library/add", Req({"prompt": "в служебную папку", "folder": "__root"}))
+_e_srv = next(e for e in mod._load_db()[0] if e["prompt"] == "в служебную папку")
+check("/add с folder '__root' сохраняет в корень", _e_srv["folder"] == "", str(_e_srv["folder"]))
+h("POST", "/prompt_library/update", Req({"id": _e_srv["id"], "folder": "__fav"}))
+check("/update в '__fav' переводит запись в корень",
+      next(e for e in mod._load_db()[0] if e["id"] == _e_srv["id"])["folder"] == "")
+node.execute(mode=node.MODE_WRITE, selected="", save_folder=" __fav ",
+             source="пробелы вокруг служебного", extra_pnginfo=pnginfo, unique_id=7)
+check("execute: ' __fav ' (с пробелами) тоже режется в корень",
+      next(e for e in mod._load_db()[0] if e["prompt"] == "пробелы вокруг служебного")["folder"] == "")
+
+# --- 15. бэкфилл превью у существующей записи ---------------------------------
+print("\n15. Бэкфилл превью существующей записи (дубль + IMAGE)")
+# numpy/PIL в песочнице может не быть — подменяем только саму запись превью
+_orig_thumb = mod._save_thumbnail
+_thumb_calls = []
+
+
+def _thumb_stub(img, entry_id, workflow=None):
+    _thumb_calls.append(entry_id)
+    return f"previews/{entry_id}.png"
+
+
+mod._save_thumbnail = _thumb_stub
+try:
+    h("POST", "/prompt_library/add", Req({"prompt": "дубль-без-превью", "folder": "Bc"}))
+    e0 = next(e for e in mod._load_db()[0] if e["prompt"] == "дубль-без-превью")
+    check("ручная запись без превью", not e0.get("preview"))
+    node.execute(mode=node.MODE_WRITE, selected="", save_folder="Другая",
+                 source="дубль-без-превью", image=object(), extra_pnginfo=pnginfo, unique_id=7)
+    e1 = next(e for e in mod._load_db()[0] if e["prompt"] == "дубль-без-превью")
+    check("дубль + IMAGE -> превью прикреплено к существующей записи",
+          e1.get("preview") == f"previews/{e1['id']}.png", str(e1.get("preview")))
+    check("превью записано один раз", len(_thumb_calls) == 1, str(_thumb_calls))
+    check("запись не продублирована (текст один раз)",
+          len([e for e in mod._load_db()[0] if e["prompt"] == "дубль-без-превью"]) == 1)
+    check("папка оригинала не изменилась", e1["folder"] == "Bc", str(e1["folder"]))
+    check("media записан", e1.get("media") == "image", str(e1.get("media")))
+    node.execute(mode=node.MODE_WRITE, selected="", save_folder="Третья",
+                 source="дубль-без-превью", image=object(), extra_pnginfo=pnginfo, unique_id=7)
+    check("повторный прогон не перезаписывает готовое превью",
+          len(_thumb_calls) == 1, str(_thumb_calls))
+finally:
+    mod._save_thumbnail = _orig_thumb
 
 # --- итог -------------------------------------------------------------------
 print(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
