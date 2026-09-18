@@ -313,9 +313,9 @@ check("новая запись впереди", entries[0]["prompt"] == "пер�
 
 # валидация входов
 check("VALIDATE_INPUTS принимает любой тип", mod.PromptLibrary.VALIDATE_INPUTS(input_types={}) is True)
-check("INPUT_TYPES: source опционален, image IMAGE",
+check("INPUT_TYPES: source опционален, image IMAGE,VIDEO (двухцветный сокет)",
       mod.PromptLibrary.INPUT_TYPES()["optional"]["source"][0] == "*"
-      and mod.PromptLibrary.INPUT_TYPES()["optional"]["image"][0] == "IMAGE")
+      and mod.PromptLibrary.INPUT_TYPES()["optional"]["image"][0] == "IMAGE,VIDEO")
 check("execute фильтрует не-строковый source", (
     node.execute(mode=node.MODE_ISSUE, selected="", save_folder="", source={"a": 1},
                  extra_pnginfo=pnginfo, unique_id=7)["result"][0] == ""))

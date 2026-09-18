@@ -149,17 +149,79 @@ def _workflow_pnginfo(workflow):
         return None
 
 
+def _extract_frame(source):
+    """Первый кадр из IMAGE-тензора или VIDEO-объекта ядра.
+
+    Сокет объявлен как IMAGE,VIDEO (двухцветный): по синему проводу приходит
+    torch-батч (B,H,W,C), по зелёному — VideoInput с get_components().images
+    (тот же батч + audio/frame_rate). Возвращает кадр-тензор/ndarray либо None.
+    """
+    if source is None:
+        return None
+    get_comp = getattr(source, "get_components", None)
+    if callable(get_comp):
+        try:
+            comp = get_comp()
+            imgs = getattr(comp, "images", None)
+            if imgs is None and isinstance(comp, (tuple, list)):
+                imgs = comp[0] if comp else None
+            if imgs is None:
+                return None
+            return imgs[0] if getattr(imgs, "ndim", 3) == 4 else imgs
+        except Exception as e:
+            print(f"[PromptLibrary] video frame extract failed: {e}", flush=True)
+            return None
+    return source
+
+
 def _save_thumbnail(image, entry_id, workflow=None):
     """Первый кадр IMAGE-тензора как PNG-превью 512px со встроенным workflow
-    (как SaveImage). Возвращает относительный путь 'previews/{id}.png' или None."""
+    (как SaveImage). Видео — это тот же IMAGE-батч (B,H,W,C), поэтому берём
+    кадр [0]. Возвращает относительный путь 'previews/{id}.png' или None."""
     try:
         from PIL import Image
     except Exception:
         return None
     try:
-        arr = image[0].detach().cpu().numpy() if hasattr(image, "detach") else image[0]
         import numpy as np
-        arr = (np.asarray(arr) * 255).clip(0, 255).astype("uint8")
+        # Видео/батч может прийти списком — берём первый элемент
+        frame = image[0] if isinstance(image, (list, tuple)) else image
+        # torch-батч (B,H,W,C) — первый кадр; одиночный кадр (H,W,C) — как есть
+        try:
+            import torch  # type: ignore
+            is_tensor = isinstance(frame, torch.Tensor)
+        except Exception:
+            is_tensor = hasattr(frame, "detach") or hasattr(frame, "cpu")
+        if is_tensor:
+            try:
+                ndim = frame.ndim  # torch
+            except Exception:
+                ndim = np.asarray(frame).ndim
+            if ndim == 4:
+                frame = frame[0]
+        else:
+            arr_tmp = np.asarray(frame)
+            if arr_tmp.ndim == 4:
+                frame = frame[0] if not isinstance(frame, np.ndarray) else arr_tmp[0]
+        if hasattr(frame, "detach"):
+            arr = frame.detach().cpu().numpy()
+        elif hasattr(frame, "cpu"):
+            arr = frame.cpu().numpy()
+        else:
+            arr = np.asarray(frame)
+        arr = np.asarray(arr)
+        # float 0..1 -> 0..255; uint8 и float 0..255 — как есть
+        if arr.dtype.kind == "f":
+            peak = float(arr.max()) if arr.size else 0.0
+            if peak <= 1.5:
+                arr = (arr * 255).clip(0, 255).astype("uint8")
+            else:
+                arr = arr.clip(0, 255).astype("uint8")
+        elif arr.dtype != np.uint8:
+            arr = np.asarray(arr).clip(0, 255).astype("uint8")
+        # grayscale (H,W) -> RGB
+        if arr.ndim == 2:
+            arr = np.stack([arr] * 3, axis=-1)
         img = Image.fromarray(arr)
         # Запас под крупный показ: исходник 512px, даунскейл только в браузере
         img.thumbnail((512, 512), Image.LANCZOS)
@@ -280,7 +342,10 @@ class PromptLibrary:
             },
             "optional": {
                 "source": ("*", {}),
-                "image": ("IMAGE", {}),
+                # Двухцветный сокет: синий IMAGE-тензор или зелёный VIDEO-объект
+                # ядра (VideoInput). Мульти-тип через запятую — штатный механизм
+                # ComfyUI (как FLOAT,INT): фронт рисует сокет двумя цветами.
+                "image": ("IMAGE,VIDEO", {}),
             },
             "hidden": {
                 "extra_pnginfo": "EXTRA_PNGINFO",
@@ -343,7 +408,8 @@ class PromptLibrary:
         if not issue and incoming:
             entry_id, added = _add_entry(entries, incoming, fld, workflow=wf_copy)
             if added:
-                preview = _save_thumbnail(image, entry_id, wf_copy) if image is not None else None
+                frame = _extract_frame(image) if image is not None else None
+                preview = _save_thumbnail(frame, entry_id, wf_copy) if frame is not None else None
                 if preview:
                     for e in entries:
                         if e.get("id") == entry_id:
