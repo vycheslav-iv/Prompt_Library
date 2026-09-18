@@ -76,7 +76,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.27-audit";
+const PL_JS_VERSION = "1.28-pickup";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -1192,6 +1192,10 @@ app.registerExtension({
                     try { out = await r.json(); } catch (e) { /* silent */ }
                     if (!r.ok) {
                         console.warn("[PromptLibrary] save_pickup failed:", r.status, out);
+                        // Не молчим: отказ сервера (протухший токен) раньше не был
+                        // виден нигде, кроме F12 (§33).
+                        st.hintSticky = `Подхват: сервер отклонил запись (${r.status}) — подробности в F12.`;
+                        st.renderHint?.();
                         return;
                     }
                     await reload();
@@ -1310,6 +1314,17 @@ app.registerExtension({
                         // Подхват (v1.25): запись ещё не создана — сначала сохраняем
                         // текст узла-источника, потом (из ответа) прикрепляем обложку.
                         if (pick) st.savePickup(pick, shot);
+                        else {
+                            // Подхват включён, а токена нет: наша нода не исполнялась в
+                            // этом прогоне (ComfyUI закэшировал её — у ноды нет проводов,
+                            // см. IS_CHANGED/§33). Раньше это уходило совсем молча.
+                            const want = (st.pickupNode && st.pickupNode()) || "";
+                            if (want) {
+                                console.warn("[PromptLibrary] pickup: токен не пришёл — нода не исполнялась в этом прогоне (кэш ComfyUI)");
+                                st.hintSticky = "Подхват: нода не исполнялась в этом прогоне (кэш) — запись не создана.";
+                                st.renderHint?.();
+                            }
+                        }
                         if (!rec) return;
                         if (rec.image) {
                             st.attachPreview(rec.id, rec.image);

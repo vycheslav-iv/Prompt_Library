@@ -601,6 +601,32 @@ class PromptLibrary:
         # Вход source — ANY (*): принимаем любой тип без проверки
         return True
 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        """Подхват требует, чтобы нода исполнялась в КАЖДОМ прогоне (SPEC §33).
+
+        Токен подхвата выдаётся только из `execute()`, а у ноды с подхватом нет
+        проводов: ComfyUI кэширует ноду по значениям её входов, и после первого
+        же прогона с тем же набором (mode/selected/save_folder/pickup) `execute()`
+        больше не вызывается. Токена нет → клиенту нечего вернуть вместе с текстом
+        узла-источника → запись молча не создаётся. Живая эксплуатация выглядит
+        как «то добавляет, то не добавляет»: сохранение работает только в прогоне
+        сразу после смены любого виджета ноды либо холодного старта ComfyUI.
+
+        `float("nan")` не равен сам себе — ComfyUI считает ноду изменившейся и
+        исполняет её каждый Queue (штатный механизм IS_CHANGED). Без подхвата
+        возвращаем None — нода кэшируется как обычно.
+        """
+        val = kwargs.get("pickup")
+        if isinstance(val, (list, tuple)):
+            # Страховка: до разворачивания ComfyUI держит виджетные входы
+            # 1-элементными списками (map-over-list); если форма когда-нибудь
+            # доедет сюда списком, решение не должно поменяться.
+            val = val[0] if len(val) else ""
+        if str(val or "").strip():
+            return float("nan")
+        return None
+
     def execute(self, mode="", selected="", save_folder="", pickup="", source=None, image=None,
                 extra_pnginfo=None, unique_id=None, **kwargs):
         # Весь прогон узла держит общий с HTTP-роутами замок (§25.3.2): execute()
@@ -944,6 +970,11 @@ try:
         if not token or rec is None:
             # Токена нет: прогон состоялся без execute() нашей ноды (кэш, mute,
             # interrupt) либо токен уже забрали — это не ошибка базы.
+            # Печатаем в консоль ComfyUI: без этого «запись не создалась» не видно
+            # вообще нигде, кроме F12 (§33). При кэше ComfyUI пере-рассылает старый
+            # `ui` — токен приходит уже потраченным, отсюда эта ветка.
+            print("[PromptLibrary] save_pickup: token unknown or already used "
+                  "(node was cached? see SPEC section 33)", flush=True)
             return web.json_response({"error": "unknown token"}, status=400)
         if not text:
             return web.json_response({"ok": True, "skipped": "empty"})

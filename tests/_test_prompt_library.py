@@ -6,6 +6,7 @@
 """
 import asyncio
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -1122,6 +1123,36 @@ check("/search ищет и по папке",
 check("/search регистронезависим (кириллица)",
       _entry(_deep)["id"] in h("GET", "/prompt_library/search",
                                Req(query={"q": "НАЧАЛО"}))["json"].get("ids", []))
+
+
+# --- 21. подхват и кэш ComfyUI: IS_CHANGED (v1.28) ---------------------------
+_p("\n21. Подхват и кэш: IS_CHANGED заставляет ноду исполняться каждый Queue")
+
+_cls = mod.PromptLibrary
+check("IS_CHANGED объявлен как classmethod (механика ComfyUI)",
+      isinstance(inspect.getattr_static(_cls, "IS_CHANGED"), classmethod))
+_nan_on = _cls.IS_CHANGED(pickup="1622")
+check("pickup задан -> NaN (нода всегда 'изменена')",
+      isinstance(_nan_on, float) and _nan_on != _nan_on, repr(_nan_on))
+check("NaN не равен себе — кэш не переиспользует прогон",
+      _cls.IS_CHANGED(pickup="1622") != _cls.IS_CHANGED(pickup="1622"))
+check("pickup пустой/None -> None (обычное кэширование)",
+      _cls.IS_CHANGED(pickup="") is None and _cls.IS_CHANGED(pickup=None) is None
+      and _cls.IS_CHANGED() is None)
+check("pickup из пробелов не включает форсированное исполнение",
+      _cls.IS_CHANGED(pickup="   ") is None)
+check("батч-форма значения не ломает решение (страховка)",
+      _cls.IS_CHANGED(pickup=["1622"]) != _cls.IS_CHANGED(pickup=["1622"])
+      and _cls.IS_CHANGED(pickup=[""]) is None and _cls.IS_CHANGED(pickup=[]) is None)
+check("остальные виджеты на решение не влияют",
+      _cls.IS_CHANGED(pickup="1622", mode="Запись", selected="", save_folder="x")
+      != _cls.IS_CHANGED(pickup="1622", mode="Записи", selected="", save_folder="x"))
+
+# Протухший токен: клиент должен получить 400 (а не тихую пустоту), сервер — строку в консоль
+_p("\n22. save_pickup: неизвестный токен — отказ виден клиенту")
+_r_stale = h("POST", "/prompt_library/save_pickup", Req({"token": "deadbeef", "text": "x"}))
+check("протухший токен -> 400 + error", _r_stale["status"] == 400
+      and _r_stale["json"].get("error"), str(_r_stale))
 
 
 # --- итог -------------------------------------------------------------------

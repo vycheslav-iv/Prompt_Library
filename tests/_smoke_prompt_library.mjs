@@ -240,7 +240,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.27-audit");
+  check(`${tag}: версия JS видна`, st.version === "1.28-pickup");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -1007,6 +1007,81 @@ await run("pickup: пустой текст источника — записи �
   } finally {
     sandbox.fetch = origFetch;
     st.toast = origToast;
+    appStub.graph._nodes = prevNodes;
+    appStub.graph.getNodeById = prevGet;
+  }
+});
+
+// --- v1.28: подхват и кэш ComfyUI --------------------------------------------
+// У ноды с подхватом нет проводов, поэтому ComfyUI кэширует её по виджетам:
+// без IS_CHANGED execute() со второго одинакового Queue не вызывается, токена
+// нет — и запись молча не создавалась. Проверяем, что теперь причина видна.
+await run("pickup + кэш: токена нет — записи нет, но причина показана (v1.28)", async () => {
+  const node = makeNode();
+  node.id = 45;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  const prevNodes = appStub.graph._nodes;
+  const prevGet = appStub.graph.getNodeById;
+  appStub.graph._nodes = [node];
+  appStub.graph.getNodeById = () => null;
+  let posts = 0;
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts++;
+    return jsonResponse({ ok: true });
+  };
+  try {
+    st.setPickup("901");
+    // Нода НЕ исполнялась: `executed` для неё не пришёл (её закэшировали),
+    // но прогон дошел до успешного завершения
+    apiStub.dispatch("executed", { node: "901", prompt_id: "c1",
+      output: { text: ["текст источника"] } });
+    apiStub.dispatch("execution_success", { prompt_id: "c1" });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    check("pickup+кэш: save_pickup не зовём (токена нет)", posts === 0, `posts=${posts}`);
+    check("pickup+кэш: причина видна в нижней строке ноды (раньше — полная тишина)",
+      String(st.hintSticky || "").includes("кэш"), String(st.hintSticky));
+  } finally {
+    sandbox.fetch = origFetch;
+    appStub.graph._nodes = prevNodes;
+    appStub.graph.getNodeById = prevGet;
+  }
+});
+
+await run("pickup: отказ сервера (протухший токен) не уходит в тишину", async () => {
+  const node = makeNode();
+  node.id = 46;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const prevNodes = appStub.graph._nodes;
+  const prevGet = appStub.graph.getNodeById;
+  const keeper = { id: 902, type: "PromptKeeper", title: "Финал", mode: 0,
+    outputs: [{ name: "text", type: "STRING" }],
+    widgets: [{ name: "text", value: "финальный текст", type: "customtext" }] };
+  appStub.graph._nodes = [keeper, node];
+  appStub.graph.getNodeById = (id) => appStub.graph._nodes.find((n) => String(n.id) === String(id)) || null;
+  const origFetch = sandbox.fetch;
+  st.hintSticky = null;
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    if (url.includes("save_pickup")) return { ...jsonResponse({ error: "unknown token" }), ok: false, status: 400 };
+    return jsonResponse({ ok: true });
+  };
+  try {
+    apiStub.dispatch("executed", { node: "46", prompt_id: "c2",
+      output: { pickup: ["tokX"], pickup_node: ["902"] } });
+    apiStub.dispatch("execution_success", { prompt_id: "c2" });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    check("pickup: 400 от сервера виден в нижней строке (со статусом)",
+      String(st.hintSticky || "").includes("400"), String(st.hintSticky));
+  } finally {
+    sandbox.fetch = origFetch;
     appStub.graph._nodes = prevNodes;
     appStub.graph.getNodeById = prevGet;
   }
