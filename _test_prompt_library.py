@@ -456,6 +456,35 @@ check("backfill добивает пустой media, не трогая оста�
       hit_nm is not None and hit_nm.get("media") == "video"
       and hit_nm.get("title") == "медиа-бэкфилл")
 
+# --- 11. ручное превью с диска --------------------------------------------------
+print("\n11. Ручное превью (preview_data в /add)")
+try:
+    from PIL import Image as _PILImage
+    import base64 as _b64
+    import io as _io
+    _buf = _io.BytesIO()
+    _PILImage.new("RGB", (8, 6), (200, 30, 30)).save(_buf, "PNG")
+    _du = "data:image/png;base64," + _b64.b64encode(_buf.getvalue()).decode()
+    r = h("POST", "/prompt_library/add",
+          Req({"prompt": "с превью-загрузкой", "folder": "Загрузки", "preview_data": _du}))
+    entries, _ = mod._load_db()
+    hit_u = next((e for e in entries if e["prompt"] == "с превью-загрузкой"), None)
+    check("/add с preview_data создаёт запись с превью",
+          r["json"].get("ok") and hit_u is not None and bool(hit_u.get("preview")))
+    check("файл превью лежит в previews/",
+          hit_u is not None and (mod._ensure_dirs() / hit_u["preview"]).exists())
+    from PIL import Image as _PILImage2
+    with _PILImage2.open(mod._ensure_dirs() / hit_u["preview"]) as _im:
+        check("превью — PNG", _im.format == "PNG" and max(_im.size) <= 512)
+    r = h("POST", "/prompt_library/add",
+          Req({"prompt": "с битым превью", "folder": "Загрузки", "preview_data": "мусор!!"}))
+    entries, _ = mod._load_db()
+    hit_b = next((e for e in entries if e["prompt"] == "с битым превью"), None)
+    check("битое preview_data: запись есть, превью нет",
+          r["json"].get("ok") and hit_b is not None and not hit_b.get("preview"))
+except ImportError:
+    check("PIL доступен для теста загрузки", False, "no pillow")
+
 # --- итог -------------------------------------------------------------------
 print(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
 if fails:

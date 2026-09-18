@@ -278,6 +278,31 @@ def _upgrade_preview_to_png(entry, workflow):
         return False
 
 
+def _save_preview_upload(data_url, entry_id):
+    """Превью из ручной загрузки (PNG/JPEG dataURL или голый base64).
+    Сохраняет даунскейл 512px в previews/{id}.png. Возвращает относительный
+    путь или None (битый файл — запись создаётся и без превью)."""
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        import base64
+        import io
+        s = str(data_url or "")
+        if s.startswith("data:") and "," in s:
+            s = s.split(",", 1)[1]
+        raw = base64.b64decode(s[:8_000_000], validate=True)
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((512, 512), Image.LANCZOS)
+        root = _ensure_dirs()
+        img.save(root / "previews" / f"{entry_id}.png", "PNG")
+        return f"previews/{entry_id}.png"
+    except Exception as e:
+        print(f"[PromptLibrary] upload preview failed: {e}", flush=True)
+        return None
+
+
 def _now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
@@ -553,6 +578,13 @@ try:
         entries, folders = _load_db()
         entry_id, created = _add_entry(entries, prompt, folder, title=title)
         if created:
+            # Ручное превью с диска (без провода): прикрепляем как PNG 512px
+            prev = _save_preview_upload(body.get("preview_data"), entry_id)
+            if prev:
+                for e in entries:
+                    if e.get("id") == entry_id:
+                        e["preview"] = prev
+                        break
             entries = entries[:MAX_ENTRIES]
             if folder and folder not in folders:
                 folders = sorted(set(folders) | {folder} | set(_parent_folders(folder)))

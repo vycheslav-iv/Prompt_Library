@@ -168,7 +168,76 @@ app.registerExtension({
             inputSaveBtn.title = "Сохранить в текущую категорию";
             inputSaveBtn.style.cssText = "width:100%;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px;cursor:pointer;font-size:12px;";
             inputArea.appendChild(inputText);
+            // Ручное превью с диска (без провода): файл → даунскейл до 512px
+            // через canvas прямо в браузере → маленький PNG dataURL на сервер.
+            const inputAttachRow = document.createElement("div");
+            inputAttachRow.style.cssText = "display:flex;gap:4px;align-items:center;";
+            const inputFile = document.createElement("input");
+            inputFile.type = "file";
+            inputFile.accept = "image/*";
+            inputFile.style.display = "none";
+            const attachBtn = document.createElement("button");
+            attachBtn.type = "button";
+            attachBtn.title = "Выбрать картинку с диска как превью записи";
+            attachBtn.style.cssText = "flex:1;min-width:0;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+            const attachThumb = document.createElement("img");
+            attachThumb.style.cssText = "width:40px;height:40px;object-fit:cover;border-radius:3px;background:#222;display:none;flex-shrink:0;";
+            const attachClear = document.createElement("button");
+            attachClear.type = "button";
+            attachClear.textContent = "✖";
+            attachClear.title = "Убрать прикреплённое превью";
+            attachClear.style.cssText = "display:none;background:none;border:none;cursor:pointer;font-size:12px;flex-shrink:0;";
+            let attachedFile = null;
+            const renderAttach = () => {
+                attachBtn.textContent = attachedFile ? `📷 ${attachedFile.name}` : "📷 Прикрепить превью";
+                attachThumb.style.display = "none";
+                attachClear.style.display = attachedFile ? "" : "none";
+                if (attachedFile) {
+                    try {
+                        const url = URL.createObjectURL(attachedFile);
+                        attachThumb.src = url;
+                        attachThumb.style.display = "";
+                        attachThumb.onload = () => { try { URL.revokeObjectURL(url); } catch (e) { /* silent */ } };
+                    } catch (e) { /* silent */ }
+                }
+            };
+            attachBtn.onclick = () => { try { inputFile.click(); } catch (e) { /* silent */ } };
+            inputFile.onchange = () => {
+                attachedFile = (inputFile.files && inputFile.files[0]) || null;
+                renderAttach();
+            };
+            attachClear.onclick = () => {
+                attachedFile = null;
+                try { inputFile.value = ""; } catch (e) { /* silent */ }
+                renderAttach();
+            };
+            inputAttachRow.appendChild(attachBtn);
+            inputAttachRow.appendChild(attachThumb);
+            inputAttachRow.appendChild(attachClear);
+            inputArea.appendChild(inputAttachRow);
             inputArea.appendChild(inputSaveBtn);
+            renderAttach();
+            const readAttachedPreview = () => new Promise((resolve) => {
+                if (!attachedFile) return resolve(null);
+                try {
+                    const url = URL.createObjectURL(attachedFile);
+                    const img = new Image();
+                    img.onload = () => {
+                        try {
+                            const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+                            const scale = Math.min(1, 512 / Math.max(w, h));
+                            const cw = document.createElement("canvas");
+                            cw.width = Math.max(1, Math.round(w * scale));
+                            cw.height = Math.max(1, Math.round(h * scale));
+                            cw.getContext("2d").drawImage(img, 0, 0, cw.width, cw.height);
+                            resolve(cw.toDataURL("image/png"));
+                        } catch (e) { resolve(null); }
+                        try { URL.revokeObjectURL(url); } catch (err) { /* silent */ }
+                    };
+                    img.onerror = () => { try { URL.revokeObjectURL(url); } catch (err) { /* silent */ } resolve(null); };
+                    img.src = url;
+                } catch (e) { resolve(null); }
+            });
 
             let inputVisible = false;
             inputToggle.onclick = () => {
@@ -191,14 +260,19 @@ app.registerExtension({
                 }
                 inputSaveBtn.textContent = "⏳ Сохраняю...";
                 try {
+                    const previewData = await readAttachedPreview();
                     const r = await fetch("/prompt_library/add", {
                         method: "POST", headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ prompt: text, folder: dest }),
+                        body: JSON.stringify({ prompt: text, folder: dest,
+                            ...(previewData ? { preview_data: previewData } : {}) }),
                     });
                     if (r.ok) {
                         await reload();
                         inputSaveBtn.textContent = "✅ Сохранено";
                         inputText.value = "";
+                        attachedFile = null;
+                        try { inputFile.value = ""; } catch (e) { /* silent */ }
+                        renderAttach();
                     } else {
                         inputSaveBtn.textContent = "❌ Ошибка";
                     }
@@ -1325,7 +1399,7 @@ app.registerExtension({
             // здесь невозможен по построению. Никакого offsetHeight/scrollHeight.
             const DETAIL_H = 280;
             const BASE_H = 596;
-            const INPUT_H = 130;
+            const INPUT_H = 170; // textarea + кнопка сохранения + ряд прикрепления превью
             // Единый минимум для обоих режимов (single source of truth).
             st.minH = () => {
                 const showDetail = detail && detail.style.display !== "none";
