@@ -1,6 +1,6 @@
 # Техническое задание (ТЗ) — Prompt Library для ComfyUI
 
-**Версия:** v1.20 (глобальный дубль по тексту + предупреждение — тесты 100/100, смоук 47/47, аудит чист)
+**Версия:** v1.21 (автообновление Library через broadcast refresh — тесты 101/101, смоук 48/48, аудит чист)
 **Связь:** продолжение серии Prompt Keeper (v1.0 — «последний промпт», Library — «база промптов»)
 
 ## Модель «как в реальной библиотеке»
@@ -197,7 +197,7 @@ DOM-библиотека (`addDOMWidget`, сериализация выключ�
 
 ## 8.2. Хуки LiteGraph
 
-- `onNodeCreated` — DOM-виджет (с `computeSize` с фиксированными константами), схлопывание технических `selected`/`save_folder`, первичная загрузка через `reload()` (GET `list`).
+- `onNodeCreated` — DOM-виджет (с `computeSize` с фиксированными константами), схлопывание технических `selected`/`save_folder`, первичная загрузка через `reload()` (GET `list`). Регистрирует `app.api.addEventListener("prompt_library/refresh", plListener)` для автообновления (§26).
 - `onExecuted(message)` — пришедшие `entries` → полный `reload()`; `selected` → виджет. **Не пишет** в виджет `prompt` (его больше нет).
 - `onConfigure(info)` — синхронный restore папки из данных воркфлоу
   (`info.widgets_values_named.save_folder`, фолбэк — `info.widgets_values[2]`
@@ -320,6 +320,7 @@ Prompt_Library/
 10. ✅ v1.18: мультивыделение Ctrl/Shift (карточки + папки) с bulk-баром и массовым удалением (`delete_many`/`folder_delete_many`); метки session-only (+ чистка протухших в `reload()`), цель сохранения не меняется; эксклюзив — чужой тип с модификаторами игнорируется, сброс только обычным кликом/пустым местом/Esc; акцент-полоса `box-shadow: inset` + подложка; переименование на месте (`st.inlineEdit`: Enter/blur — применить, Esc/пусто — отмена; ошибки через toast, не alert); `PL_JS_VERSION = "1.18-multiselect"` + видимая версия в тулбаре; общий helper `_req_body()`; коэрсия битого `prompt` в `_load_db`; 15 новых тестов (90/90); смоук-фазы меток и inlineEdit (47/47), аудит чист (12 роутов); глубокая ревизия без колхоза (helper `_req_body`, коэрсия `prompt`, backfill `media`, чистка протухших меток, протухшие комментарии вычищены).
 11. ✅ v1.19: ручное превью с диска (`_save_preview_upload` + кнопка `📷 Прикрепить превью` с даунскейлом в браузере; `INPUT_H` 130→170); §11 тестов (4 проверки).
 12. ✅ v1.20: глобальный дубль по тексту (`_find_text_match` в execute и `/add`: та же строка в другой папке — пропуск + предупреждение с папкой оригинала, backfill по workflow/media — на найденную запись); тост и `⚠️ Уже есть в «…»` на ручной кнопке; фикс краша Queue (`skipped_duplicate: {}`, а не None — ComfyUI сливает ui перебором; JS проверяет `sd.id`; регресс-тест `_ui_merge_ok`); возврат высоты после закрытия панелей (`panelOpened`/`shrinkBack`: запомнили при открытии — вернули при закрытии, только canvas, ручной ресайз не срезаем); `PL_JS_VERSION = "1.20-dup-warn"`; §12 тестов.
+13. ✅ v1.21: автообновление Library-нод (§26) — `_broadcast_refresh()` → `send_sync("prompt_library/refresh")` → JS `app.api.addEventListener("prompt_library/refresh", ...)` → `reload()`. Флаг `need_broadcast` (только при `added=True`). Исправлен мёртвый `window.addEventListener` fallback в JS. Тесты 101/101 + смоук 48/48.
 
 # 16. Решения по открытым вопросам (приняты в коде)
 
@@ -334,7 +335,7 @@ Prompt_Library/
 
 # 17. Текущее состояние и следующий шаг (обновлено 2026-09-18)
 
-Состояние: стабильная рабочая версия v1.20 (тесты 100/100 + смоук 47/47 + аудит чист; синхронизировано, ждёт живого теста дубль-предупреждения пользователем).
+Состояние: стабильная рабочая версия v1.21 (тесты 101/101 + смоук 48/48 + аудит чист; синхронизировано).
 
 **Изменения с v1.7:**
 - v1.8: вертикальный stretch через `computeLayoutSize` (§22) — контент тянется
@@ -359,14 +360,115 @@ Prompt_Library/
   `VideoInput` в один вход; `_extract_frame()` берёт первый кадр видео;
   `_save_thumbnail()` принимает батч/список/uint8/grayscale; тест IMAGE,VIDEO;
   скилл `comfyui-video-socket` в корне бандла.
+- v1.20: глобальный дубль по тексту (`_find_text_match`); тост + `⚠️ Уже есть в «…»`;
+  фикс краша Queue (`skipped_duplicate: {}`); возврат высоты после закрытия панелей
+  (`panelOpened`/`shrinkBack`); bulk-бар в `listHead`; `PL_JS_VERSION = "1.20-dup-warn"`.
+- v1.21: **автообновление Library-нод** при записи через Saver (§26) —
+  `_broadcast_refresh()` → `PromptServer.instance.send_sync("prompt_library/refresh")` →
+  JS `app.api.addEventListener("prompt_library/refresh", ...)` → `reload()`.
+  Исправлено: без broadcast Library-нода не обновлялась, пока пользователь не нажмёт
+  «новая генерация». Флаг `need_broadcast` гарантирует пересылку ТОЛЬКО при новой записи
+  (не при backfill или смене папки).
 
 **Закрыто:** проблема «низ не примыкает» (§21.5) решена в §22 — было ограничением
 legacy `computeSize`, а не фундаментальным.
+
+**Исправлено в v1.21:** `_broadcast_refresh()` вызывался при любом `dirty=True`
+(backfill, создание папки) — пересылал ненужные WebSocket-события всем Library-нодам.
+Теперь широковещание происходит ТОЛЬКО при `added=True` (новая запись).
+Также убран мёртвый `window.addEventListener` fallback в JS — `window` не получает
+ComfyUI WebSocket-события; `app.api` (ComfyApi extends EventTarget) корректно
+рассылает `CustomEvent` для зарегистрированных типов через `_registered` set.
 
 Следующий шаг (по решению пользователя):
 1. Разбить на две ноды: **Prompt Library** (дерево/поиск/выдача) + **Prompt Saver** (пассивная).
 2. Постраничность списка (по ~20 записей, «дальше/назад»).
 3. Вынести воркфлоу из `library.json` (2.9 МБ / 92 записи, лимит 500).
+
+---
+
+# 26. Автообновление Library-нод (v1.21)
+
+## 26.1. Проблема
+
+При двух нодах (Saver — запись, Library — выдача) в одном workflow,
+создание записи через Saver-нод не обновляло Library-нод автоматически.
+Library-нод перечитывал `library.json` только при собственном `execute()`
+(который вызывается при входящем сигнале графа). Без связи «Saver → Library»
+через граф, Library молчал до нажатия «новая генерация».
+
+## 26.2. Решение: broadcast через WebSocket
+
+```text
+Saver execute() → _save_db() → _broadcast_refresh()
+  → PromptServer.instance.send_sync("prompt_library/refresh", {})
+    → WebSocket → все подключённые клиенты
+      → ComfyApi (EventTarget) рассылает CustomEvent(type, {detail})
+        → JS: app.api.addEventListener("prompt_library/refresh", ...)
+          → this._pl.reload() → GET /prompt_library/list → обновлённый UI
+```
+
+## 26.3. Python: `_broadcast_refresh()`
+
+```python
+def _broadcast_refresh():
+    try:
+        from server import PromptServer
+        PromptServer.instance.send_sync("prompt_library/refresh", {})
+    except Exception:
+        pass  # ComfyUI не запущен / тесты — молча игнорируем
+```
+
+Вызывается ТОЛЬКО при `need_broadcast=True` (новая запись создана).
+Не вызывается при backfill workflow/media или смене папки —
+эти изменения не требуют пересоздания записей в Library-нодах.
+
+## 26.4. JS: слушатель в `onNodeCreated`
+
+```js
+const plListener = (ev) => {
+    try { if (this._pl) this._pl.reload(); } catch (e) { /* silent */ }
+};
+app.api.addEventListener("prompt_library/refresh", plListener);
+```
+
+`app.api` — экземпляр `ComfyApi extends EventTarget`. При получении
+WebSocket-сообщения с `type="prompt_library/refresh"`:
+- `this._registered.has("prompt_library/refresh")` → `true` (потому что
+  `addEventListener` добавляет в `_registered`)
+- `super.dispatchEvent(new CustomEvent("prompt_library/refresh", {detail}))`
+- JS-слушатель получает `ev` (CustomEvent), вызывает `reload()`
+
+**Почему не `window.addEventListener`:** ComfyUI WebSocket-сообщения
+рассылаются через `ComfyApi` (EventTarget), а не через `window.dispatchEvent`.
+`window.addEventListener` ловит только DOM-события и никогда не получит
+WebSocket-сообщение от ComfyUI. Мёртвый код — убран.
+
+## 26.5. Флаг `need_broadcast`
+
+```python
+need_broadcast = False
+if not issue and incoming:
+    dup = _find_text_match(entries, incoming)
+    if dup is not None:
+        entry_id, added = dup.get("id"), False
+    else:
+        entry_id, added = _add_entry(...)
+    if added:
+        need_broadcast = True   # ← новая запись!
+        ...
+    elif wf_copy:
+        dirty = True   # backfill — broadcast НЕ нужен
+```
+
+Гарантирует, что broadcast идёт только при реальном добавлении записи.
+
+## 26.6. Потокобезопасность
+
+`send_sync()` вызывает `self.loop.call_soon_threadsafe(messages.put_nowait, ...)`.
+`execute()` работает в worker thread ComfyUI — `call_soon_threadsafe`
+потокобезопасен. Если `PromptServer.instance` недоступен (тесты, ранняя
+загрузка) — `except Exception: pass` молча проглатывает.
 
 ---
 
