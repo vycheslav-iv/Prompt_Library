@@ -468,9 +468,10 @@ class PromptLibrary:
         # самодостаточна, drag на канвас открывает воркфлоу
         wf_copy = _snapshot_workflow(extra_pnginfo)
         fld = _norm_folder(folder)
+        need_broadcast = False
         skipped = None
         if not issue and incoming:
-            # Глобальный дубль: тот же текст уже есть в базе (хоть в другой папке) —
+            # Глобальный дубликат: тот же текст уже есть в базе (хоть в другой папке) —
             # не плодим запись с другим превью, а предупреждаем где лежит.
             dup = _find_text_match(entries, incoming)
             media = _media_of(image)
@@ -481,6 +482,7 @@ class PromptLibrary:
             else:
                 entry_id, added = _add_entry(entries, incoming, fld, workflow=wf_copy, media=media)
             if added:
+                need_broadcast = True
                 frame = _extract_frame(image) if image is not None else None
                 preview = _save_thumbnail(frame, entry_id, wf_copy) if frame is not None else None
                 if preview:
@@ -510,9 +512,10 @@ class PromptLibrary:
         if dirty:
             try:
                 _save_db(entries, folders)
-                _broadcast_refresh()
             except Exception as e:
                 print(f"[PromptLibrary] save failed: {e}", flush=True)
+            if need_broadcast:
+                _broadcast_refresh()
 
         # 3. PNG-персистентность выбора и настроек (паттерн Prompt Keeper)
         if extra_pnginfo and unique_id is not None:

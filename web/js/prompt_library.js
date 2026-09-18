@@ -687,15 +687,13 @@ app.registerExtension({
             // Глобальный слушатель: при сохранении записи на любой ноде
             // (через _broadcast_refresh → send_sync) все Library-ноды
             // автоматически перечитывают library.json без запуска Queue.
+            // app.api — ComfyApi (extends EventTarget). При неизвестном
+            // типе сообщения ComfyApi рассылает CustomEvent(type, {detail}).
             try {
                 const plListener = (ev) => {
                     try { if (this._pl) this._pl.reload(); } catch (e) { /* silent */ }
                 };
-                if (typeof app.api.addEventListener === "function") {
-                    app.api.addEventListener("prompt_library/refresh", plListener);
-                } else if (window.addEventListener) {
-                    window.addEventListener("prompt_library/refresh", plListener);
-                }
+                app.api.addEventListener("prompt_library/refresh", plListener);
             } catch (e) { /* silent */ }
 
             // --- Drag & Drop: книги → на категории, категории → в другие категории (или в корень) ---
