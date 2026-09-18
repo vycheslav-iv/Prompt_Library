@@ -202,7 +202,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.17-media-badges");
+  check(`${tag}: версия JS видна`, st.version === "1.18-multiselect");
 }
 
 // Канвас: пол 480px на панелях (фронтенд сам растёт ноду под контент).
@@ -359,6 +359,69 @@ await run("checkCycle: без изменений — без запросов п�
   check("снятие кольца — один запрос", dirty === mid + 1, `dirty=${dirty}`);
   node._pl.checkCycle();
   check("после снятия — тишина", dirty === mid + 1, `dirty=${dirty}`);
+});
+
+// --- Мультивыделение: диапазон и эксклюзив (исполнение настоящего кода) ---
+await run("marks: диапазон + эксклюзив карточки/папки", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const mk = (id) => ({ id, title: id, head: id, folder: "", favorite: false,
+    created_at: "2026-09-18T01:00:00", last_used: null,
+    has_preview: false, has_workflow: false, media: "image" });
+  st.entries = [mk("e1"), mk("e2"), mk("e3")];
+  st.folders = ["A", "B", "C"];
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  st.markEntryToggle("e1", false);
+  check("ctrl: карточка помечена", st.markEntries.has("e1"));
+  st.markEntryToggle("e3", true);
+  check("shift: диапазон e1..e3",
+    st.markEntries.has("e1") && st.markEntries.has("e2") && st.markEntries.has("e3"));
+  st.markFolderToggle("A", false);
+  check("эксклюзив: папка с зажатым модификатором не метится, карточки целы",
+    st.markFolders.size === 0 && st.markEntries.size === 3);
+  st.clearMarks();
+  st.markFolderToggle("A", false);
+  check("папки метятся когда карточки не помечены", st.markFolders.has("A"));
+  st.markFolderToggle("C", true);
+  check("shift: диапазон папок A..C",
+    ["A", "B", "C"].every((k) => st.markFolders.has(k)));
+  st.markEntryToggle("e2", false);
+  check("эксклюзив: карточка с зажатым модификатором не метится, папки целы",
+    st.markEntries.size === 0 && st.markFolders.size === 3);
+  st.renderHint(3);
+  check("bulk-бар с кнопкой удаления",
+    st.hint.children.some((c) => c.textContent === "🗑 Удалить выбранное"));
+  st.clearMarks();
+  check("clearMarks всё снял",
+    st.markEntries.size === 0 && st.markFolders.size === 0
+    && st.anchorEntry === null && st.anchorFolder === null);
+});
+
+// --- Переименование на месте: Enter применяет, Esc/пусто отменяет ---
+await run("inlineEdit: Enter/Esc/пусто", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const host = { innerHTML: "x", children: [],
+    appendChild(c) { this.children.push(c); return c; } };
+  let committed = null;
+  st.inlineEdit(host, "old", (v) => { committed = v; });
+  const inp = host.children[0];
+  check("input создан с текстом", inp && inp.value === "old");
+  inp.value = "new";
+  inp.onkeydown({ key: "Enter", stopPropagation() {} });
+  check("Enter применил новое", committed === "new");
+  committed = "sentinel";
+  st.inlineEdit(host, "old", (v) => { committed = v; });
+  host.children[host.children.length - 1].onkeydown({ key: "Escape", stopPropagation() {} });
+  check("Esc отменил (без коммита)", committed === "sentinel");
+  st.inlineEdit(host, "old", (v) => { committed = v; });
+  const inp3 = host.children[host.children.length - 1];
+  inp3.value = "   ";
+  inp3.onkeydown({ key: "Enter", stopPropagation() {} });
+  check("пустое не применяется", committed === "sentinel");
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);

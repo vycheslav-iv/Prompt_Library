@@ -55,7 +55,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.17-media-badges";
+const PL_JS_VERSION = "1.18-multiselect";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -143,6 +143,13 @@ app.registerExtension({
             toolbar.appendChild(sortSel);
             toolbar.appendChild(mediaSel);
             toolbar.appendChild(search);
+            // Видимая версия сборки прямо в интерфейсе: по скриншоту всегда
+            // понятно, какой JS исполняется (споры «у тебя старый файл» закрыты).
+            const verTag = document.createElement("span");
+            verTag.textContent = "v" + PL_JS_VERSION;
+            verTag.title = "Версия JS-расширения (должна совпадать с консолью F12)";
+            verTag.style.cssText = "color:#555;font-size:10px;flex-shrink:0;align-self:center;white-space:nowrap;";
+            toolbar.appendChild(verTag);
 
             // Кнопка-тогл ручного ввода + область ввода
             const inputToggle = document.createElement("button");
@@ -307,6 +314,12 @@ app.registerExtension({
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow,
                 entries: [], folders: [], full: new Map(),
                 detailId: null, selFolder: "__all",
+                // Мультивыделение на удаление (Ctrl — поштучно, Shift — диапазон).
+                // Живёт только в сессии, в PNG не персистится; цель сохранения
+                // (selFolder) метки не меняют — конфликта «куда сохранять» нет.
+                markEntries: new Set(), markFolders: new Set(),
+                anchorEntry: null, anchorFolder: null, folderOrder: [],
+                hintMsg: "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.",
             };
             this._pl = st;
             st.version = PL_JS_VERSION;
@@ -560,6 +573,19 @@ app.registerExtension({
                     const data = await r.json();
                     st.entries = (data.entries || []).map(plMap);
                     st.folders = data.folders || [];
+                    // Чистим протухшие метки (запись удалена в другой вкладке,
+                    // папка переименована через ✏️): сервер мусор игнорирует,
+                    // но bulk-бар не должен врать о числе помеченных.
+                    if (st.markEntries.size) {
+                        const alive = new Set(st.entries.map((e) => e.id));
+                        for (const id of st.markEntries) if (!alive.has(id)) st.markEntries.delete(id);
+                        if (!st.markEntries.has(st.anchorEntry)) st.anchorEntry = null;
+                    }
+                    if (st.markFolders.size) {
+                        const alive = new Set([...st.folders, ...st.entries.map((e) => e.folder).filter(Boolean)]);
+                        for (const p of st.markFolders) if (!alive.has(p)) st.markFolders.delete(p);
+                        if (!st.markFolders.has(st.anchorFolder)) st.anchorFolder = null;
+                    }
                     renderTree();
                     render();
                     // fitNode удалён: высоту отдаёт computeLayoutSize (минимум),
@@ -619,10 +645,12 @@ app.registerExtension({
             const folderRow = (key, label, depth, isFolder) => {
                 const row = document.createElement("div");
                 const active = st.selFolder === key;
-                row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${active ? "#fff" : "#ccc"};background:${active ? "#2c4a73" : "transparent"};padding-left:${4 + depth * 14}px;`;
+                const marked = st.markFolders.has(key);
+                row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${active ? "#fff" : "#ccc"};background:${marked ? "rgba(224,138,60,.35)" : active ? "#2c4a73" : "transparent"};${marked ? "box-shadow:inset 3px 0 0 #e08a3c;" : ""}padding-left:${4 + depth * 14}px;`;
+                if (isFolder) row.title = "Клик — открыть · Ctrl+клик — пометить · Shift+клик — диапазон";
                 const name = document.createElement("span");
                 name.style.cssText = "flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                name.textContent = label;
+                name.textContent = (marked ? "☑ " : "") + label;
                 name.title = isFolder ? key : label;
                 row.appendChild(name);
                 // Папки можно таскать; любая строка — дроп-зона
@@ -650,26 +678,30 @@ app.registerExtension({
                 };
                 if (isFolder) {
                     const rn = document.createElement("button");
-                    rn.textContent = "✏️"; rn.title = "Переименовать категорию";
+                    rn.textContent = "✏️"; rn.title = "Переименовать категорию (правка прямо в строке)";
                     rn.style.cssText = "background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;";
-                    rn.onclick = async (ev) => {
+                    rn.onclick = (ev) => {
                         ev.stopPropagation();
                         const leaf = key.split("/").pop();
-                        const next = prompt("Новое название категории:", leaf);
-                        if (!next || !next.trim() || next.trim() === leaf) return;
-                        const parent = key.split("/").slice(0, -1).join("/");
-                        const newPath = parent ? `${parent}/${next.trim()}` : next.trim();
-                        try {
-                            const r = await fetch("/prompt_library/folder_rename", {
-                                method: "POST", headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ old: key, new: newPath }),
-                            });
-                            if (r.ok) {
-                                if (st.selFolder === key) st.selFolder = newPath;
-                                st.syncSaveFolder();
-                                await reload();
-                            } else alert("Не удалось переименовать.");
-                        } catch (e) { alert("Не удалось переименовать."); }
+                        row.draggable = false; // пока правим — строку нельзя утащить
+                        st.inlineEdit(name, leaf, async (next) => {
+                            const parent = key.split("/").slice(0, -1).join("/");
+                            const newPath = parent ? `${parent}/${next}` : next;
+                            try {
+                                const r = await fetch("/prompt_library/folder_rename", {
+                                    method: "POST", headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ old: key, new: newPath }),
+                                });
+                                if (r.ok) {
+                                    if (st.selFolder === key) st.selFolder = newPath;
+                                    // Метки/якорь переименованного пути едут следом
+                                    if (st.markFolders.delete(key)) st.markFolders.add(newPath);
+                                    if (st.anchorFolder === key) st.anchorFolder = newPath;
+                                    st.syncSaveFolder();
+                                    await reload();
+                                } else st.toast("warn", "Prompt Library", "Не удалось переименовать.");
+                            } catch (e) { st.toast("warn", "Prompt Library", "Не удалось переименовать."); }
+                        });
                     };
                     const del = document.createElement("button");
                     del.textContent = "🗑"; del.title = "Удалить категорию (записи переедут в корень)";
@@ -692,13 +724,22 @@ app.registerExtension({
                     row.appendChild(rn);
                     row.appendChild(del);
                 }
-                row.onclick = () => {
+                row.onclick = (ev) => {
+                    // Ctrl/Shift — только метка на удаление (текущую папку и цель
+                    // сохранения не трогаем). Служебные ветки не помечаем.
+                    if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) {
+                        if (isFolder) st.markFolderToggle(key, !!(ev.shiftKey));
+                        return;
+                    }
+                    // Обычный клик при наличии меток — снять весь выбор (как в проводнике)
+                    if (st.markEntries.size || st.markFolders.size) st.clearMarks();
                     st.selFolder = key;
                     st.syncSaveFolder();
+                    st.anchorFolder = key; // обычный клик ставит якорь для Shift-диапазона
                     st.detailId = null;
                     if (selWidget) selWidget.value = "";
                     st.detail.style.display = "none";
-                    st.hint.textContent = "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
+                    st.hintMsg = "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
                     renderTree();
                     render();
                 };
@@ -707,6 +748,9 @@ app.registerExtension({
 
             const renderTree = () => {
                 st.tree.innerHTML = "";
+                // Порядок строк для Shift-диапазона (включая служебные — при
+                // применении диапазона они пропускаются, метятся только папки).
+                st.folderOrder = ["__all", "__fav", "__root"];
                 st.tree.appendChild(folderRow("__all", "📚 Всё", 0, false));
                 st.tree.appendChild(folderRow("__fav", "★ Избранное", 0, false));
                 st.tree.appendChild(folderRow("__root", "📥 Без категории", 0, false));
@@ -719,6 +763,7 @@ app.registerExtension({
                 }
                 const walk = (parent, depth) => {
                     for (const f of (kids.get(parent) || [])) {
+                        st.folderOrder.push(f);
                         st.tree.appendChild(folderRow(f, "📁 " + f.split("/").pop(), depth, true));
                         walk(f, depth + 1);
                     }
@@ -779,9 +824,10 @@ app.registerExtension({
                 for (const e of sortedFiltered()) {
                     const card = document.createElement("div");
                     card.draggable = true;
-                    card.title = e.has_workflow
+                    card.title = (e.has_workflow
                         ? "Тяни на канвас — открыть сохранённый воркфлоу"
-                        : "Воркфлоу нет (ручная запись) — прогони Queue, и воркфлоу прикрепится";
+                        : "Воркфлоу нет (ручная запись) — прогони Queue, и воркфлоу прикрепится")
+                        + " · Ctrl+клик — пометить, Shift+клик — диапазон";
                     card.ondragstart = (ev) => {
                         ev.dataTransfer.setData("text/plain", JSON.stringify({ kind: "entry", id: e.id }));
                         try { ev.dataTransfer.setData("application/x-pl-entry", e.id); } catch (err) { /* silent */ }
@@ -789,9 +835,15 @@ app.registerExtension({
                         // входить в effectAllowed, иначе браузер показывает запрет и блочит drop)
                         ev.dataTransfer.effectAllowed = "copyMove";
                     };
+                    // Помеченные — левая акцент-полоса (inset box-shadow: на layout
+                    // не влияет, в отличие от border) + тёплая подложка
+                    const marked = st.markEntries.has(e.id);
+                    const acct = marked ? "box-shadow:inset 4px 0 0 #e08a3c;" : "";
+                    const bg = marked ? "#4a2f18" : e.id === selVal ? "#1e2c44" : "#1e1e1e";
+                    const border = `1px solid ${e.id === selVal ? "#4a9eff" : "#333"}`;
                     card.style.cssText = grid
-                        ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${e.id === selVal ? "#4a9eff" : "#333"};background:${e.id === selVal ? "#1e2c44" : "#1e1e1e"};flex-shrink:0;`
-                        : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${e.id === selVal ? "#4a9eff" : "#333"};background:${e.id === selVal ? "#1e2c44" : "#1e1e1e"};`;
+                        ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}flex-shrink:0;`
+                        : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}`;
 
                     const img = document.createElement("img");
                     img.style.cssText = `width:${imgSize}px;height:${imgSize}px;object-fit:cover;border-radius:3px;background:#222;flex-shrink:0;`;
@@ -842,21 +894,22 @@ app.registerExtension({
 
                     const rn = document.createElement("button");
                     rn.textContent = "✏️";
-                    rn.title = "Переименовать";
+                    rn.title = "Переименовать (правка прямо в строке)";
                     rn.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;flex-shrink:0;";
-                    rn.onclick = async (ev) => {
+                    rn.onclick = (ev) => {
                         ev.stopPropagation();
-                        const next = prompt("Новое название:", e.title || e.head || "");
-                        if (!next || !next.trim() || next.trim() === (e.title || "")) return;
-                        try {
-                            await fetch("/prompt_library/update", {
-                                method: "POST", headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ id: e.id, title: next.trim() }),
-                            });
-                            e.title = next.trim();
-                            st.full.delete(e.id);
+                        card.draggable = false; // пока правим — карточку нельзя утащить
+                        st.inlineEdit(title, e.title || e.head || "", async (next) => {
+                            try {
+                                await fetch("/prompt_library/update", {
+                                    method: "POST", headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ id: e.id, title: next }),
+                                });
+                                e.title = next;
+                                st.full.delete(e.id);
+                            } catch (err) { /* silent */ }
                             render();
-                        } catch (err) { /* silent */ }
+                        });
                     };
 
                     const del = document.createElement("button");
@@ -879,8 +932,17 @@ app.registerExtension({
                         } catch (err) { /* silent */ }
                     };
 
-                    card.onclick = async () => {
+                    card.onclick = async (ev) => {
+                        // Ctrl/Shift — только метка на удаление (деталку не открываем,
+                        // выбранную запись не меняем)
+                        if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) {
+                            st.markEntryToggle(e.id, !!(ev.shiftKey));
+                            return;
+                        }
+                        // Обычный клик при наличии меток — снять весь выбор (как в проводнике)
+                        if (st.markEntries.size || st.markFolders.size) st.clearMarks();
                         if (selWidget) selWidget.value = e.id;
+                        st.anchorEntry = e.id; // обычный клик ставит якорь для Shift-диапазона
                         try {
                             if (!st.full.has(e.id)) {
                                 const r = await fetch(`/prompt_library/entry?id=${encodeURIComponent(e.id)}`);
@@ -898,7 +960,7 @@ app.registerExtension({
                                 const mediaLabel = full.media === "video" ? " · 🎬 видео" : full.media === "image" ? " · 📷 фото" : "";
                                 st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}${mediaLabel}`;
                                 st.detail.style.display = "flex";
-                                st.hint.textContent = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача».";
+                                st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача».";
                             }
                         } catch (err) { /* silent */ }
                         render();
@@ -922,7 +984,7 @@ app.registerExtension({
                     st.list.appendChild(card);
                     shown++;
                 }
-                if (!st.detailId) st.hint.textContent = shown ? `Записей в категории: ${shown}` : "Пусто. Запустите Queue или нажмите «Сохранить промпт».";
+                st.renderHint(shown);
                 // Страховка: если сигнал о смене режима не пришёл (сборка без
                 // window.LiteGraph и без события настроек) — раскладка догонит при
                 // первом же рендере. Одно чтение свойства, без таймеров и наблюдателей.
@@ -936,6 +998,158 @@ app.registerExtension({
                     }
                 } catch (e) { /* silent */ }
             };
+            // --- Мультивыделение на удаление (Ctrl — поштучно, Shift — диапазон) ---
+            // Метки НЕ меняют текущую папку и выбранную запись → цель сохранения
+            // (save_folder) всегда однозначна. Живут только в сессии.
+            const rangeApply = (order, anchor, key, set) => {
+                const a = order.indexOf(anchor), b = order.indexOf(key);
+                if (a < 0 || b < 0) return false;
+                const [lo, hi] = a < b ? [a, b] : [b, a];
+                for (let i = lo; i <= hi; i++) {
+                    const k = order[i];
+                    if (k.startsWith("__")) continue; // служебные ветки не помечаем
+                    set.add(k);
+                }
+                return true;
+            };
+            st.markEntryToggle = (id, range) => {
+                // Эксклюзив: помечены папки — разметку карточек с зажатыми
+                // модификаторами игнорируем (сброс чужих меток — только обычным
+                // кликом, см. card.onclick / row.onclick).
+                if (st.markFolders.size) return;
+                if (range && st.anchorEntry && rangeApply(sortedFiltered().map((e) => e.id), st.anchorEntry, id, st.markEntries)) {
+                    render();
+                    return;
+                }
+                if (st.markEntries.has(id)) { st.markEntries.delete(id); st.anchorEntry = null; }
+                else { st.markEntries.add(id); st.anchorEntry = id; }
+                render();
+            };
+            st.markFolderToggle = (key, range) => {
+                // Эксклюзив: помечены карточки — разметку папок с зажатыми
+                // модификаторами игнорируем (сброс — только обычным кликом).
+                if (st.markEntries.size) return;
+                if (range && st.anchorFolder && rangeApply(st.folderOrder, st.anchorFolder, key, st.markFolders)) {
+                    renderTree(); render();
+                    return;
+                }
+                if (st.markFolders.has(key)) { st.markFolders.delete(key); st.anchorFolder = null; }
+                else { st.markFolders.add(key); st.anchorFolder = key; }
+                renderTree(); render();
+            };
+            st.clearMarks = () => {
+                st.markEntries.clear(); st.markFolders.clear();
+                st.anchorEntry = null; st.anchorFolder = null;
+                renderTree(); render();
+            };
+            st.bulkDelete = async () => {
+                const ids = [...st.markEntries], paths = [...st.markFolders];
+                if (!ids.length && !paths.length) return;
+                const parts = [];
+                if (ids.length) parts.push(`записей: ${ids.length}`);
+                if (paths.length) parts.push(`категорий: ${paths.length}`);
+                const extra = paths.length ? " Записи из удалённых категорий не пропадут — переедут в корень." : "";
+                if (!confirm(`Удалить ${parts.join(" и ")}?${extra}`)) return;
+                try {
+                    if (ids.length) {
+                        await fetch("/prompt_library/delete_many", {
+                            method: "POST", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ ids }),
+                        });
+                    }
+                    if (paths.length) {
+                        await fetch("/prompt_library/folder_delete_many", {
+                            method: "POST", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ paths }),
+                        });
+                    }
+                } catch (err) { /* silent */ }
+                st.markEntries.clear(); st.markFolders.clear();
+                st.anchorEntry = null; st.anchorFolder = null;
+                if (st.detailId && ids.includes(st.detailId)) { st.detailId = null; st.detail.style.display = "none"; }
+                if (selWidget && ids.includes(selWidget.value)) selWidget.value = "";
+                if (paths.some((p) => st.selFolder === p || st.selFolder.startsWith(p + "/"))) {
+                    st.selFolder = "__all";
+                    st.syncSaveFolder();
+                }
+                await reload();
+            };
+            // Переименование на месте (без prompt() сверху браузера): текстовый
+            // узел заменяется input'ом. Enter/уход фокуса — применить (пусто или
+            // без изменений — отмена), Esc — отмена. keydown гасим на месте,
+            // иначе Esc долетит до корневого слушателя меток.
+            st.inlineEdit = (host, text, onCommit) => {
+                const inp = document.createElement("input");
+                inp.value = text;
+                inp.style.cssText = "flex:1;min-width:0;width:100%;box-sizing:border-box;background:#111;color:#fff;border:1px solid #4a9eff;border-radius:3px;padding:1px 4px;font-size:inherit;";
+                host.innerHTML = "";
+                host.appendChild(inp);
+                inp.focus();
+                try { inp.select(); } catch (e) { /* silent */ }
+                let done = false;
+                const finish = (commit) => {
+                    if (done) return; done = true;
+                    const v = inp.value.trim();
+                    if (commit && v && v !== text) onCommit(v);
+                    else { renderTree(); render(); }
+                };
+                inp.onkeydown = (ev) => {
+                    if (ev) ev.stopPropagation();
+                    if (!ev) return;
+                    if (ev.key === "Enter") finish(true);
+                    else if (ev.key === "Escape") finish(false);
+                };
+                inp.onblur = () => finish(true);
+                inp.onclick = (ev) => { if (ev) ev.stopPropagation(); };
+            };
+            // Строка-подсказка: шпаргалка по умолчанию, bulk-бар при метках.
+            // Только текст и кнопки — высоту ноды не трогаем (минимум из computeLayoutSize).
+            st.renderHint = (shown) => {
+                st.hint.innerHTML = "";
+                const nE = st.markEntries.size, nF = st.markFolders.size;
+                if (nE + nF > 0) {
+                    const parts = [];
+                    if (nE) parts.push(`записей: ${nE}`);
+                    if (nF) parts.push(`категорий: ${nF}`);
+                    const t = document.createElement("span");
+                    t.textContent = `Помечено — ${parts.join(", ")}. `;
+                    const delB = document.createElement("button");
+                    delB.textContent = "🗑 Удалить выбранное";
+                    delB.title = "Удалить помеченные записи и категории";
+                    delB.style.cssText = "background:#5a2b2b;color:#ffd9d9;border:1px solid #a33;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:11px;";
+                    delB.onclick = () => st.bulkDelete?.();
+                    const clrB = document.createElement("button");
+                    clrB.textContent = "✖ Снять выделение";
+                    clrB.title = "Снять все метки (Esc)";
+                    clrB.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:11px;";
+                    clrB.onclick = () => st.clearMarks?.();
+                    st.hint.appendChild(t);
+                    st.hint.appendChild(delB);
+                    st.hint.appendChild(document.createTextNode(" "));
+                    st.hint.appendChild(clrB);
+                } else if (st.detailId) {
+                    st.hint.textContent = st.hintMsg;
+                } else {
+                    const base = shown ? `Записей в категории: ${shown}. ` : "Пусто. Запустите Queue или нажмите «Сохранить промпт». ";
+                    st.hint.textContent = base + "Клик — открыть · Ctrl/Shift+клик — пометить · пустое место/Esc — снять.";
+                }
+            };
+            // Esc снимает метки (слушатель на корне ноды — срабатывает при фокусе внутри неё).
+            // outline:none — tabIndex делает div фокусируемым, без этого браузер
+            // рисует контур фокуса (чисто косметика, на размер не влияет).
+            root.tabIndex = 0;
+            root.style.outline = "none";
+            root.addEventListener("keydown", (ev) => {
+                if (ev && ev.key === "Escape" && (st.markEntries.size || st.markFolders.size)) st.clearMarks?.();
+            });
+            // Клик по пустому месту списка/дерева снимает метки.
+            // ev.target === zone отсекает всплывшие клики по карточкам/строкам
+            // (у кнопок внутри — свой stopPropagation).
+            for (const zone of [listContent, tree]) {
+                zone.onclick = (ev) => {
+                    if (ev && ev.target === zone && (st.markEntries.size || st.markFolders.size)) st.clearMarks?.();
+                };
+            }
             st.render = render;
             search.oninput = render;
             sortSel.onchange = render;
@@ -980,9 +1194,6 @@ app.registerExtension({
                     await reload();
                 } catch (err) { /* silent */ }
             };
-
-            // Окно промпта — единственное поле (штатный виджет, ничего не прячем).
-            // Провод, брошенный на окно, подключается к нему штатно (как в CLIP Text Encode).
 
             // --- Сторож цикла: IMAGE подключён + выход куда-то идёт = кольцо в графе ---
             const checkCycle = () => {
@@ -1038,10 +1249,9 @@ app.registerExtension({
             } catch (e) { /* silent */ }
 
             // Автосокеты виджетов: фронтенд 1.52 создаёт сокет каждому виджету
-            // (getWidgetConfig, тип `*` по умолчанию). У окна промпта он лишний —
-            // вход у нас подписанный (`source`), а вторая точка рядом путает.
+            // (getWidgetConfig, тип `*` по умолчанию). Вход `source` у нас
+            // подписанный, а вторая точка рядом путает.
             // Удаляем автосокеты технических виджетов (только неподключённые).
-            // prompt НЕ удаляем — пользователь подключает к нему провод промта.
             st.dropAutoSockets = () => {
                 try {
                     if (typeof this.removeInput !== "function" || !this.inputs) return;

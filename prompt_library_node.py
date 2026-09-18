@@ -2,8 +2,8 @@
 
 Проводник: папки/подпапки (путь "Фото/Портреты"), имена записей, превью.
 Хранение: ComfyUI/user/prompt_library/library.json + previews/.
-Автосохранение при execute (если auto_save), выдача выбранной записи
-(если use_selected). См. SPECIFICATION.md.
+Режимы execute: запись (сквозной выход + автосейв) / выдача (текст выбранной
+записи). См. SPECIFICATION.md.
 """
 
 import datetime
@@ -98,7 +98,13 @@ def _load_db():
         else:
             e["folder"] = _norm_folder(e.get("folder", ""))
         if not e.get("title"):
-            e["title"] = _auto_title(e.get("prompt", ""))
+            e["title"] = _auto_title(e.get("prompt", "") if isinstance(e.get("prompt"), str) else "")
+            changed = True
+        # prompt обязан быть строкой: иначе `e["prompt"][:120]` в execute уронит
+        # генерацию до ручной правки файла. Чиним здесь же, hash пересчитываем.
+        if not isinstance(e.get("prompt"), str):
+            e["prompt"] = str(e.get("prompt", ""))
+            e["hash"] = _dedup_hash(e["prompt"], e.get("folder", ""))
             changed = True
         # Старые записи без media — неизвестно (None). setdefault без changed:
         # отсутствие поля и так трактуется как None, файл не переписываем зря.
@@ -432,11 +438,15 @@ class PromptLibrary:
                 dirty = True  # новая запись — сохраняем всегда
             elif wf_copy:
                 # Backfill: у старых записей (и ручных) workflow не было —
-                # прикрепляем при первом же прогоне того же промпта
+                # прикрепляем при первом же прогоне того же промпта. media
+                # добиваем по тому же правилу, но только если пусто (не затираем).
                 for e in entries:
-                    if e.get("id") == entry_id and not e.get("workflow"):
-                        e["workflow"] = wf_copy
-                        _upgrade_preview_to_png(e, wf_copy)
+                    if e.get("id") == entry_id and (not e.get("workflow") or (not e.get("media") and media)):
+                        if not e.get("workflow"):
+                            e["workflow"] = wf_copy
+                            _upgrade_preview_to_png(e, wf_copy)
+                        if not e.get("media") and media:
+                            e["media"] = media
                         dirty = True
                         break
             if fld and fld not in folders:
@@ -492,6 +502,14 @@ try:
 
     routes = PromptServer.instance.routes
 
+    async def _req_body(request):
+        """Тело POST-запроса как dict; мусор (не-JSON, не-словарь) → {}."""
+        try:
+            body = await request.json()
+        except Exception:
+            return {}
+        return body if isinstance(body, dict) else {}
+
     def _strip_entry(e):
         """Лёгкая проекция для списка: без workflow (тяжёлый), но с флагами."""
         c = {k: v for k, v in e.items() if k != "workflow"}
@@ -526,10 +544,7 @@ try:
     @routes.post("/prompt_library/add")
     async def _pl_add(request):
         """Ручное сохранение из виджетов (кнопка «Сохранить») — без запуска Queue."""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _req_body(request)
         prompt = str(body.get("prompt", "")).strip()
         if not prompt:
             return web.json_response({"error": "empty prompt"}, status=400)
@@ -546,10 +561,7 @@ try:
 
     @routes.post("/prompt_library/favorite")
     async def _pl_favorite(request):
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _req_body(request)
         entry_id = body.get("id", "")
         entries, folders = _load_db()
         found = False
@@ -564,10 +576,7 @@ try:
 
     @routes.post("/prompt_library/update")
     async def _pl_update(request):
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _req_body(request)
         entry_id = body.get("id", "")
         entries, folders = _load_db()
         found = False
@@ -589,12 +598,20 @@ try:
             _save_db(entries, folders)
         return web.json_response({"ok": True})
 
+    def _remove_preview_file(victim):
+        try:
+            root = _ensure_dirs()
+            cand = root / (victim or "")
+            # guard: удаляем только файл прямо в previews/
+            if (victim and cand.parent == root / "previews"
+                    and cand.suffix.lower() in (".jpg", ".jpeg", ".png")):
+                cand.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     @routes.post("/prompt_library/delete")
     async def _pl_delete(request):
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _req_body(request)
         entry_id = body.get("id", "")
         entries, folders = _load_db()
         victim = None
@@ -605,23 +622,33 @@ try:
         new_entries = [e for e in entries if e.get("id") != entry_id]
         if len(new_entries) < len(entries):
             _save_db(new_entries, folders)
-            try:
-                root = _ensure_dirs()
-                cand = root / (victim or "")
-                # guard: удаляем только файл прямо в previews/
-                if (victim and cand.parent == root / "previews"
-                        and cand.suffix.lower() in (".jpg", ".jpeg", ".png")):
-                    cand.unlink(missing_ok=True)
-            except Exception:
-                pass
+            _remove_preview_file(victim)
         return web.json_response({"ok": True})
+
+    @routes.post("/prompt_library/delete_many")
+    async def _pl_delete_many(request):
+        """Массовое удаление записей (мультивыделение Ctrl/Shift).
+        Неизвестные id молча игнорируются. Файлы превью чистятся тем же guard'ом."""
+        body = await _req_body(request)
+        ids = body.get("ids", None)
+        if not isinstance(ids, list):
+            return web.json_response({"error": "ids must be a list"}, status=400)
+        want = {i for i in ids if isinstance(i, str) and i}
+        if not want:
+            return web.json_response({"ok": True, "deleted": 0})
+        entries, folders = _load_db()
+        victims = [e.get("preview") for e in entries if e.get("id") in want]
+        new_entries = [e for e in entries if e.get("id") not in want]
+        deleted = len(entries) - len(new_entries)
+        if deleted:
+            _save_db(new_entries, folders)
+            for v in victims:
+                _remove_preview_file(v)
+        return web.json_response({"ok": True, "deleted": deleted})
 
     @routes.post("/prompt_library/folder_create")
     async def _pl_folder_create(request):
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _req_body(request)
         parent = _norm_folder(body.get("parent", ""))
         name = str(body.get("name", "")).strip().replace("/", " ").replace("\\", " ")
         if not name:
@@ -634,10 +661,7 @@ try:
 
     @routes.post("/prompt_library/folder_rename")
     async def _pl_folder_rename(request):
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _req_body(request)
         old = _norm_folder(body.get("old", ""))
         new = _norm_folder(body.get("new", ""))
         if not old or not new or old == new:
@@ -665,10 +689,7 @@ try:
     @routes.post("/prompt_library/folder_delete")
     async def _pl_folder_delete(request):
         """Удаление папки: записи из неё и подпапок переносятся в корень (не теряются)."""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _req_body(request)
         path = _norm_folder(body.get("path", ""))
         if not path:
             return web.json_response({"error": "empty path"}, status=400)
@@ -682,6 +703,32 @@ try:
                 e["hash"] = _dedup_hash(e["prompt"], "")
         _save_db(entries, folders)
         return web.json_response({"ok": True})
+
+    @routes.post("/prompt_library/folder_delete_many")
+    async def _pl_folder_delete_many(request):
+        """Массовое удаление категорий (мультивыделение Ctrl/Shift).
+        Семантика как у одиночного: записи из сносимых папок и подпапок
+        переносятся в корень, не теряются. Мусор в paths игнорируется."""
+        body = await _req_body(request)
+        raw = body.get("paths", None)
+        if not isinstance(raw, list):
+            return web.json_response({"error": "paths must be a list"}, status=400)
+        paths = {p for p in (_norm_folder(x) for x in raw if isinstance(x, str)) if p}
+        if not paths:
+            return web.json_response({"ok": True, "deleted_folders": 0})
+
+        def _killed(folder):
+            return any(folder == p or folder.startswith(p + "/") for p in paths)
+
+        entries, folders = _load_db()
+        folders = [f for f in folders if not _killed(f)]
+        for e in entries:
+            if _killed(e.get("folder", "")):
+                e["folder"] = ""
+                e["category"] = ""
+                e["hash"] = _dedup_hash(e["prompt"], "")
+        _save_db(entries, folders)
+        return web.json_response({"ok": True, "deleted_folders": len(paths)})
 
 except Exception as e:
     print(f"[PromptLibrary] routes not registered: {e}", flush=True)

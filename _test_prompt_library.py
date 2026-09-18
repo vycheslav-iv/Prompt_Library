@@ -365,6 +365,97 @@ check("старая запись без media читается как None",
 r = h("GET", "/prompt_library/list", Req())
 check("/list отдаёт media", any("media" in e for e in r["json"]["entries"]))
 
+# --- 8. массовое удаление -----------------------------------------------------
+print("\n8. Bulk delete (мультивыделение)")
+bulk_ids = []
+for t in ["bulk1", "bulk2", "bulk3"]:
+    rr = h("POST", "/prompt_library/add", Req({"prompt": t, "folder": "Bulk"}))
+    bulk_ids.append(rr["json"]["id"])
+# превью у первой bulk-записи — проверим чистку файлов
+db = json.loads(lib_file.read_text(encoding="utf-8"))
+for e in db["entries"]:
+    if e["prompt"] == "bulk1":
+        e["preview"] = "previews/bulk1.png"
+lib_file.write_text(json.dumps(db, ensure_ascii=False), encoding="utf-8")
+bfile = mod._ensure_dirs() / "previews" / "bulk1.png"
+bfile.write_bytes(b"png")
+n_before = len(mod._load_db()[0])
+r = h("POST", "/prompt_library/delete_many", Req({"ids": [bulk_ids[0], bulk_ids[1], "нет-такого"]}))
+check("/delete_many удаляет существующие, мусор игнорирует",
+      r["json"].get("deleted") == 2 and len(mod._load_db()[0]) == n_before - 2, str(r))
+check("/delete_many чистит файлы превью", not bfile.exists())
+check("/delete_many survivor цел", any(e["prompt"] == "bulk3" for e in mod._load_db()[0]))
+r = h("POST", "/prompt_library/delete_many", Req({"ids": "не-список"}))
+check("/delete_many с не-списком -> 400", r["status"] == 400)
+r = h("POST", "/prompt_library/delete_many", Req(["не-словарь"]))
+check("/delete_many с телом не-словарём -> 400, без 500", r["status"] == 400)
+r = h("POST", "/prompt_library/delete_many", Req({"ids": []}))
+check("/delete_many с пустым списком -> deleted 0",
+      r["json"].get("deleted") == 0 and r["json"].get("ok"))
+
+h("POST", "/prompt_library/add", Req({"prompt": "f1", "folder": "Del/A"}))
+h("POST", "/prompt_library/add", Req({"prompt": "f2", "folder": "Del/A/Под"}))
+h("POST", "/prompt_library/add", Req({"prompt": "f3", "folder": "Del/B"}))
+r = h("POST", "/prompt_library/folder_delete_many", Req({"paths": ["Del/A", "мусор", ""]}))
+entries, folders = mod._load_db()
+check("/folder_delete_many сносит папку с подпапками",
+      "Del/A" not in folders and "Del/A/Под" not in folders and "Del/B" in folders, str(folders))
+check("/folder_delete_many переносит книги в корень",
+      all(next(e for e in entries if e["prompt"] == p)["folder"] == "" for p in ["f1", "f2"])
+      and next(e for e in entries if e["prompt"] == "f3")["folder"] == "Del/B")
+# deleted_folders = число запрошенных валидных путей ("мусор" валиден, но ничему
+# не соответствует и ничего не меняет; "" отброшен как пустой)
+check("/folder_delete_many отчёт о числе путей", r["json"].get("deleted_folders") == 2, str(r))
+r = h("POST", "/prompt_library/folder_delete_many", Req({"paths": "не-список"}))
+check("/folder_delete_many с не-списком -> 400", r["status"] == 400)
+r = h("POST", "/prompt_library/folder_delete_many", Req(["не-словарь"]))
+check("/folder_delete_many с телом не-словарём -> 400, без 500", r["status"] == 400)
+r = h("POST", "/prompt_library/favorite", Req(["не-словарь"]))
+check("/favorite с телом не-словарём не падает", r["json"].get("ok"))
+
+# --- 9. закалка базы ----------------------------------------------------------
+print("\n9. Закалка базы и backfill")
+# insert(0), а не append: к этому моменту база забита до MAX_ENTRIES (§6),
+# запись в хвосте срезал бы триммер entries[:MAX_ENTRIES] при первом execute
+db = json.loads(lib_file.read_text(encoding="utf-8"))
+db["entries"].insert(0, {"id": "nonstr1", "hash": "h-ns", "prompt": 12345,
+                         "folder": "", "title": ""})
+lib_file.write_text(json.dumps(db, ensure_ascii=False), encoding="utf-8")
+try:
+    res_ns = node.execute(mode=node.MODE_WRITE, selected="", save_folder="", source="x",
+                          extra_pnginfo=pnginfo, unique_id=7)
+    check("prompt-не-строка в базе чинится, execute не падает", True)
+except Exception as e:
+    check("prompt-не-строка в базе чинится, execute не падает", False, f"{type(e).__name__}: {e}")
+entries, _ = mod._load_db()
+hit_ns = next((e for e in entries if e["id"] == "nonstr1"), None)
+check("prompt приведён к строке, hash пересчитан",
+      hit_ns is not None and isinstance(hit_ns["prompt"], str)
+      and hit_ns["hash"] == mod._dedup_hash(hit_ns["prompt"], ""))
+
+# backfill media: старая запись без media + повторный прогон с проводом
+db = json.loads(lib_file.read_text(encoding="utf-8"))
+db["entries"].insert(0, {"id": "nomedia1", "hash": mod._dedup_hash("медиа-бэкфилл", ""),
+                      "prompt": "медиа-бэкфилл", "folder": "", "category": "",
+                      "title": "медиа-бэкфилл", "favorite": False,
+                      "created_at": "", "last_used": None, "preview": None,
+                      "workflow": {"nodes": [], "links": []}})
+lib_file.write_text(json.dumps(db, ensure_ascii=False), encoding="utf-8")
+
+
+class FakeVideo2:
+    def get_components(self):
+        raise RuntimeError("no frames in test")
+
+
+node.execute(mode=node.MODE_WRITE, selected="", save_folder="", source="медиа-бэкфилл",
+             image=FakeVideo2(), extra_pnginfo=pnginfo, unique_id=7)
+entries, _ = mod._load_db()
+hit_nm = next((e for e in entries if e["id"] == "nomedia1"), None)
+check("backfill добивает пустой media, не трогая остальное",
+      hit_nm is not None and hit_nm.get("media") == "video"
+      and hit_nm.get("title") == "медиа-бэкфилл")
+
 # --- итог -------------------------------------------------------------------
 print(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
 if fails:
