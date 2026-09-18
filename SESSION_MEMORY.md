@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (2026-09-18, v1.18 запушена + память)
+# Память сессии — Prompt Library (2026-09-18, v1.19 запушена + память)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,30 +7,29 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- v1.18 (`affee09`, запушена): мультивыделение Ctrl/Shift (карточки + папки) с bulk-баром и массовым удалением (`delete_many`/`folder_delete_many`); переименование на месте (`st.inlineEdit`, без `prompt()`/`alert()`); акцент-полоса `box-shadow: inset`; эксклюзив (чужой тип с модификаторами — игнор, сброс только обычным кликом/пустым местом/Esc); видимая версия `v1.18-multiselect` в тулбаре; закалка (`_req_body`, коэрсия `prompt`, backfill `media`, чистка протухших меток).
-- Глубокие ревизии без колхоза (маркеры чистые, весь дифф вычитан).
-- SPECIFICATION.md v1.18 (§4.2, §5, §8, §15 п.10, §17). Память сохранена.
-- Дерево чистое, `origin/master` вровень.
+- v1.19 (`9b83387`, запушена): ручное превью с диска — кнопка `📷 Прикрепить превью` в ручном вводе (даунскейл до 512px через canvas в браузере → PNG dataURL), сервер `_save_preview_upload` + `preview_data` в `/add` (битый файл — запись без превью); `INPUT_H` 130→170.
+- Откат always-save: v1.19-always-save убрана в `stash@{0}` (петля структурная — провода, не код; лечится Saver'ом, не режимом).
+- Обсуждён Saver (мертвая нода-приёмник после VAE, без выходов): дизайн согласован до «минимум vs обвязка», строить — по команде.
+- SPECIFICATION.md v1.19 (п.11, §8, §17). Дерево чистое, `origin/master` вровень.
 
 ## 2. Итоговое состояние кода
 
-- `prompt_library_node.py:155` — `_extract_frame()`; `:180` — `_save_thumbnail()`; `:310` — `_media_of()`; `:319` — `_add_entry(media=)`; `:361` — сокет `IMAGE,VIDEO`; `:505` — `_req_body()`; bulk-endpoint'ы `delete_many`/`folder_delete_many`
-- `web/js/prompt_library.js:58` — `PL_JS_VERSION = "1.18-multiselect"`; `plMap`/`plBadge`/`mediaSel`/фильтр; метки (`markEntryToggle`/`markFolderToggle`/`rangeApply`/`clearMarks`/`bulkDelete`/`renderHint`); `inlineEdit`; видимый `verTag` в тулбаре
-- `_test_prompt_library.py` — 90 проверок (§7 media, §8 bulk, §9 закалка)
-- `_smoke_prompt_library.mjs` — 47 фаз (метки + inlineEdit исполнением)
-- `SPECIFICATION.md` — v1.18
+- `prompt_library_node.py` — `_save_preview_upload()` + `preview_data` в `_pl_add`; сокет `IMAGE,VIDEO`; `_media_of`; bulk-endpoint'ы; `_req_body()`
+- `web/js/prompt_library.js:58` — `PL_JS_VERSION = "1.18-multiselect"` (JS не менял версию в v1.19!); attach-блок (кнопка/тамб/крест/даунскейл); `INPUT_H = 170`; метки; `inlineEdit`; verTag
+- `_test_prompt_library.py` — 94 проверки (§11: 4 по загрузке превью)
+- `_smoke_prompt_library.mjs` — 47 фаз; `_audit_prompt_library.mjs` — чист (12 роутов)
+- `SPECIFICATION.md` — v1.19 (п.11, §8 ручной ввод, §17)
 - Скилл `comfyui-video-socket` в корне бандла (3 папки, идентичны)
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- Зелёный VIDEO не втыкался в синий IMAGE → мульти-тип `IMAGE,VIDEO` (как `FLOAT,INT`); `*` не использовать (ломает рероуты).
-- Эксклюзив сначала сбрасывал чужие метки при модификаторах (баг) → теперь игнор с модификаторами, сброс только обычным кликом.
-- Якорь Shift-диапазона ставил только Ctrl-клик → ставит и обычный клик (как в проводнике).
-- 🖼 мутно на Windows → везде 📷 (проверено grep, `U+1F5BC` отсутствует).
-- Маркер версии забыли поднять под новый JS → теперь `PL_JS_VERSION` + видимый verTag в тулбаре; смоук сверяет маркер.
+- Петля «выход → … → вход-картинка»: структурная (ComfyUI смотрит на рисунок), кодом ноды не лечится → always-save откачен в стеш, путь — Saver без выходов.
+- OUTPUT_NODE выполняется даже с неподключённым выходом (корень исполнения) — ручной флоу без круга работает уже сейчас.
+- 🖼 мутно на Windows → везде 📷 (`U+1F5BC` отсутствует, проверено grep).
+- Маркер версии забыли поднять под новый JS → `PL_JS_VERSION` + видимый verTag в тулбаре; смоук сверяет маркер.
 - Системный Python без numpy/torch — видео-проверки на `python_embeded/python.exe` + стаб `FakeVideo`.
 - `node --check` / смоук — из папки ноды; `sync.py` — из корня бандла.
-- База в §6 теста забита до MAX_ENTRIES — новые тестовые записи вставлять через `insert(0)`, иначе срежет триммер.
+- База в §6 забита до MAX_ENTRIES — тестовые записи через `insert(0)`, иначе срежет триммер.
 
 ## 4. Что важно не сломать при продолжении работы
 
@@ -43,21 +42,22 @@
 - Не возвращать `autoFitHeight`/`calibrateFloor`/`_vueFloor`
 - Синк: `python sync.py Prompt_Library` (из корня!) → **рестарт ComfyUI + Ctrl+F5** (маркер в F12 и в тулбаре)
 - Коммиты: из папки ноды (`git add -A && git commit && git push origin master`), `gh` авторизован
+- Стеш `stash@{0}` — откаченный always-save, не удалять молча
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-1. Разбить на две ноды: **Prompt Library** + **Prompt Saver**
-2. Постраничность списка (~20 записей)
-3. Вынести воркфлоу из `library.json` (растёт; лимит 500)
-4. Inline-создание папки (сейчас `prompt()` — последний модальный диалог)
-5. Живой тест мультивыделения пользователем
+1. **Saver** (согласован в принципе): минимум (2 провода + поле «Папка», без выходов) vs +статус vs +ручной ввод — ждёт выбора и команды «строй»
+2. Разбить Library на выдачу / Saver на приём (стратегия из §17)
+3. Постраничность списка (~20 записей)
+4. Вынести воркфлоу из `library.json` (растёт; лимит 500)
+5. Inline-создание папки (последний `prompt()`)
 
 ## 6. Связанные файлы
 
-- `web/js/prompt_library.js` — нода (JS-расширение, v1.18)
-- `prompt_library_node.py` — Python-нода (сокет + extract + media + thumbnail + bulk)
-- `_test_prompt_library.py` — Python-тест (90 проверок)
+- `web/js/prompt_library.js` — нода (JS-расширение, маркер 1.18-multiselect)
+- `prompt_library_node.py` — Python-нода (сокет + extract + media + thumbnail + bulk + upload)
+- `_test_prompt_library.py` — Python-тест (94 проверки)
 - `_smoke_prompt_library.mjs` — JS-смоук (47 фаз)
 - `_audit_prompt_library.mjs` — аудит связности (12 роутов)
-- `SPECIFICATION.md` — v1.18 (§4.2, §5, §8, §15 п.10, §17)
+- `SPECIFICATION.md` — v1.19 (п.11, §8, §17)
 - Скилл `comfyui-video-socket` в корне бандла (3 папки)
