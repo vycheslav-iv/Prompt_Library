@@ -18,7 +18,7 @@ function plMap(e) {
 
 // Бейдж типа записи: только текст, раскладку не трогает
 function plBadge(e) {
-    return e.media === "video" ? "🎬 " : e.media === "image" ? "🖼 " : "";
+    return e.media === "video" ? "🎬 " : e.media === "image" ? "📷 " : "";
 }
 
 // --- Смена режима рендера (canvas ↔ Nodes 2.0) без перезагрузки страницы ------
@@ -55,7 +55,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.15-vue-floor480";
+const PL_JS_VERSION = "1.17-media-badges";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -118,7 +118,7 @@ app.registerExtension({
             viewSel.title = "Вид списка";
             viewSel.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px;max-width:130px;";
             viewSel.innerHTML = `
-                <option value="large">🖼 Крупные</option>
+                <option value="large">📷 Крупные</option>
                 <option value="medium">🎞 Средние</option>
                 <option value="list">📋 Список</option>`;
             try {
@@ -132,7 +132,7 @@ app.registerExtension({
             mediaSel.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:4px;max-width:110px;";
             mediaSel.innerHTML = `
                 <option value="all">Всё</option>
-                <option value="image">🖼 Фото</option>
+                <option value="image">📷 Фото</option>
                 <option value="video">🎬 Видео</option>`;
             try {
                 const savedMedia = localStorage.getItem("promptLibrary.media");
@@ -895,7 +895,8 @@ app.registerExtension({
                                 for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
                                 st.bSave.style.display = "none";
                                 st.bWorkflow.style.display = full.workflow ? "" : "none";
-                                st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}`;
+                                const mediaLabel = full.media === "video" ? " · 🎬 видео" : full.media === "image" ? " · 📷 фото" : "";
+                                st.dMeta.textContent = `№ ${full.id} · создана ${full.created_at || "—"} · выдана ${full.last_used || "—"}${mediaLabel}`;
                                 st.detail.style.display = "flex";
                                 st.hint.textContent = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача».";
                             }

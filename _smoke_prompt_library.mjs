@@ -202,7 +202,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.15-vue-floor480");
+  check(`${tag}: версия JS видна`, st.version === "1.17-media-badges");
 }
 
 // Канвас: пол 480px на панелях (фронтенд сам растёт ноду под контент).
