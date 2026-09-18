@@ -813,7 +813,12 @@ app.registerExtension({
                     try {
                         const d = ev && ev.detail;
                         if (!d || !d.prompt_id) return;
-                        if (String(d.node) === String(st.nodeId)) {
+                        // Нода внутри subgraph приходит с префиксом ("5:12") —
+                        // сверяем и по display_node, и по последнему сегменту id.
+                        const mine = String(st.nodeId);
+                        const isMine = [String(d.node || ""), String(d.display_node || "")]
+                            .some((v) => v === mine || v.endsWith(":" + mine));
+                        if (isMine) {
                             // Наша нода сохранила запись — ждём обложку для неё
                             const sid = (d.output && d.output.saved_id && d.output.saved_id[0]) || "";
                             if (sid) st.rememberPending(d.prompt_id, { id: String(sid), image: null });

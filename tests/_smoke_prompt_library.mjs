@@ -656,7 +656,21 @@ await run("preview: автоподхват обложки из прогона", 
     await new Promise((r) => setImmediate(r));
     check("ошибка прогона чистит ожидание", st.pendingPreview.size === 0 && posts.length === 0);
 
-    // 6. картинка не первая — используем первую (стабильно)
+    // 6. нода внутри subgraph: id приходит с префиксом ("5:12")
+    posts.length = 0;
+    apiStub.dispatch("executed", { node: "5:" + st.nodeId, display_node: "5:" + st.nodeId,
+      prompt_id: "p5", output: { saved_id: ["e6"] } });
+    check("subgraph: своя нода узнана по префиксному id", st.pendingPreview.get("p5")?.id === "e6",
+      JSON.stringify([...st.pendingPreview.keys()]));
+    apiStub.dispatch("executed", { node: "12", prompt_id: "p5",
+      output: { images: [{ filename: "sub.png", subfolder: "", type: "output" }] } });
+    apiStub.dispatch("execution_success", { prompt_id: "p5" });
+    await new Promise((r) => setImmediate(r));
+    check("subgraph: обложка привязана к записи",
+      posts.some((p) => p.url.includes("attach_preview") && p.body.id === "e6" && p.body.filename === "sub.png"),
+      JSON.stringify(posts));
+
+    // 7. картинка не первая — используем первую (стабильно)
     posts.length = 0;
     apiStub.dispatch("executed", { node: String(st.nodeId), prompt_id: "p4", output: { saved_id: ["e5"] } });
     apiStub.dispatch("executed", { node: "12", prompt_id: "p4",
