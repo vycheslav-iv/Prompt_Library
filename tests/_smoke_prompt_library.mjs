@@ -51,11 +51,20 @@ function makeEl(tag = "div") {
     getBoundingClientRect: () => ({ width: 480, height: 596, top: 0, left: 0, right: 480, bottom: 596, x: 0, y: 0 }),
     dispatchEvent: () => true,
     [Symbol.iterator]: function* () {},
-    innerHTML: "", value: "", textContent: "", placeholder: "", title: "", type: "",
+    value: "", textContent: "", placeholder: "", title: "", type: "",
     rows: 0, checked: false, disabled: false, src: "", href: "", id: "", className: "",
     offsetHeight: 596, offsetWidth: 480, scrollHeight: 596, clientHeight: 596, scrollTop: 0,
     naturalWidth: 100, naturalHeight: 100, complete: true,
   };
+  // innerHTML как в браузере: присвоение "" реально чистит детей. Раньше это
+  // было обычное свойство, поэтому список/дерево «накапливали» карточки между
+  // рендерами и посчитать их было нельзя (v1.27).
+  let _html = "";
+  Object.defineProperty(el, "innerHTML", {
+    get: () => _html,
+    set: (v) => { _html = String(v == null ? "" : v); if (_html === "") el.children = []; },
+    configurable: true,
+  });
   return el;
 }
 
@@ -231,7 +240,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.26-media");
+  check(`${tag}: версия JS видна`, st.version === "1.27-audit");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -799,11 +808,16 @@ await run("pickup: список узлов и сохранение текста 
     outputs: [{ name: "LATENT", type: "LATENT" }], widgets: [{ name: "steps", value: 20, type: "number" }] };
   const otherLib = { id: 5, type: "PromptLibrary", title: "", mode: 0,
     outputs: [{ name: "prompt_out", type: "STRING" }], widgets: [] };
-  const muted = { id: 7, type: "PromptKeeper", title: "Muted", mode: 4,
+  // Узлы в режимах mute/bypass не исполнятся: у LiteGraph NEVER = 2 (mute),
+  // BYPASS = 4 (bypass) — ровно пара, по которой фронтенд сам считает узел
+  // неактивным (app.ts: isMuted = mode === NEVER || mode === BYPASS).
+  const bypassed = { id: 7, type: "PromptKeeper", title: "Bypassed", mode: 4,
+    outputs: [{ name: "text", type: "STRING" }], widgets: [] };
+  const muted = { id: 8, type: "PromptKeeper", title: "Muted", mode: 2,
     outputs: [{ name: "text", type: "STRING" }], widgets: [] };
   const prevNodes = appStub.graph._nodes;
   const prevGet = appStub.graph.getNodeById;
-  appStub.graph._nodes = [keeper, noise, otherLib, muted, node];
+  appStub.graph._nodes = [keeper, noise, otherLib, bypassed, muted, node];
   appStub.graph.getNodeById = (id) => appStub.graph._nodes.find((n) => String(n.id) === String(id)) || null;
   const origFetch = sandbox.fetch;
   const posts = [];
@@ -821,7 +835,8 @@ await run("pickup: список узлов и сохранение текста 
     check("pickup: первая опция — «из входа»", st.pickupSel.children[0].value === "");
     check("pickup: узел без текста не предложен", !opts.includes("1524"), JSON.stringify(opts));
     check("pickup: вторая Library-нода не предложена", !opts.includes("5"), JSON.stringify(opts));
-    check("pickup: mute-узел не предложен", !opts.includes("7"), JSON.stringify(opts));
+    check("pickup: bypass-узел (mode 4) не предложен", !opts.includes("7"), JSON.stringify(opts));
+    check("pickup: mute-узел (mode 2, NEVER) не предложен", !opts.includes("8"), JSON.stringify(opts));
     st.pickupSel.value = "1622";
     st.pickupSel.onchange();
     check("pickup: выбор пишется в скрытый виджет",
@@ -1220,6 +1235,138 @@ await run("редактирование: ✖ Отмена возвращает �
       && st.bCancel.style.display === "", String(st.dText.value));
   } finally {
     appStub.extensionManager.dialog.confirm = origConfirm;
+  }
+});
+
+// --- v1.27 (аудит): двойной клик, полнотекстовый поиск, гигиена состояния ----
+const walkDom = (el, out = []) => { if (!el?.children) return out; for (const c of el.children) { out.push(c); walkDom(c, out); } return out; };
+
+await run("v1.27: защита от двойного клика на «Сохранить промпт»", async () => {
+  const node = makeNode();
+  node.id = 61;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  // Ответ приходит не сразу: второй клик обязан быть отброшен импгновенно
+  let release = () => {};
+  const gate = new Promise((r) => { release = r; });
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("/prompt_library/add")) { await gate; return jsonResponse({ ok: true, id: "e1" }); }
+    return jsonResponse({ ok: true });
+  };
+  try {
+    // Текст вводится в textarea РУЧНОГО ввода (у панели книги своя — st.dText);
+    // берём ПОСЛЕДНЮЮ из созданных в этой ноде, а не первую за весь прогон
+    const ta = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st.dText).pop();
+    const saveBtn = walkDom(st.root).find((el) => el.tagName === "BUTTON"
+      && String(el.textContent).includes("Сохранить промпт"));
+    check("v1.27: кнопка ручного сохранения найдена", !!ta && !!saveBtn, String(saveBtn?.textContent));
+    ta.value = "текст под двойным кликом";
+    const p1 = saveBtn.onclick(); // первый клик уходит в fetch
+    const p2 = saveBtn.onclick(); // второй — при живом первом
+    check("v1.27: во время запроса кнопка помечена занятой (⏳)",
+      String(saveBtn.textContent).includes("⏳"), saveBtn.textContent);
+    release();
+    await p1; await p2;
+    check("v1.27: двойной клик дал ровно один POST /add",
+      posts.filter((p) => p.url.includes("/prompt_library/add")).length === 1,
+      JSON.stringify(posts.map((p) => p.url)));
+    check("v1.27: после ответа защита снята (можно сохранять снова)", st._saving === false);
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+await run("v1.27: серверный полнотекстовый поиск (слово из середины текста)", async () => {
+  const node = makeNode();
+  node.id = 71;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  const calls = [];
+  // Что «находит» сервер: меняем между запросами (query в URL закодирован
+  // escape-последовательностью, поэтому на текст в URL ориентироваться нельзя)
+  let serverIds = ["deep1"];
+  // Записи приходят через стартовый reload() ноды (как в живую) — в форме
+  // сервера, чтобы заодно проверить plMap; совпадение в глубине текста отдаёт
+  // только /search (в head такой записи слова запроса нет).
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) {
+      return jsonResponse({ folders: [], entries: [
+        { id: "loc1", title: "Локальная", prompt: "локальное совпадение иголка", folder: "", media: null },
+        { id: "deep1", title: "Глубокая", prompt: "глубина без слов запроса", folder: "", media: null },
+      ] });
+    }
+    if (url.includes("/prompt_library/search")) {
+      calls.push(url);
+      return jsonResponse({ ids: serverIds });
+    }
+    return jsonResponse({ ok: true });
+  };
+  try {
+    // Стартовый reload() ноды ушёл ещё до подмены fetch — перечитываем список
+    // тем же путём, что и в живую (plMap серверного ответа)
+    await st.reload();
+    check("v1.27: reload наполнил список из сервера", st.entries.length === 2,
+      String(st.entries.length));
+
+    st.search.value = "иголка";
+    await st.onSearch();
+    check("v1.27: поиск спросил сервер один раз", calls.length === 1 && calls[0].includes("q="), JSON.stringify(calls));
+    check("v1.27: id из глубины текста пришли в st.deepIds", st.deepIds && st.deepIds.has("deep1"));
+    check("v1.27: карточка из глубины текста показана вместе с локальными",
+      st.list.children.length === 2, String(st.list.children.length));
+
+    // Запрос без совпадений: ни локально, ни на сервере
+    serverIds = [];
+    st.search.value = "ничегонесовпадает";
+    await st.onSearch();
+    check("v1.27: нет совпадений — список пуст", st.list.children.length === 0,
+      String(st.list.children.length));
+
+    st.search.value = "";
+    await st.onSearch();
+    check("v1.27: пустой запрос — серверный поиск сброшен, видны все",
+      st.deepIds === null && st.list.children.length === 2, String(st.list.children.length));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+await run("v1.27: метка кэша превью чистится при удалении записи", async () => {
+  const node = makeNode();
+  node.id = 81;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) {
+      return jsonResponse({ folders: [], entries: [
+        { id: "e1", title: "Удаляемая", prompt: "текст", folder: "", media: "image",
+          preview: "previews/e1.png" },
+      ] });
+    }
+    return jsonResponse({ ok: true });
+  };
+  try {
+    await st.reload();
+    st.previewStamp.set("e1", Date.now());
+    st.render();
+    const delBtn = walkDom(st.list).find((el) => el.tagName === "BUTTON"
+      && String(el.textContent) === "🗑");
+    check("v1.27: кнопка удаления карточки найдена", !!delBtn);
+    await delBtn.onclick({ stopPropagation() {} });
+    check("v1.27: запись убрана из списка", st.entries.length === 0);
+    check("v1.27: метка кэша превью удалена вместе с записью",
+      !st.previewStamp.has("e1"), JSON.stringify([...st.previewStamp.keys()]));
+  } finally {
+    sandbox.fetch = origFetch;
   }
 });
 

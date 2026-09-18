@@ -52,6 +52,12 @@ function plHookVueMode() {
     try {
         const lg = window.LiteGraph;
         if (!lg || typeof lg.vueNodesMode !== "boolean") return;
+        // Патчим только ОБЫЧНОЕ свойство-значение. Если фронт сделает
+        // vueNodesMode accessor'ом (геттер/сеттер со своим стейтом), наша
+        // обёртка перекрыла бы его сеттер и сломала бы стор — в этом случае
+        // молча живём на событии настроек и на сверке в render().
+        const desc = Object.getOwnPropertyDescriptor(lg, "vueNodesMode");
+        if (desc && !("value" in desc)) return;
         let current = lg.vueNodesMode;
         Object.defineProperty(lg, "vueNodesMode", {
             configurable: true,
@@ -70,7 +76,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.26-media";
+const PL_JS_VERSION = "1.27-audit";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -278,6 +284,10 @@ app.registerExtension({
             };
 
             inputSaveBtn.onclick = async () => {
+                // Защита от двойного клика (§32): второй POST стартовал бы до
+                // ответа первого — в лучшем случае ложное «уже есть», в худшем
+                // (гонка с потоком исполнения) потерянная запись.
+                if (st._saving) return;
                 const text = inputText.value.trim();
                 const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
                 const base = "💾 Сохранить промпт";
@@ -286,6 +296,7 @@ app.registerExtension({
                     setTimeout(() => { inputSaveBtn.textContent = base; }, 1500);
                     return;
                 }
+                st._saving = true;
                 inputSaveBtn.textContent = "⏳ Сохраняю...";
                 try {
                     const prev = await readAttachedPreview();
@@ -321,6 +332,7 @@ app.registerExtension({
                         inputSaveBtn.textContent = "❌ Ошибка";
                     }
                 } catch (err) { inputSaveBtn.textContent = "❌ Ошибка"; }
+                st._saving = false;
                 setTimeout(() => { inputSaveBtn.textContent = base; }, 1500);
             };
 
@@ -597,6 +609,9 @@ app.registerExtension({
                 bulkCount, bulkDel, bulkClear,
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel,
                 entries: [], folders: [], full: new Map(),
+                // id записей, найденных серверным полнотекстовым поиском (v1.27);
+                // null = активного поиска нет (обычный локальный фильтр)
+                deepIds: null,
                 // Локальная метка «обложка заменена» (v1.26): URL превью кэшируется
                 // по created_at, без метки браузер показал бы старую картинку.
                 previewStamp: new Map(),
@@ -638,7 +653,13 @@ app.registerExtension({
                     for (const n of nodes) {
                         if (!n || n === this) continue;
                         if (String(n.type || "") === "PromptLibrary") continue;
-                        if (n.mode === 4) continue;            // mute: не исполнится
+                        // Узлы в режимах mute и bypass не исполняются: у LiteGraph
+                        // NEVER = 2 (mute), BYPASS = 4 (bypass) — ровно та пара, по
+                        // которой фронтенд сам считает узел неактивным
+                        // (app.ts: isMuted = mode === NEVER || mode === BYPASS).
+                        // Раньше здесь был только 4: mute-узел предлагался, хотя
+                        // не мог отдать текст после прогона (§32).
+                        if (n.mode === 2 || n.mode === 4) continue;
                         const hasStrOut = (n.outputs || []).some((o) => o
                             && String(o.type || "").toUpperCase().indexOf("STRING") >= 0);
                         const hasTextW = (n.widgets || []).some((w) => w && typeof w.value === "string"
@@ -770,7 +791,12 @@ app.registerExtension({
                         if (!id) return;
                         ev.preventDefault();
                         if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-                        await st.openWorkflow(id);
+                        // Слушатель ставится ОДИН раз на страницу (hookCanvasDrop),
+                        // поэтому держит замыкание той ноды, что поставила хук, — её
+                        // могли уже удалить. Берём состояние живой ноды, если есть.
+                        let live = null;
+                        try { for (const s of plLiveStates) { live = s; break; } } catch (e) { /* silent */ }
+                        await (live || st).openWorkflow(id);
                     }, true);
                     window.__plCanvasDropHooked = true;
                 } catch (e) { /* silent */ }
@@ -1525,7 +1551,13 @@ app.registerExtension({
                     else if (st.selFolder === "__root" && e.folder) return false;
                     else if (st.selFolder && !st.selFolder.startsWith("__") && e.folder !== st.selFolder) return false;
                     if (mf !== "all" && e.media !== mf) return false;
-                    if (q && !((e.title || "") + "\n" + (e.head || "") + "\n" + (e.folder || "")).toLowerCase().includes(q)) return false;
+                    if (q) {
+                        const local = ((e.title || "") + "\n" + (e.head || "") + "\n" + (e.folder || "")).toLowerCase().includes(q);
+                        // Слово из середины длинного промпта локально не видно
+                        // (в списке — только первые 120 символов): такие записи
+                        // приносит серверный поиск (§32).
+                        if (!local && !(st.deepIds && st.deepIds.has(e.id))) return false;
+                    }
                     return true;
                 });
                 const by = st.sortSel.value;
@@ -1652,6 +1684,7 @@ app.registerExtension({
                             await st.apiPost("/prompt_library/delete", { id: e.id });
                             st.entries = st.entries.filter((x) => x.id !== e.id);
                             st.full.delete(e.id);
+                            st.previewStamp.delete(e.id);
                             if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; st.shrinkBack?.(); }
                             renderTree(); render();
                             if (!st._vuePanes) st.syncNodeSize?.();
@@ -1767,6 +1800,7 @@ app.registerExtension({
                 } catch (err) { /* silent */ }
                 st.markEntries.clear(); st.markFolders.clear();
                 st.anchorEntry = null; st.anchorFolder = null;
+                for (const id of ids) st.previewStamp.delete(id); // метки удалённых записей
                 if (st.detailId && ids.includes(st.detailId)) { st.detailId = null; st.detail.style.display = "none"; st.shrinkBack?.(); }
                 if (selWidget && ids.includes(selWidget.value)) selWidget.value = "";
                 if (paths.some((p) => st.selFolder === p || st.selFolder.startsWith(p + "/"))) {
@@ -1863,7 +1897,32 @@ app.registerExtension({
                 } catch (e) { /* silent */ }
             };
             st.render = render;
-            search.oninput = render;
+            // Полнотекстовый поиск (v1.27): локально ищем по названию / началу
+            // текста / папке, а совпадение в глубине текста находит сервер
+            // (/prompt_library/search отдаёт только id). Без таймеров: устаревший
+            // ответ отбрасываем по номеру запроса (last-wins).
+            let searchSeq = 0;
+            st.onSearch = async () => {
+                const q = (st.search.value || "").trim();
+                const my = ++searchSeq;
+                if (!q) {
+                    st.deepIds = null;
+                    render();
+                    return;
+                }
+                st.deepIds = null; // старый ответ не выдаём за новый
+                render();          // локальные совпадения видны сразу
+                try {
+                    const r = await fetch(`/prompt_library/search?q=${encodeURIComponent(q)}`);
+                    if (my !== searchSeq) return;
+                    if (!r.ok) return;
+                    const d = await r.json();
+                    if (my !== searchSeq) return;
+                    st.deepIds = new Set((d && d.ids) || []);
+                    render();
+                } catch (e) { /* silent */ }
+            };
+            search.oninput = () => { st.onSearch?.(); };
             sortSel.onchange = render;
             mediaSel.onchange = () => {
                 try { localStorage.setItem("promptLibrary.media", mediaSel.value); } catch (e) { /* silent */ }
@@ -1896,7 +1955,8 @@ app.registerExtension({
                 st.dTitle.focus();
             };
             bSave.onclick = async () => {
-                if (!st.detailId) return;
+                if (!st.detailId || st._savingEdit) return; // защита от двойного клика (§32)
+                st._savingEdit = true;
                 try {
                     await st.apiPost("/prompt_library/update", { id: st.detailId, title: st.dTitle.value,
                         prompt: st.dText.value, folder: st.dFolder.value });
@@ -1907,6 +1967,7 @@ app.registerExtension({
                     if (st.bPreview) st.bPreview.style.display = "none";
                     await reload();
                 } catch (err) { /* silent */ }
+                st._savingEdit = false;
             };
 
             // Формуляр панели книги — одна точка: клик по карточке И замена обложки
@@ -2246,6 +2307,8 @@ app.registerExtension({
                 st.pendingPickup?.clear?.();
                 st.runTexts?.clear?.();
                 st.runImages?.clear?.();
+                st.previewStamp?.clear?.();
+                st.deepIds = null;
             } catch (e) { /* silent */ }
             try {
                 if (st?.settingsListener && st.settingsTarget?.removeEventListener) {

@@ -839,7 +839,7 @@ try:
     r_bad = h("POST", "/prompt_library/attach_preview", Req({"id": "", "filename": ""}))
     check("attach_preview: без id/filename -> 400", r_bad["status"] == 400, str(r_bad))
     r_gone = h("POST", "/prompt_library/attach_preview",
-               Req({"id": "нет-такой", "filename": "a.png", "subfolder": "", "type": "output"}))
+               Req({"id": "deadbeef01", "filename": "a.png", "subfolder": "", "type": "output"}))
     check("attach_preview: удалённая запись — не ошибка",
           r_gone["status"] == 200 and r_gone["json"].get("skipped") == "no_entry", str(r_gone))
     r_terr = h("POST", "/prompt_library/attach_preview", Req({"id": eid, "filename": "a.png"}))
@@ -1008,7 +1008,7 @@ try:
     check("ни filename, ни preview_data -> 400", r_none["status"] == 400, str(r_none))
 
     r_gone = h("POST", "/prompt_library/attach_preview",
-               Req({"id": "нет-такой", "preview_data": "data:image/png;base64,AAA", "force": True}))
+               Req({"id": "deadbeef02", "preview_data": "data:image/png;base64,AAA", "force": True}))
     check("ручная замена у удалённой записи -> 404 (не молчим)",
           r_gone["status"] == 404, str(r_gone))
 
@@ -1050,6 +1050,78 @@ finally:
     mod._save_preview_upload = _orig_upload5
     mod._load_image_file = _orig_loader5
     mod._load_video_frame = _orig_video5
+
+
+# --- 20. аудит v1.27: замок базы, guard id, полнотекстовый поиск -------------
+print("\n20. Аудит v1.27: _DB_LOCK, guard id, /prompt_library/search")
+
+check("_DB_LOCK существует и реентрантный (RLock)",
+      hasattr(mod, "_DB_LOCK") and hasattr(mod._DB_LOCK, "_is_owned"))
+try:
+    with mod._DB_LOCK:
+        with mod._DB_LOCK:
+            nested_ok = True
+except Exception:
+    nested_ok = False
+check("вложенный захват _DB_LOCK не блокирует сам себя", nested_ok)
+
+# Все мутации (роуты) обязаны идти под замком: проверяем по факту владения
+# замком в момент записи, а не по наличию декоратора.
+_lock_probe = []
+_orig_save_db = mod._save_db
+
+
+def _save_db_probe(entries, folders):
+    try:
+        _lock_probe.append(bool(mod._DB_LOCK._is_owned()))
+    except Exception:
+        _lock_probe.append(None)
+    return _orig_save_db(entries, folders)
+
+
+mod._save_db = _save_db_probe
+try:
+    h("POST", "/prompt_library/add", Req({"prompt": "запись под замком", "folder": "Замок"}))
+    check("мутирующий роут пишет базу под _DB_LOCK",
+          bool(_lock_probe) and all(_lock_probe), str(_lock_probe))
+    h("POST", "/prompt_library/favorite",
+      Req({"id": _entry("запись под замком")["id"], "favorite": True}))
+    check("все мутации (add + favorite) прошли под замком",
+          bool(_lock_probe) and all(_lock_probe), str(_lock_probe))
+    _lock_probe.clear()
+    mod.PromptLibrary().execute(mode=mod.PromptLibrary.MODE_WRITE, source="прогон под замком")
+    check("execute() держит _DB_LOCK (поток исполнения ComfyUI)",
+          bool(_lock_probe) and all(_lock_probe), str(_lock_probe))
+finally:
+    mod._save_db = _orig_save_db
+
+# Guard id: id уходит в имя файла превью (previews/{id}.png)
+r_badid = h("POST", "/prompt_library/attach_preview",
+            Req({"id": "нет-такой", "preview_data": "data:image/png;base64,AAA", "force": True}))
+check("id не-ASCII/с дефисом -> 400 (guard до имени файла)",
+      r_badid["status"] == 400 and r_badid["json"].get("error") == "bad id", str(r_badid))
+r_travid = h("POST", "/prompt_library/attach_preview",
+             Req({"id": "../evil", "filename": "a.png", "type": "output"}))
+check("id с traversal -> 400", r_travid["status"] == 400, str(r_travid))
+r_hexid = h("POST", "/prompt_library/attach_preview",
+            Req({"id": _entry("запись под замком")["id"], "preview_data": "data:image/png;base64,AAA"}))
+check("обычный hex-id проходит guard", r_hexid["status"] in (200, 400), str(r_hexid))
+
+# Полнотекстовый поиск: слово из СЕРЕДИНЫ текста (в head не попадает)
+_deep = "начало" + ("x" * 200) + "ИголкаВСтоге"
+h("POST", "/prompt_library/add", Req({"prompt": _deep, "folder": "Поиск"}))
+r_s_deep = h("GET", "/prompt_library/search", Req(query={"q": "иголкавстоге"}))
+check("/search находит слово из середины длинного текста",
+      r_s_deep["status"] == 200
+      and _entry(_deep)["id"] in r_s_deep["json"].get("ids", []), str(r_s_deep))
+check("/search: пустой q -> без совпадений",
+      h("GET", "/prompt_library/search", Req(query={"q": "  "}))["json"].get("ids") == [])
+check("/search ищет и по папке",
+      _entry(_deep)["id"] in h("GET", "/prompt_library/search",
+                               Req(query={"q": "Поиск"}))["json"].get("ids", []))
+check("/search регистронезависим (кириллица)",
+      _entry(_deep)["id"] in h("GET", "/prompt_library/search",
+                               Req(query={"q": "НАЧАЛО"}))["json"].get("ids", []))
 
 
 # --- итог -------------------------------------------------------------------

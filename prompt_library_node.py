@@ -18,9 +18,18 @@ import json
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 
 MAX_ENTRIES = 500
+
+# Замок на цикл «прочитать library.json -> изменить -> записать» (SPEC §25.3.2).
+# Мутации приходят из двух мест: HTTP-роуты (поток event loop) и execute()
+# (поток исполнения ComfyUI). Без замка два одновременных цикла теряют чужое
+# изменение: сам файл цел (запись атомарна, os.replace), но новая запись или
+# удаление пропадает молча. RLock — вложенные захваты (execute -> _load_db)
+# не блокируют сами себя.
+_DB_LOCK = threading.RLock()
 
 # --- Пути хранения -----------------------------------------------------------
 
@@ -594,6 +603,16 @@ class PromptLibrary:
 
     def execute(self, mode="", selected="", save_folder="", pickup="", source=None, image=None,
                 extra_pnginfo=None, unique_id=None, **kwargs):
+        # Весь прогон узла держит общий с HTTP-роутами замок (§25.3.2): execute()
+        # исполняется в потоке ComfyUI, а роуты — в event loop; без замка их циклы
+        # «load -> mutate -> save» могли наложиться и потерять чужое изменение
+        # (например, только что созданную вручную запись или удаление).
+        with _DB_LOCK:
+            return self._execute(mode, selected, save_folder, pickup, source, image,
+                                 extra_pnginfo, unique_id, **kwargs)
+
+    def _execute(self, mode="", selected="", save_folder="", pickup="", source=None, image=None,
+                 extra_pnginfo=None, unique_id=None, **kwargs):
         # Папка сохранения = выбранная в дереве (скрытый save_folder, пишет JS).
         # Совместимость: старые workflow несли folder/category виджетом
         folder = save_folder or kwargs.get("folder", "") or kwargs.get("category", "")
@@ -802,8 +821,35 @@ try:
         c["has_workflow"] = bool(e.get("workflow"))
         return c
 
+    def _locked(handler):
+        """POST-роут под _DB_LOCK: тело читаем ДО замка, дальше — только sync-код.
+
+        Тело запроса читается в начале (это может тянуть сокет), а в замке
+        остаётся исключительно работа с library.json. Внутри хендлеров нет
+        `await`, поэтому цикл «load -> mutate -> save» не может быть прерван
+        ни другим роутом (event loop однопоточный), ни потоком исполнения
+        ComfyUI (общий _DB_LOCK).
+        """
+        async def _wrapped(request, body=None, *args, **kwargs):
+            if body is None:
+                body = await _req_body(request)
+            with _DB_LOCK:
+                return await handler(request, body)
+        _wrapped.__name__ = getattr(handler, "__name__", "_wrapped")
+        return _wrapped
+
+    def _locked_get(handler):
+        """GET-роут под тем же замком: `_load_db()` умеет ПИСАТЬ (миграции
+        формата и починка битых записей), поэтому чтение тоже сериализуем."""
+        async def _wrapped(request, *args, **kwargs):
+            with _DB_LOCK:
+                return await handler(request)
+        _wrapped.__name__ = getattr(handler, "__name__", "_wrapped")
+        return _wrapped
+
     @routes.post("/prompt_library/attach_preview")
-    async def _pl_attach_preview(request):
+    @_locked
+    async def _pl_attach_preview(request, body=None):
         """Обложка записи: автоподхват из прогона (v1.24) ИЛИ замена кадром (v1.26).
 
         Провода IMAGE для этого не нужно: после Queue клиент присылает то, что
@@ -818,7 +864,6 @@ try:
         и замена обложки существующей записи. Уже готовое превью не перетираем
         без `force`.
         """
-        body = await _req_body(request)
         entry_id = str(body.get("id") or "").strip()
         filename = str(body.get("filename") or "").strip()
         subfolder = str(body.get("subfolder") or "").strip()
@@ -831,6 +876,12 @@ try:
         if not entry_id or not (filename or preview_data):
             return web.json_response(
                 {"error": "id and filename or preview_data required"}, status=400)
+        # id уходит прямо в имя файла превью (previews/{id}.png), поэтому проверяем
+        # его ровно как /preview и _upgrade_preview_to_png: только буквы/цифры.
+        # Легитимные id это всегда (hex из _new_id) и проходят; guard закрывает
+        # правленый вручную library.json с id вида "../x".
+        if not re.fullmatch(r"[a-zA-Z0-9]+", entry_id):
+            return web.json_response({"error": "bad id"}, status=400)
         src = None
         if filename:
             src = _resolve_output_file(filename, subfolder, kind)
@@ -877,7 +928,8 @@ try:
         return web.json_response({"ok": True, "preview": prev})
 
     @routes.post("/prompt_library/save_pickup")
-    async def _pl_save_pickup(request):
+    @_locked
+    async def _pl_save_pickup(request, body=None):
         """Запись текста, подхваченного из другого узла после прогона (v1.25).
 
         Провод «финальный текст -> библиотека» замыкает граф в кольцо, если
@@ -886,7 +938,6 @@ try:
         отложены снапшот воркфлоу и папка (в момент сохранения взять их неоткуда).
         Обложку клиент прикрепляет следом через attach_preview.
         """
-        body = await _req_body(request)
         token = str(body.get("token") or "").strip()
         text = str(body.get("text") or "").strip()
         rec = _PICKUP.pop(token, None)
@@ -916,13 +967,36 @@ try:
             _broadcast_refresh()
         return web.json_response({"ok": True, "id": entry_id, "duplicate": False})
 
+    @routes.get("/prompt_library/search")
+    @_locked_get
+    async def _pl_search(request):
+        """Полнотекстовый поиск по базе (v1.27).
+
+        `/list` отдаёт только `head` (первые 120 символов текста), поэтому слово
+        из середины длинного промпта клиент сам найти не может (§8.1 обещает
+        «поиск по названию и тексту»). Возвращаем ТОЛЬКО id совпавших записей:
+        payload копеечный, а решение «показывать или нет» клиент принимает вместе
+        со своим локальным фильтром (название / начало текста / папка).
+        """
+        q = str(request.query.get("q", "") or "").strip().lower()
+        if not q:
+            return web.json_response({"ids": []})
+        entries, _ = _load_db()
+        ids = [e.get("id", "") for e in entries
+               if q in str(e.get("title", "")).lower()
+               or q in str(e.get("prompt", "")).lower()
+               or q in str(e.get("folder", "")).lower()]
+        return web.json_response({"ids": ids})
+
     @routes.get("/prompt_library/list")
+    @_locked_get
     async def _pl_list(request):
         entries, folders = _load_db()
         return web.json_response({"entries": [_strip_entry(e) for e in entries[:MAX_ENTRIES]],
                                   "folders": folders})
 
     @routes.get("/prompt_library/entry")
+    @_locked_get
     async def _pl_entry(request):
         entry_id = request.query.get("id", "")
         entries, _ = _load_db()
@@ -942,9 +1016,9 @@ try:
         return web.FileResponse(str(f))
 
     @routes.post("/prompt_library/add")
-    async def _pl_add(request):
+    @_locked
+    async def _pl_add(request, body=None):
         """Ручное сохранение из виджетов (кнопка «Сохранить») — без запуска Queue."""
-        body = await _req_body(request)
         prompt = str(body.get("prompt", "")).strip()
         if not prompt:
             return web.json_response({"error": "empty prompt"}, status=400)
@@ -980,8 +1054,8 @@ try:
         return web.json_response({"ok": True, "id": entry_id, "duplicate": False})
 
     @routes.post("/prompt_library/favorite")
-    async def _pl_favorite(request):
-        body = await _req_body(request)
+    @_locked
+    async def _pl_favorite(request, body=None):
         entry_id = body.get("id", "")
         entries, folders = _load_db()
         found = False
@@ -996,8 +1070,8 @@ try:
         return web.json_response({"ok": True})
 
     @routes.post("/prompt_library/update")
-    async def _pl_update(request):
-        body = await _req_body(request)
+    @_locked
+    async def _pl_update(request, body=None):
         entry_id = body.get("id", "")
         entries, folders = _load_db()
         found = False
@@ -1032,8 +1106,8 @@ try:
             pass
 
     @routes.post("/prompt_library/delete")
-    async def _pl_delete(request):
-        body = await _req_body(request)
+    @_locked
+    async def _pl_delete(request, body=None):
         entry_id = body.get("id", "")
         entries, folders = _load_db()
         victim = None
@@ -1049,10 +1123,10 @@ try:
         return web.json_response({"ok": True})
 
     @routes.post("/prompt_library/delete_many")
-    async def _pl_delete_many(request):
+    @_locked
+    async def _pl_delete_many(request, body=None):
         """Массовое удаление записей (мультивыделение Ctrl/Shift).
         Неизвестные id молча игнорируются. Файлы превью чистятся тем же guard'ом."""
-        body = await _req_body(request)
         ids = body.get("ids", None)
         if not isinstance(ids, list):
             return web.json_response({"error": "ids must be a list"}, status=400)
@@ -1071,8 +1145,8 @@ try:
         return web.json_response({"ok": True, "deleted": deleted})
 
     @routes.post("/prompt_library/folder_create")
-    async def _pl_folder_create(request):
-        body = await _req_body(request)
+    @_locked
+    async def _pl_folder_create(request, body=None):
         parent = _storage_folder(body.get("parent", ""))
         name = str(body.get("name", "")).strip().replace("/", " ").replace("\\", " ")
         if not name:
@@ -1090,8 +1164,8 @@ try:
         return web.json_response({"ok": True, "path": path})
 
     @routes.post("/prompt_library/folder_rename")
-    async def _pl_folder_rename(request):
-        body = await _req_body(request)
+    @_locked
+    async def _pl_folder_rename(request, body=None):
         old = _norm_folder(body.get("old", ""))
         new = _norm_folder(body.get("new", ""))
         if not old or not new or old == new:
@@ -1120,9 +1194,9 @@ try:
         return web.json_response({"ok": True, "path": new})
 
     @routes.post("/prompt_library/folder_delete")
-    async def _pl_folder_delete(request):
+    @_locked
+    async def _pl_folder_delete(request, body=None):
         """Удаление папки: записи из неё и подпапок переносятся в корень (не теряются)."""
-        body = await _req_body(request)
         path = _norm_folder(body.get("path", ""))
         if not path:
             return web.json_response({"error": "empty path"}, status=400)
@@ -1139,11 +1213,11 @@ try:
         return web.json_response({"ok": True})
 
     @routes.post("/prompt_library/folder_delete_many")
-    async def _pl_folder_delete_many(request):
+    @_locked
+    async def _pl_folder_delete_many(request, body=None):
         """Массовое удаление категорий (мультивыделение Ctrl/Shift).
         Семантика как у одиночного: записи из сносимых папок и подпапок
         переносятся в корень, не теряются. Мусор в paths игнорируется."""
-        body = await _req_body(request)
         raw = body.get("paths", None)
         if not isinstance(raw, list):
             return web.json_response({"error": "paths must be a list"}, status=400)
