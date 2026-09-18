@@ -218,6 +218,8 @@
 
 | Хэш | Описание |
 |-----|----------|
+| `f62abb9` | feat: ✖ Отмена в панели книги рядом с 💾 (v1.26c) |
+| `66adf0a` | memory: list the v1.26b commit in the session table |
 | `2ab44f4` | fix: gate the cover replacement behind edit mode and a confirm (v1.26b) |
 | `dc19600` | memory: v1.26 media covers, manual video preview, cover replacement |
 | `d72a685` | feat: video covers without a wire, manual video preview, cover replacement (v1.26) |
