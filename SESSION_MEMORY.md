@@ -210,6 +210,8 @@
 
 | Хэш | Описание |
 |-----|----------|
+| `2ab44f4` | fix: gate the cover replacement behind edit mode and a confirm (v1.26b) |
+| `dc19600` | memory: v1.26 media covers, manual video preview, cover replacement |
 | `d72a685` | feat: video covers without a wire, manual video preview, cover replacement (v1.26) |
 | `765888d` | docs: bring the pre-v1.24 spec sections up to date |
 | `a4e613d` | feat: pick up the final text from a source node after the run (v1.25) |
