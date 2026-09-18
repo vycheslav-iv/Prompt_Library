@@ -23,6 +23,12 @@
   `1904` Выдача → `PreviewAny → Promt в LLM → … → 1622 Итоговый Promt → 1750 → 1903 Запись`;
   цикл появился, когда финальный текст подали НА ВХОД той же ноды).
 - Тесты: Python 194/194, смоук 61/61, аудит чист.
+- **Добита спецификация v1.25** (сессия прервалась на этом): §3 (роут `save_pickup`),
+  §5 (`pickup` в таблице входов + третий режим), §6 (выход в трёх режимах), §7
+  (псевдокод `execute()` переписан: `out_linked`, `_pickup_stash`, PNG-патч 4 позиции),
+  §10 (`widgets_values` 4 значения), §8.1 (`pickupRow`), §8.2 (слушатели `executed`/
+  `execution_success`, автосокеты, confirm для обоих выдающих режимов), §17
+  (пункт «разбить на две ноды» помечен отменённым в v1.24).
 
 ## 2. Итоговое состояние кода
 
@@ -134,6 +140,7 @@
 
 | Хэш | Описание |
 |-----|----------|
+| `a4e613d` | feat: pick up the final text from a source node after the run (v1.25) |
 | `6172e4d` | fix: cover handshake read a stale node id (v1.24b) |
 | `9dd6424` | docs: note the subgraph id prefix trap and the deferred-cover rule |
 | `9faef0c` | fix: recognise own node id inside subgraphs |
@@ -142,4 +149,4 @@
 | `17a1794` | fix: sync all mutations, and stop panels from covering the list bottom |
 | `4b2fbda` | memory: v1.22 audit + v1.23 panels-fit session |
 
-Все запушены в `origin master` (кроме текущего коммита v1.25).
+Все запушены в `origin master`, ветка чистая.
