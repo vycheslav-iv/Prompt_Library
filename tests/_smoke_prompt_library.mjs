@@ -240,7 +240,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.28-pickup");
+  check(`${tag}: версия JS видна`, st.version === "1.29-manual-title");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -1351,6 +1351,49 @@ await run("v1.27: защита от двойного клика на «Сохр�
       posts.filter((p) => p.url.includes("/prompt_library/add")).length === 1,
       JSON.stringify(posts.map((p) => p.url)));
     check("v1.27: после ответа защита снята (можно сохранять снова)", st._saving === false);
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+// --- v1.29: название в ручном вводе ------------------------------------------
+await run("v1.29: ручной ввод с названием", async () => {
+  const node = makeNode();
+  node.id = 62;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("/prompt_library/add")) return jsonResponse({ ok: true, id: "e2" });
+    return jsonResponse({ ok: true });
+  };
+  try {
+    check("v1.29: поле названия есть в окне ввода",
+      !!st.inputTitle && st.inputTitle.tagName === "INPUT", String(st.inputTitle?.tagName));
+    const ta = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st.dText).pop();
+    const saveBtn = walkDom(st.root).find((el) => el.tagName === "BUTTON"
+      && String(el.textContent).includes("Сохранить промпт"));
+    check("v1.29: кнопка ручного сохранения найдена", !!ta && !!saveBtn);
+    // С названием — уходит в POST, после успеха оба поля очищены
+    st.inputTitle.value = "Моё название";
+    ta.value = "текст с названием";
+    await saveBtn.onclick();
+    const add = posts.filter((p) => p.url.includes("/prompt_library/add")).pop();
+    check("v1.29: title уходит в POST /add",
+      add?.body?.title === "Моё название", JSON.stringify(add?.body));
+    check("v1.29: после сохранения текст и название очищены",
+      ta.value === "" && st.inputTitle.value === "",
+      JSON.stringify({ ta: ta.value, title: st.inputTitle.value }));
+    // Без названия — уходит пустым, сервер возьмёт начало текста (_auto_title)
+    ta.value = "текст без названия";
+    await saveBtn.onclick();
+    const add2 = posts.filter((p) => p.url.includes("/prompt_library/add")).pop();
+    check("v1.29: пустое название уходит пустым (авто на сервере)",
+      add2?.body?.title === "", JSON.stringify(add2?.body));
   } finally {
     sandbox.fetch = origFetch;
   }

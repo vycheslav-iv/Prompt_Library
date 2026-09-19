@@ -76,7 +76,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.28-pickup";
+const PL_JS_VERSION = "1.29-manual-title";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -191,6 +191,13 @@ app.registerExtension({
 
             const inputArea = document.createElement("div");
             inputArea.style.cssText = "display:none;flex-direction:column;gap:4px;border:1px solid #4a9eff;border-radius:4px;padding:6px;background:#16202f;";
+            // Название записи (необязательно): пусто — сервер возьмёт начало
+            // текста, как раньше (тот же `_auto_title`, что и в Queue-записи).
+            const inputTitle = document.createElement("input");
+            inputTitle.type = "text";
+            inputTitle.placeholder = "Название (необязательно)";
+            inputTitle.title = "Название книги. Пусто — возьмётся из начала промпта";
+            inputTitle.style.cssText = "width:100%;box-sizing:border-box;background:#111;color:#eee;border:1px solid #444;border-radius:4px;padding:4px;font-size:12px;";
             const inputText = document.createElement("textarea");
             inputText.rows = 4;
             inputText.placeholder = "Введите промпт...";
@@ -199,6 +206,7 @@ app.registerExtension({
             inputSaveBtn.textContent = "💾 Сохранить промпт";
             inputSaveBtn.title = "Сохранить в текущую категорию";
             inputSaveBtn.style.cssText = "width:100%;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px;cursor:pointer;font-size:12px;";
+            inputArea.appendChild(inputTitle);
             inputArea.appendChild(inputText);
             // Ручное превью с диска (без провода): файл → даунскейл до 512px
             // через canvas прямо в браузере → маленький PNG dataURL на сервер.
@@ -293,6 +301,7 @@ app.registerExtension({
                 // (гонка с потоком исполнения) потерянная запись.
                 if (st._saving) return;
                 const text = inputText.value.trim();
+                const title = inputTitle.value.trim();
                 const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
                 const base = "💾 Сохранить промпт";
                 if (!text) {
@@ -312,7 +321,7 @@ app.registerExtension({
                         st.hintSticky = "Превью не прикрепилось: браузер не смог прочитать этот файл.";
                         st.renderHint?.();
                     }
-                    const r = await st.apiPost("/prompt_library/add", { prompt: text, folder: dest,
+                    const r = await st.apiPost("/prompt_library/add", { prompt: text, folder: dest, title,
                         ...(prev ? { preview_data: prev.dataUrl, media: prev.media } : {}) });
                     if (r.ok) {
                         let dup = null;
@@ -328,6 +337,7 @@ app.registerExtension({
                         } else {
                             inputSaveBtn.textContent = "✅ Сохранено";
                             inputText.value = "";
+                            inputTitle.value = "";
                         }
                         attachedFile = null;
                         try { inputFile.value = ""; } catch (e) { /* silent */ }
@@ -611,7 +621,7 @@ app.registerExtension({
 
             const st = {
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
-                pickupRow, pickupSel,
+                pickupRow, pickupSel, inputTitle,
                 bulkCount, bulkDel, bulkClear,
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel,
                 entries: [], folders: [], full: new Map(),
@@ -2161,7 +2171,7 @@ app.registerExtension({
             // +28 к BASE_H (v1.25): строка подхвата (22px + gap 6px) в root.
             // Пол — ТОЛЬКО здесь (computeLayoutSize), на панелях CSS-пола нет (§28).
             const BASE_H = 624;
-            const INPUT_H = 170; // textarea + кнопка сохранения + ряд прикрепления превью
+            const INPUT_H = 202; // поле названия + textarea + кнопка сохранения + ряд прикрепления превью
             // Единый минимум для обоих режимов (single source of truth).
             st.minH = () => {
                 const showDetail = detail && detail.style.display !== "none";

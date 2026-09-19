@@ -249,6 +249,13 @@ r = h("POST", "/prompt_library/add", Req({"prompt": "  ручной  ", "folder"
 check("/add создаёт запись", r["json"].get("ok") and r["json"].get("id"))
 entries, folders = mod._load_db()
 manual = next(e for e in entries if e["prompt"] == "ручной")
+check("/add с пустым title -> название из начала текста", manual["title"] == "ручной")
+r = h("POST", "/prompt_library/add", Req({"prompt": "ручной с названием", "folder": "Ручные",
+                                          "title": "  Моё название  "}))
+check("/add с title создаёт запись", r["json"].get("ok") and r["json"].get("id"))
+entries, _ = mod._load_db()
+titled = next(e for e in entries if e["prompt"] == "ручной с названием")
+check("/add сохраняет заданное название (стрип)", titled["title"] == "Моё название")
 r = h("POST", "/prompt_library/add", Req({"prompt": "   "}))
 check("/add с пустым промптом -> 400", r["status"] == 400)
 
