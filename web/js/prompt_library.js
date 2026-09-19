@@ -114,6 +114,10 @@ app.registerExtension({
             // main забирает свободное место (flex:1), listContent/tree тянутся
             // внутри (flex:1 + min-height floor). Без ресайза вид как раньше.
             const root = document.createElement("div");
+            // Стабильные классы на ключевых контейнерах — только для живого
+            // замера в DevTools/тестах (`tests/_probe_live_dom.py`): CSS по ним не
+            // строится, поведение не меняется.
+            root.className = "pl-root";
             root.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:400px;height:100%;";
             // Ноду нельзя сжать уже контента, иначе дерево вылезает за границу.
             // (Само присвоение — ниже, после this._pl = st, иначе TDZ-ошибка.)
@@ -339,6 +343,7 @@ app.registerExtension({
             // Ряд: дерево папок | список книг
             // flex:1 — забирает всё свободное место root при ресайзе ноды вниз
             const main = document.createElement("div");
+            main.className = "pl-main";
             main.style.cssText = "display:flex;gap:6px;min-height:0;flex:1 1 auto;";
 
             const treeBox = document.createElement("div");
@@ -593,6 +598,7 @@ app.registerExtension({
             // scrollArea не используется вовсе: main/detail остаются прямыми
             // детьми root, ровно как раньше (не трогаем рабочий путь §22.4).
             const scrollArea = document.createElement("div");
+            scrollArea.className = "pl-scroll";
             scrollArea.style.cssText = "display:flex;flex-direction:column;gap:6px;";
 
             root.appendChild(pickupRow);
