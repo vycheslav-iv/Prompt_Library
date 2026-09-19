@@ -240,7 +240,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.29-manual-title");
+  check(`${tag}: версия JS видна`, st.version === "1.30-pin");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -1394,6 +1394,59 @@ await run("v1.29: ручной ввод с названием", async () => {
     const add2 = posts.filter((p) => p.url.includes("/prompt_library/add")).pop();
     check("v1.29: пустое название уходит пустым (авто на сервере)",
       add2?.body?.title === "", JSON.stringify(add2?.body));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+// --- v1.30: закреп в папке ---------------------------------------------------
+await run("v1.30: закреплённые вверху папки, вне папок — обычный порядок", async () => {
+  const node = makeNode();
+  node.id = 63;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  const srv = (id, created, pinned) => ({ id, title: id, prompt: id, folder: "A",
+    favorite: false, pinned: !!pinned, created_at: created, last_used: null,
+    preview: null, has_workflow: false, media: null });
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list"))
+      return jsonResponse({ entries: [srv("e1", "2026-09-19T02:00:00", false), srv("e2", "2026-09-19T01:00:00", true)], folders: ["A"] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    return jsonResponse({ ok: true });
+  };
+  const pinBtns = () => walkDom(st.root).filter((el) => el.tagName === "BUTTON"
+    && /^(Закрепить вверху папки|Открепить)$/.test(String(el.title || "")));
+  // Карточка: [img, body, actions]; заголовок — body.children[0]
+  const firstTitle = () => {
+    const card = st.list.children[0];
+    const body = card && card.children[1];
+    return String((body && body.children[0] && body.children[0].textContent) || "");
+  };
+  try {
+    // В папке: новая незакреплённая (e1) + старая закреплённая (e2) — вверху e2.
+    // Записи — через /list (как в живую, заодно проверяется plMap); стартовый
+    // reload() ноды тоже ходит в /list, поэтому подмена позже его не затирает.
+    st.selFolder = "A";
+    st.renderTree(); await st.reload();
+    check("v1.30: в папке кнопки закрепа есть", pinBtns().length === 2, String(pinBtns().length));
+    check("v1.30: закреплённая — первая в папке",
+      firstTitle().includes("e2"), firstTitle());
+    // Клик по 📌 незакреплённой: оптимистичный флип + POST /pin
+    const btn1 = pinBtns().find((b) => String(b.title) === "Закрепить вверху папки");
+    check("v1.30: у незакреплённой подсказка «Закрепить»", !!btn1);
+    await btn1.onclick({ stopPropagation() {} });
+    const pin = posts.filter((p) => p.url.includes("/prompt_library/pin")).pop();
+    check("v1.30: клик шлёт POST /pin с новым значением",
+      pin?.body?.id === "e1" && pin?.body?.pinned === true, JSON.stringify(pin?.body));
+    // Вне папок («Всё»): кнопок нет, порядок обычный (новые сверху)
+    st.selFolder = "__all";
+    st.renderTree(); st.render();
+    check("v1.30: во «Всё» кнопок закрепа нет", pinBtns().length === 0);
+    check("v1.30: во «Всё» закреп не всплывает (порядок обычный)",
+      firstTitle().includes("e1"), firstTitle());
   } finally {
     sandbox.fetch = origFetch;
   }

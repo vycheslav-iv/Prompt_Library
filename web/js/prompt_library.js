@@ -8,6 +8,7 @@ function plMap(e) {
         head: (e.prompt || "").slice(0, 120),
         folder: e.folder || "",
         favorite: !!e.favorite,
+        pinned: !!e.pinned, // закреп вверху папки (v1.30, §36)
         created_at: e.created_at || "",
         last_used: e.last_used || null,
         has_preview: !!e.preview,
@@ -76,7 +77,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.29-manual-title";
+const PL_JS_VERSION = "1.30-pin";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -1597,6 +1598,13 @@ app.registerExtension({
                 else if (by === "old") arr = [...arr].sort((a, b) => ts(a.created_at) < ts(b.created_at) ? -1 : ts(a.created_at) > ts(b.created_at) ? 1 : 0);
                 else if (by === "used") arr = [...arr].sort((a, b) => ts(b.last_used || "") < ts(a.last_used || "") ? -1 : ts(b.last_used || "") > ts(a.last_used || "") ? 1 : 0);
                 else arr = [...arr].sort((a, b) => ts(b.created_at) < ts(a.created_at) ? -1 : ts(b.created_at) > ts(a.created_at) ? 1 : 0);
+                // Закреп (v1.30, §36): ТОЛЬКО в папке — закреплённые всплывают
+                // поверх выбранного порядка, внутри групп порядок сохраняется.
+                // Во «Всё»/«Избранном»/«Без категории» и в поиске — как обычно.
+                if (st.selFolder && !st.selFolder.startsWith("__")) {
+                    const pin = arr.filter((e) => e.pinned), rest = arr.filter((e) => !e.pinned);
+                    if (pin.length && rest.length) arr = [...pin, ...rest];
+                }
                 return arr;
             };
 
@@ -1656,7 +1664,7 @@ app.registerExtension({
                     body.style.cssText = grid ? "min-width:0;text-align:center;" : "flex:1;min-width:0;";
                     const title = document.createElement("div");
                     title.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                    title.textContent = plBadge(e) + (e.title || e.head || "(без названия)");
+                    title.textContent = (e.pinned ? "📌 " : "") + plBadge(e) + (e.title || e.head || "(без названия)");
                     title.title = e.title || e.head || "";
                     body.appendChild(title);
                     if (!grid) {
@@ -1686,6 +1694,26 @@ app.registerExtension({
                             if (!r.ok) { e.favorite = prev; render(); }
                         } catch (err) { e.favorite = prev; render(); }
                     };
+                    // Закреп (v1.30, §36): только в папке — там же, где он и
+                    // действует (вверху этой папки). Тот же оптимистичный
+                    // паттерн, что у ★: флип → render → POST → откат при ошибке.
+                    let pin = null;
+                    if (st.selFolder && !st.selFolder.startsWith("__")) {
+                        pin = document.createElement("button");
+                        pin.textContent = "📌";
+                        pin.title = e.pinned ? "Открепить" : "Закрепить вверху папки";
+                        pin.style.cssText = `background:none;border:none;cursor:pointer;font-size:13px;flex-shrink:0;opacity:${e.pinned ? "1" : "0.45"};`;
+                        pin.onclick = async (ev) => {
+                            ev.stopPropagation();
+                            const prev = e.pinned;
+                            e.pinned = !prev;
+                            render();
+                            try {
+                                const r = await st.apiPost("/prompt_library/pin", { id: e.id, pinned: e.pinned });
+                                if (!r.ok) { e.pinned = prev; render(); }
+                            } catch (err) { e.pinned = prev; render(); }
+                        };
+                    }
 
                     const rn = document.createElement("button");
                     rn.textContent = "✏️";
@@ -1747,6 +1775,7 @@ app.registerExtension({
                     const actions = document.createElement("div");
                     actions.style.cssText = grid ? "display:flex;gap:2px;justify-content:center;" : "display:contents;";
                     actions.appendChild(fav);
+                    if (pin) actions.appendChild(pin);
                     actions.appendChild(rn);
                     actions.appendChild(del);
                     card.appendChild(img);

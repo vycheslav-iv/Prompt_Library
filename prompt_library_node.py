@@ -132,6 +132,8 @@ def _load_db():
         # Старые записи без media — неизвестно (None). setdefault без changed:
         # отсутствие поля и так трактуется как None, файл не переписываем зря.
         e.setdefault("media", None)
+        # То же для закрепа (v1.30): старых записей с pinned нет, отсутствие = False.
+        e.setdefault("pinned", False)
 
     # Папки из записей + родители для дерева
     fset = set(_norm_folder(f) for f in folders if _norm_folder(f))
@@ -548,6 +550,7 @@ def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None, m
         "folder": folder,
         "category": folder,  # legacy-дубль для совместимости
         "favorite": False,
+        "pinned": False,  # закреп вверху папки (v1.30, §36)
         "created_at": _now(),
         "last_used": None,  # дата последней выдачи (как в библиотеке)
         "preview": preview,  # уже относительный путь 'previews/{id}.png' или None
@@ -1094,6 +1097,23 @@ try:
             if e.get("id") == entry_id:
                 found = True
                 e["favorite"] = bool(body.get("favorite", not e.get("favorite", False)))
+                break
+        if found:
+            _save_db(entries, folders)
+            _broadcast_refresh()
+        return web.json_response({"ok": True})
+
+    @routes.post("/prompt_library/pin")
+    @_locked
+    async def _pl_pin(request, body=None):
+        """Закреп/откреп записи (v1.30, §36): закреплённые — вверху своей папки."""
+        entry_id = body.get("id", "")
+        entries, folders = _load_db()
+        found = False
+        for e in entries:
+            if e.get("id") == entry_id:
+                found = True
+                e["pinned"] = bool(body.get("pinned", not e.get("pinned", False)))
                 break
         if found:
             _save_db(entries, folders)

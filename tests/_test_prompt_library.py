@@ -632,6 +632,7 @@ for _label, _method, _path, _body in [
     ("/folder_create", "POST", "/prompt_library/folder_create", {"parent": "", "name": "Bc2"}),
     ("/folder_rename", "POST", "/prompt_library/folder_rename", {"old": "Bc2", "new": "Bc3"}),
     ("/folder_delete", "POST", "/prompt_library/folder_delete", {"path": "Bc3"}),
+    ("/pin", "POST", "/prompt_library/pin", {"id": nid, "pinned": True}),
     ("/delete", "POST", "/prompt_library/delete", {"id": nid}),
 ]:
     _broadcasts.clear()
@@ -1160,6 +1161,33 @@ _p("\n22. save_pickup: неизвестный токен — отказ виде
 _r_stale = h("POST", "/prompt_library/save_pickup", Req({"token": "deadbeef", "text": "x"}))
 check("протухший токен -> 400 + error", _r_stale["status"] == 400
       and _r_stale["json"].get("error"), str(_r_stale))
+
+
+# --- 23. закреп: /pin (v1.30) -------------------------------------------------
+_p("\n23. Закреп: /pin ставит/снимает флаг, старые записи — False")
+r_pin_add = h("POST", "/prompt_library/add", Req({"prompt": "кандидат на закреп", "folder": "Закрепы"}))
+_pin_id = r_pin_add["json"]["id"]
+check("новая запись создаётся незакреплённой",
+      _entry("кандидат на закреп")["pinned"] is False)
+_broadcasts.clear()
+h("POST", "/prompt_library/pin", Req({"id": _pin_id, "pinned": True}))
+check("/pin ставит закреп", _entry("кандидат на закреп")["pinned"] is True)
+check("/pin -> broadcast", _broadcasts == ["prompt_library/refresh"], str(_broadcasts))
+h("POST", "/prompt_library/pin", Req({"id": _pin_id, "pinned": False}))
+check("/pin снимает закреп", _entry("кандидат на закреп")["pinned"] is False)
+h("POST", "/prompt_library/pin", Req({"id": _pin_id}))
+check("/pin без значения — тоггл", _entry("кандидат на закреп")["pinned"] is True)
+_broadcasts.clear()
+h("POST", "/prompt_library/pin", Req({"id": "нет-такой", "pinned": True}))
+check("/pin неизвестный id не падает и без broadcast",
+      _broadcasts == [], str(_broadcasts))
+# Legacy-запись без поля pinned: отсутствие трактуется как False
+_e_all, _f_all = mod._load_db()
+next(e for e in _e_all if e["id"] == _pin_id).pop("pinned", None)
+mod._save_db(_e_all, _f_all)
+_e_re, _ = mod._load_db()
+check("запись без поля pinned читается как незакреплённая",
+      next(e for e in _e_re if e["id"] == _pin_id)["pinned"] is False)
 
 
 # --- итог -------------------------------------------------------------------
