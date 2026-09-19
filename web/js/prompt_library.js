@@ -77,7 +77,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.30-pin";
+const PL_JS_VERSION = "1.31-unstick-width";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -2116,6 +2116,7 @@ app.registerExtension({
                     try {
                         if (this.size[0] < MIN_W) this.setSize([MIN_W, this.size[1]]);
                     } catch (e) { /* silent */ }
+                    try { st.unstickWidth?.(); } catch (e) { /* silent */ }
                 };
             } catch (e) { /* silent */ }
 
@@ -2189,6 +2190,21 @@ app.registerExtension({
             // pl_browser:"") — ставим свойство явно, иначе позиционный маппинг
             // widgets_values хрупок при добавлении виджетов.
             try { browserWidget.serialize = false; } catch (e) { /* silent */ }
+            // Страж ширины оверлея (v1.31, §37): DomWidgets.vue считает ширину
+            // обёртки КАЖДЫЙ кадр как (widget.width ?? node.width) - 2*margin.
+            // Если на виджете осело чужое widget.width (замерено живьём: 213
+            // при живой ширине ноды 1137 — обёртка застыла на 193px и контент
+            // зажат навсегда), ресайз ноды его не лечит, лечит только F5.
+            // Мы width никогда не задаём — сносим чужое, оверлей берёт живую
+            // ширину ноды. Только удаление свойства, никаких dirty/layout —
+            // петель нет по построению.
+            st.unstickWidth = () => {
+                try {
+                    const w = this.widgets?.find((x) => x && x.name === "pl_browser");
+                    if (w && w.width !== undefined) delete w.width;
+                } catch (e) { /* silent */ }
+            };
+            st.unstickWidth();
             // Высота DOM-контента: новый layout API (computeLayoutSize) вместо
             // legacy computeSize. Разница: computeSize = ТОЧНАЯ высота виджета
             // (лишний рост ноды → пустота снизу), computeLayoutSize = МИНИМУМ
@@ -2343,6 +2359,7 @@ app.registerExtension({
         const origOnDrawForeground = nodeType.prototype.onDrawForeground;
         nodeType.prototype.onDrawForeground = function () {
             try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
+            try { this._pl?.unstickWidth?.(); } catch (e) { /* silent */ }
             return origOnDrawForeground?.apply(this, arguments);
         };
 

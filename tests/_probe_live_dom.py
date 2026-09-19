@@ -357,19 +357,37 @@ OPEN_PANEL_JS = r"""
   }
   // Точный путь без угадывания кнопок: стор панели через pinia (TopMenuSection
   // вызывает rightSidePanelStore.togglePanel()). Ищем приложение Vue перебором.
+  // Имя стора менялось между сборками ('rightSidePanel' не найден в текущей),
+  // поэтому ищем ЛЮБОЙ стор с методом togglePanel, а запасной путь — клик по
+  // настоящей кнопке-переключателю панели в топбаре.
+  const piniaOf = (app) => app && app.config && app.config.globalProperties
+    && app.config.globalProperties.$pinia;
   let pinia = null;
   for (const el of document.querySelectorAll('*')) {
     const app = el.__vue_app__;
-    if (app && app.config && app.config.globalProperties && app.config.globalProperties.$pinia) {
-      pinia = app.config.globalProperties.$pinia; break;
+    if (piniaOf(app)) { pinia = piniaOf(app); break; }
+  }
+  if (pinia && pinia._s) {
+    for (const [key, store] of pinia._s) {
+      if (store && typeof store.togglePanel === 'function'
+          && /panel/i.test(key || '')) {
+        try { store.togglePanel(); return 'pinia:' + key; }
+        catch (e) { /* не тот стор (нужен аргумент) — дальше */ }
+      }
     }
   }
-  const store = pinia && pinia._s && pinia._s.get('rightSidePanel');
-  if (store && typeof store.togglePanel === 'function') {
-    store.togglePanel();
-    return 'pinia:togglePanel';
-  }
-  return 'no store (pinia=' + !!pinia + ')';
+  // Кнопка-переключатель панели в топбаре: иконка lucide panel-right
+  // (класс стабилен между языками, в отличие от aria-label).
+  const icon = document.querySelector('i[class*="panel-right"]');
+  const btn = (icon && icon.closest('button'))
+    || Array.from(document.querySelectorAll('button')).find((b) => {
+      const r = b.getBoundingClientRect();
+      if (!(r.top < 90 && r.width > 0)) return false;
+      const label = (b.getAttribute('aria-label') || '') + ' ' + (b.textContent || '');
+      return /панель|panel/i.test(label);
+    });
+  if (btn) { btn.click(); return 'button:' + (btn.getAttribute('aria-label') || btn.textContent || '').slice(0, 40); }
+  return 'no store, no button (pinia=' + !!pinia + ')';
 })()
 """
 
@@ -389,8 +407,7 @@ LIST_BUTTONS_JS = r"""
 })()
 """
 
-PANEL_DIAG_JS = r"""
-(() => {
+PANEL_DIAG_JS = r"""(() => {
   const rootEl = document.getElementById('app') || document.querySelector('#app');
   const pinia = rootEl && rootEl.__vue_app__ && rootEl.__vue_app__.config.globalProperties.$pinia;
   const store = pinia && pinia._s && pinia._s.get('rightSidePanel');
@@ -411,6 +428,46 @@ PANEL_DIAG_JS = r"""
 """
 
 
+TRAP_JS = r"""
+(() => {
+  const ns = (window.app && window.app.graph && window.app.graph._nodes) || [];
+  const n = ns.find((x) => String((x && x.type) || "").toLowerCase() === "promptlibrary");
+  const w = n && (n.widgets || []).find((x) => x.name === "pl_browser");
+  if (!w) return "no widget";
+  delete w.width;
+  const hits = (window.__widthTrap = []);
+  try {
+    Object.defineProperty(w, "width", {
+      configurable: true,
+      get() { return this.__trapVal; },
+      set(v) {
+        this.__trapVal = v;
+        try {
+          hits.push({ value: v,
+            stack: new Error("trap").stack.split("\n").slice(1, 7).join(" | ") });
+        } catch (e) { /* silent */ }
+      },
+    });
+  } catch (e) { return "defineProperty failed: " + e.message; }
+  return "trap set on node " + n.id;
+})()
+"""
+
+TRAP_DUMP_JS = r"""
+(() => {
+  const hits = window.__widthTrap || [];
+  const ns = (window.app && window.app.graph && window.app.graph._nodes) || [];
+  const n = ns.find((x) => String((x && x.type) || "").toLowerCase() === "promptlibrary");
+  const w = n && (n.widgets || []).find((x) => x.name === "pl_browser");
+  let desc = null;
+  try { desc = Object.getOwnPropertyDescriptor(w, "width"); } catch (e) { /* silent */ }
+  return { hits, stillTrapped: !!(desc && desc.set),
+    wWidth: w ? (w.width ?? null) : null,
+    nodeW: n ? Math.round(n.size[0] * 100) / 100 : null };
+})()
+"""
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:8188/")
@@ -423,6 +480,9 @@ async def main() -> int:
     ap.add_argument("--resize", action="store_true", help="растянуть ноду мышью (как за угол)")
     ap.add_argument("--select", default="", help="открыть панель книги по id записи (как клик по карточке)")
     ap.add_argument("--keep", action="store_true", help="не закрывать Chrome в конце")
+    ap.add_argument("--trap", action="store_true",
+                    help="ловушка на widget.width: ставит accessor-trap и долбит UI "
+                         "(панель ×3, зум, ресайз ноды) — кто запишет width, тот и писатель")
     args = ap.parse_args()
 
     import websockets  # noqa: WPS433 — зависимость ComfyUI
@@ -468,6 +528,32 @@ async def main() -> int:
                 print(f"→ нода создана: {created}")
                 await asyncio.sleep(1.5)
 
+            if args.trap:
+                print(f"→ ловушка: {await cdp.eval(TRAP_JS)}")
+                # Долбёжка UI: панель открыть/закрыть ×3, зум туда-сюда,
+                # программный ресайз ноды (как тяга за угол)
+                for i in range(3):
+                    await cdp.eval(OPEN_PANEL_JS)
+                    await asyncio.sleep(1.5)
+                    await cdp.eval("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))")
+                    await asyncio.sleep(1.0)
+                for zv in ("0.76", "1.5", "1.0"):
+                    await cdp.eval(
+                        "(() => { try { window.app.canvas.setZoom(__ZV__); "
+                        "window.app.canvas.setDirty(true, true); return __ZV__; } "
+                        "catch (e) { return 'err'; } })()".replace("__ZV__", zv))
+                    await asyncio.sleep(1.0)
+                await cdp.eval(
+                    "(() => { const n = window.__plProbeNode; if (!n) return 'no node'; "
+                    "n.setSize([n.size[0] + 150, n.size[1]]); return 'resized'; })()")
+                await asyncio.sleep(1.5)
+                dump = await cdp.eval(TRAP_DUMP_JS)
+                print("\n=== ЛОВУШКА: итог ===")
+                print(json.dumps(dump, ensure_ascii=False, indent=2))
+                if not dump.get("hits"):
+                    print("→ вывод: писатель НЕ сработал за сессию долбёжки "
+                          "(панель ×3, зум, ресайз). Значение — ископаемое, страж достаточен.")
+
             base = await cdp.eval(MEASURE_JS)
             print("\n=== ДО открытия панели ===")
             print(json.dumps(base, ensure_ascii=False, indent=2))
@@ -487,7 +573,15 @@ async def main() -> int:
                 trigger = await cdp.eval(OPEN_PANEL_JS)
                 print(f"\n→ панель: {trigger}")
                 await asyncio.sleep(2.0)
-                print(f"→ состояние панели: {json.dumps(await cdp.eval(PANEL_DIAG_JS), ensure_ascii=False)}")
+                diag = await cdp.eval(PANEL_DIAG_JS)
+                print(f"→ состояние панели: {json.dumps(diag, ensure_ascii=False)}")
+                if not diag.get("panelText"):
+                    # Тоггл мог закрыть вместо открыть (состояние гонки) — дёргаем ещё раз
+                    print("→ панель не открылась, повторный триггер…")
+                    print(f"→ панель(2): {await cdp.eval(OPEN_PANEL_JS)}")
+                    await asyncio.sleep(2.0)
+                    diag = await cdp.eval(PANEL_DIAG_JS)
+                    print(f"→ состояние панели(2): {json.dumps(diag, ensure_ascii=False)}")
                 after = await cdp.eval(MEASURE_JS)
                 print("\n=== ПОСЛЕ открытия панели ===")
                 print(json.dumps(after, ensure_ascii=False, indent=2))

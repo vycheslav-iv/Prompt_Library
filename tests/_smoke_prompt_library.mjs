@@ -240,7 +240,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.30-pin");
+  check(`${tag}: версия JS видна`, st.version === "1.31-unstick-width");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -1311,6 +1311,24 @@ await run("редактирование: ✖ Отмена возвращает �
   } finally {
     appStub.extensionManager.dialog.confirm = origConfirm;
   }
+});
+
+// --- v1.31: stale widget.width сносится (§37) --------------------------------
+await run("v1.31: чужое widget.width не переживает кадр", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const w = node.widgets.find((x) => x.name === "pl_browser");
+  check("v1.31: pl_browser создан", !!w);
+  check("v1.31: свежее состояние без width", !!w && w.width === undefined);
+  if (w) w.width = 213; // чужое stale-значение, как живьём (§37)
+  proto.onDrawForeground.call(node);
+  check("v1.31: onDrawForeground сносит stale width",
+    !!w && w.width === undefined, String(w && w.width));
+  if (w) w.width = 213;
+  node.onResize([800, 900]);
+  check("v1.31: onResize сносит stale width",
+    !!w && w.width === undefined, String(w && w.width));
 });
 
 // --- v1.27 (аудит): двойной клик, полнотекстовый поиск, гигиена состояния ----

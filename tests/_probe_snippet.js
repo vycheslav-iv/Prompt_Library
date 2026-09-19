@@ -1,13 +1,8 @@
 /* Диагностика залипшей раскладки ноды PromptLibrary — вставить в F12 → Console.
  *
- * Зачем: glitch «внутренний контент сузился и остался зажатым» не воспроизводится
- * на чистом старте (проверено живым замером: tests/_probe_live_dom.py — Vue и
- * канвас, панель свойств, растягивание мышью через CDP). Значит, состояние
- * залипания живёт только в конкретной сессии — сниппет читает ИМЕННО его.
- *
- * Ничего не меняет, только печатает JSON. Зависит только от публичных полей
- * LiteGraph (`node.widgets[].element`), поэтому работает и на загруженной ранее
- * версии расширения (классы .pl-* для него не нужны).
+ * v2: плюс блок overlay (w.width, живой ли w.node, lowQuality) и инлайн
+ * обёртки .dom-widget — именно её ширина зажимает контент.
+ * Ничего не меняет, только печатает JSON.
  */
 (() => {
   const px = (v) => Math.round(v * 100) / 100;
@@ -68,8 +63,27 @@
     const info = { id: n.id, size: { w: px(n.size[0]), h: px(n.size[1]) }, pos: { x: n.pos[0], y: n.pos[1] } };
     const w = (n.widgets || []).find((x) => x.name === "pl_browser");
     info.widget = w ? { computedHeight: w.computedHeight, lastY: w.last_y, hidden: !!w.hidden } : null;
+    if (w) {
+      // v2: геометрия, которую DomWidgets.vue подставляет в оверлей:
+      // size = [(w.width ?? node.width) - 2*margin, ...]. Если w.width застыло
+      // или w.node — протухший клон, оверлей уже не догонит живую ноду.
+      const live = app.graph.getNodeById(n.id);
+      info.overlay = {
+        wWidth: w.width ?? null,
+        wY: w.y ?? null,
+        wMargin: w.margin ?? null,
+        wNodeIsLive: w.node === live,
+        wNodeSize: w.node ? { w: px(w.node.size[0]), h: px(w.node.size[1]) } : null,
+        wNodeWidth: w.node ? px(w.node.width) : null,
+        lowQuality: !!(app.canvas && app.canvas.low_quality),
+        hideOnZoom: !!(w.options && w.options.hideOnZoom),
+      };
+    }
     const el = w && w.element;
-    // el — ЭТО и есть наш root (движок отдаёт виджету наш корневой элемент)
+    // el — ЭТО и есть наш root (движок отдаёт виджету наш корневой элемент).
+    // v2: обёртка .dom-widget (DomWidget.vue) — её инлайн-ширина и решает.
+    const wrap = el && el.parentElement && /(^|\s)dom-widget(\s|$)/.test(el.parentElement.className || "")
+      ? el.parentElement : null;
     info.root = el ? {
       rect: rect(el),
       inline: (el.getAttribute("style") || "").slice(0, 240),
@@ -77,6 +91,7 @@
       children: kids(el, 6),
     } : null;
     if (el) info.parents = chain(el.parentElement, 7);
+    if (wrap) info.wrapper = { rect: rect(wrap), inline: (wrap.getAttribute("style") || "").slice(0, 300) };
     const nodeEl = document.querySelector(`[data-node-id="${n.id}"]`);
     if (nodeEl) {
       const cs = getComputedStyle(nodeEl);
