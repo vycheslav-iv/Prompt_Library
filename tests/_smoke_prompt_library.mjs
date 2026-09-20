@@ -241,7 +241,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.33-export-to-folder");
+  check(`${tag}: версия JS видна`, st.version === "1.34-folder-export");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -1704,6 +1704,307 @@ await run("v1.33: sanitizeFileName режет недопустимые симв�
     st.sanitizeFileName("") === "запись", st.sanitizeFileName(""));
   check("v1.33: точки в начале отрезаны (не dot-file)",
     st.sanitizeFileName("...hidden") === "hidden", st.sanitizeFileName("...hidden"));
+});
+
+// --- v1.34: экспорт папок и отмеченного (§39) ----------------------
+// Одна умная кнопка «📤 Экспорт» в шапке проводника (рядом с «+ Категория»):
+//   — при активных метках (Ctrl/Shift) → exportMarked() (отмеченные записи + категории),
+//   — без меток → exportFolder(st.selFolder || "__all") (текущая категория, «Всё», «Избранное», «Без категории»).
+// Отдельных кнопок 📤 на строках дерева и в bulk-баре НЕТ (были — шум, переработано).
+// Прогресс-бар progTrack flex-резиновый (flex:1 1 0, height 12px), во время экспорта
+// подсказка hint скрыта (бар занимает строку), после экспорта возвращается.
+// Стаб запросов: /list отдаёт те же записи (иначе фоновый reload() из
+// onNodeCreated сбросит st.entries в []), /entry — полные тексты, /preview —
+// картинку.
+let bulkExportPickerCalled = false;
+const installFetchStub = (entries, fulls) => {
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries, folders: [] });
+    if (url.includes("/prompt_library/entry?id=")) {
+      const id = decodeURIComponent(url.split("id=")[1] || "");
+      return jsonResponse(fulls.get ? (fulls.get(id) || {}) : (fulls[id] || {}));
+    }
+    if (url.includes("/prompt_library/preview")) {
+      return { ok: true, status: 200, blob: async () => ({ type: "image/png", size: 3 }) };
+    }
+    return jsonResponse({ ok: true });
+  };
+};
+const makeDirHandle = (files, prefix = "") => ({
+  getFileHandle: async (name) => ({
+    createWritable: async () => {
+      let content = "";
+      return {
+        write: async (chunk) => { content = chunk; },
+        close: async () => { files.push({ name: prefix + name, content }); },
+      };
+    },
+  }),
+  getDirectoryHandle: async (name) => makeDirHandle(files, prefix + name + "/"),
+});
+
+await run("v1.34: экспорт категории — зеркало иерархии, обложка рядом", async () => {
+  const raw = [
+    { id: "E1", title: "Фото с моря", folder: "Фото", preview: "p/E1.png", prompt: "полный текст фото с моря" },
+    { id: "E2", title: "Портрет", folder: "Фото/Портреты", preview: "", prompt: "полный текст портрета" },
+    { id: "E4", title: "Альбом выпуска", folder: "Фото/Портреты/Альбом", preview: "p/E4.png", prompt: "полный текст альбома" },
+    { id: "E9", title: "Без папки", folder: "", preview: "", prompt: "полный текст без папки" },
+  ];
+  // /list шлёт сжатую проекцию (как настоящий сервер) — без prompt/preview
+  installFetchStub(raw.map(({ id, title, folder }) => ({ id, title, folder, head: "", favorite: false, pinned: false, has_preview: !!1, media: null })), new Map(raw.map((e) => [e.id, e])));
+
+  const node = makeNode();
+  node.id = 84;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  await st.reload();
+
+  const files = [];
+  const fakeDirHandle = makeDirHandle(files);
+
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => { bulkExportPickerCalled = true; return fakeDirHandle; };
+  try {
+    await st.exportFolder("Фото");
+    // Зеркало: категория «Фото» → папка «Фото/» c файлами; подкатегория портретов
+    // ложится в «Фото/Портреты/», а альбом — на уровень глубже.
+    check("v1.34: диалог выбора папки открылся", bulkExportPickerCalled === true);
+    check("v1.34: файлы в зеркале иерархии (Фото/, Фото/Портреты/, …/Альбом/)",
+      files.some((f) => f.name === "Фото/Фото с моря.md")
+        && files.some((f) => f.name === "Фото/Портреты/Портрет.md")
+        && files.some((f) => f.name === "Фото/Портреты/Альбом/Альбом выпуска.md"),
+      files.map((f) => f.name).join(","));
+    // Обложка у записей с превью пишется РЯДОМ (не в подпапку <title>/)
+    check("v1.34: обложка рядом с .md (не в подпапке title/)",
+      files.some((f) => f.name === "Фото/Фото с моря.png")
+        && !files.some((f) => f.name.includes("Фото с моря/Фото с моря")),
+      files.map((f) => f.name).join(","));
+    // .md несёт полный текст (взяли из /entry, а не обрывок head из списка)
+    const md = files.find((f) => f.name === "Фото/Фото с моря.md");
+    check("v1.34: полный текст промпта в .md",
+      !!md && String(md.content).includes("полный текст фото с моря"),
+      String(md.content));
+    // Единая кнопка экспорта в заголовке проводника (рядом с «+ Категория»),
+    // а НЕ на каждой строке дерева — на строках 📤 быть не должно.
+    const rowHasEx = (row) => {
+      const kids = Array.isArray(row.children) ? row.children : [];
+      return kids.some((c) => c.textContent === "📤");
+    };
+    check("v1.34: у строк дерева НЕТ кнопки 📤 (одна кнопка в шапке)",
+      !Array.from(st.tree.children).some(rowHasEx));
+    check("v1.34: в шапке проводника есть кнопка «📤 Экспорт»",
+      !!st.exportBtn && st.exportBtn.textContent === "📤 Экспорт");
+    // Прогресс-бар: перехватываем setExportProgress во время экспорта —
+    // он скрыт ДО экспорта, показан с процентами ВО ВРЕМЯ и скрыт ПОСЛЕ.
+    // Во время показа подсказка внизу скрыта (бар занимает всю строку) —
+    // «резиновый» растягивающийся бар.
+    const origProg = st.setExportProgress;
+    const progCalls = [];
+    const hintDuringShow = [];
+    st.setExportProgress = (...args) => {
+      const [show] = args;
+      const r = origProg(...args);
+      // Сразу после применения: что видно в строке в момент ПОКАЗА бара.
+      if (show) hintDuringShow.push({ hint: st.hint.style.display, track: st.progTrack.style.display });
+      progCalls.push(args);
+      return r;
+    };
+    check("v1.34: прогресс-бар скрыт до экспорта", st.progTrack.style.display === "none");
+    await st.exportFolder("Фото");
+    st.setExportProgress = origProg;
+    check("v1.34: прогресс-бар показан во время экспорта и заполнен",
+      progCalls.some(([show, done, total]) => show && done > 0 && total > 0));
+    check("v1.34: во время показа подсказка скрыта, бар занимает строку",
+      hintDuringShow.length > 0 && hintDuringShow.every((s) => s.hint === "none" && s.track === ""),
+      JSON.stringify(hintDuringShow));
+    check("v1.34: прогресс-бар скрыт после экспорта", st.progTrack.style.display === "none");
+    check("v1.34: подсказка возвращена после экспорта", st.hint.style.display === "");
+  } finally {
+    windowStub.showDirectoryPicker = origPicker;
+  }
+});
+
+await run("v1.34: экспорт категории — __all, избранное, записи без папки", async () => {
+  const raw = [
+    { id: "FA", title: "Избранная", folder: "Фото/Портреты", preview: "", prompt: "textFA", favorite: true },
+    { id: "FR", title: "Избранная корень", folder: "", preview: "", prompt: "textFR", favorite: true },
+    { id: "NR", title: "Обычная без папки", folder: "", preview: "", prompt: "textNR", favorite: false },
+    { id: "NO", title: "Обычная в папке", folder: "Архив", preview: "", prompt: "textNO", favorite: false },
+  ];
+  installFetchStub(raw.map((e) => ({ id: e.id, title: e.title, folder: e.folder, favorite: e.favorite, head: "", pinned: false, has_preview: false, media: null })), new Map(raw.map((e) => [e.id, e])));
+
+  const node = makeNode();
+  node.id = 85;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  await st.reload();
+
+  const files = [];
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => makeDirHandle(files);
+
+  // __all: вся база от корня (дерево сохраняется и для вложенных папок)
+  files.length = 0;
+  await st.exportFolder("__all");
+  check("v1.34: «Всё» — зеркало всей базы от корня, вложенные папки сохранены",
+    files.some((f) => f.name === "Фото/Портреты/Избранная.md")
+      && files.some((f) => f.name === "Избранная корень.md")
+      && files.some((f) => f.name === "Архив/Обычная в папке.md")
+      && files.some((f) => f.name === "Обычная без папки.md"),
+    files.map((f) => f.name).join(","));
+
+  // __fav: только избранные, но дерево их папок сохранено
+  files.length = 0;
+  await st.exportFolder("__fav");
+  check("v1.34: «Избранное» — только избранные с сохранением папок",
+    files.some((f) => f.name === "Фото/Портреты/Избранная.md")
+      && files.some((f) => f.name === "Избранная корень.md")
+      && !files.some((f) => f.name.includes("Обычная")),
+    files.map((f) => f.name).join(","));
+
+  // __root: записи БЕЗ категории — в корень выбранной папки
+  files.length = 0;
+  await st.exportFolder("__root");
+  check("v1.34: «Без категории» — только без папки, в корень",
+    files.some((f) => f.name === "Обычная без папки.md")
+      && files.some((f) => f.name === "Избранная корень.md")
+      && !files.some((f) => f.name.includes("/")),
+    files.map((f) => f.name).join(","));
+
+  // Пустая категория — стойкое сообщение, диалог НЕ открывается
+  files.length = 0;
+  let pickerOpened = false;
+  windowStub.showDirectoryPicker = async () => { pickerOpened = true; return makeDirHandle(files); };
+  await st.exportFolder("Пустота");
+  check("v1.34: пустая категория — подсказка и без диалога",
+    pickerOpened === false && !!st.hintSticky && String(st.hintSticky).includes("нечего экспортировать"),
+    String(st.hintSticky));
+  // Отмена диалога — тихо, ничего не пишется
+  files.length = 0;
+  windowStub.showDirectoryPicker = async () => { const e = new Error("cancel"); e.name = "AbortError"; throw e; };
+  await st.exportFolder("__all");
+  check("v1.34: отмена выбора папки — тихо, ничего не писано", files.length === 0, st.hintSticky);
+  // Браузер без File System Access API — подсказка про Chrome/Edge
+  windowStub.showDirectoryPicker = undefined;
+  await st.exportFolder("__all");
+  check("v1.34: без поддержки API — подсказка про Chrome/Edge",
+    !!st.hintSticky && String(st.hintSticky).includes("Chrome"), String(st.hintSticky));
+  windowStub.showDirectoryPicker = origPicker;
+});
+
+await run("v1.34: bulk-экспорт отмеченного (записи + категории)", async () => {
+  const raw = [
+    { id: "B1", title: "Помеченная запись", folder: "Фото", preview: "", prompt: "textB1" },
+    { id: "B4", title: "Внутри помеченной папки", folder: "Фото/Портреты", preview: "", prompt: "textB4" },
+    { id: "B9", title: "Без папки", folder: "", preview: "", prompt: "textB9" },
+    { id: "BX", title: "Не отмечена", folder: "Другое", preview: "", prompt: "textBX" },
+  ];
+  installFetchStub(raw.map((e) => ({ id: e.id, title: e.title, folder: e.folder, head: "", favorite: false, pinned: false, has_preview: false, media: null })), new Map(raw.map((e) => [e.id, e])));
+
+  const node = makeNode();
+  node.id = 86;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  await st.reload();
+  // Отмечены: запись B1 (занесена в bulk-бар) и категория «Фото» (её содержимое
+  // с подпапками попадает по клику в bulk-баре)
+  st.markEntries.add("B1");
+  st.markFolders.add("Фото");
+
+  const files = [];
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => makeDirHandle(files);
+  try {
+    await st.exportMarked();
+    check("v1.34: bulk-экспорт берёт отмеченные записи + содержимое отмеченных категорий",
+      files.some((f) => f.name === "Фото/Помеченная запись.md")
+        && files.some((f) => f.name === "Фото/Портреты/Внутри помеченной папки.md")
+        && !files.some((f) => f.name.includes("Не отмечена")),
+      files.map((f) => f.name).join(","));
+    // Экспорт без пометок — ничего не делает, без диалога
+    let opened = false;
+    st.markEntries.clear(); st.markFolders.clear();
+    windowStub.showDirectoryPicker = async () => { opened = true; return makeDirHandle(files); };
+    await st.exportMarked();
+    check("v1.34: экспорт без пометок — без диалога и действий", opened === false, String(!!st.hintSticky));
+  } finally {
+    windowStub.showDirectoryPicker = origPicker;
+  }
+});
+
+// Умная кнопка «📤 Экспорт» в шапке проводника: при активных метках
+// экспортирует отмеченное (exportMarked), без меток — текущую категорию
+// (exportFolder). Отдельной bulk-кнопки в нижней строке БОЛЬШЕ НЕТ.
+await run("v1.34: умная кнопка экспорта (метки → отмеченное, без меток → категория)", async () => {
+  const raw = [
+    { id: "S1", title: "Запись одна", folder: "Фото", preview: "", prompt: "textS1", favorite: false },
+    { id: "S2", title: "Запись два", folder: "Без папки", preview: "", prompt: "textS2", favorite: false },
+  ];
+  installFetchStub(raw.map((e) => ({ id: e.id, title: e.title, folder: e.folder, head: "", favorite: false, pinned: false, has_preview: false, media: null })), new Map(raw.map((e) => [e.id, e])));
+
+  const node = makeNode();
+  node.id = 87;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  await st.reload();
+
+  const files = [];
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => makeDirHandle(files);
+  // Нет bulk-кнопки в нижней строке (одна кнопка — в шапке)
+  check("v1.34: отдельной bulk-кнопки экспорта в нижней строке нет",
+    !("bulkExport" in st) || st.bulkExport === undefined, String(st.bulkExport));
+
+  // С метками — экспорт отмеченного (exportFolder не вызывается): шпион
+  // перехватывает exportFolder, но экспорт идёт через exportMarked (настоящий).
+  let folderCalls = [];
+  const origFolder = st.exportFolder;
+  st.exportFolder = async (k) => { folderCalls.push(k); };
+  st.markEntries.add("S1");
+  files.length = 0;
+  await st.exportBtn.onclick();
+  st.exportFolder = origFolder;
+  check("v1.34: при метках умная кнопка экспортирует отмеченное",
+    files.some((f) => f.name.includes("Запись одна")) && !files.some((f) => f.name.includes("Запись два")),
+    files.map((f) => f.name).join(","));
+  check("v1.34: при метках exportFolder не вызван", folderCalls.length === 0, String(folderCalls));
+
+  // Без меток — экспорт текущей категории (selFolder, настоящий exportFolder)
+  st.markEntries.clear(); st.markFolders.clear();
+  st.selFolder = "Фото";
+  files.length = 0;
+  await st.exportBtn.onclick();
+  check("v1.34: без меток умная кнопка экспортирует текущую категорию",
+    files.some((f) => f.name === "Фото/Запись одна.md")
+      && !files.some((f) => f.name.includes("Запись два")),
+    files.map((f) => f.name).join(","));
+
+  // Без меток и без выбранной категории — вся база (__all)
+  st.selFolder = "__all";
+  files.length = 0;
+  await st.exportBtn.onclick();
+  check("v1.34: без меток и выбранной категории — вся база",
+    files.some((f) => f.name === "Фото/Запись одна.md")
+      && files.some((f) => f.name === "Без папки/Запись два.md"),
+    files.map((f) => f.name).join(","));
+
+  // Метки после экспорта остаются как есть (не сбрасываются кнопкой)
+  st.markEntries.add("S2");
+  folderCalls = [];
+  st.exportFolder = async (k) => { folderCalls.push(k); };
+  await st.exportBtn.onclick();
+  st.exportFolder = origFolder;
+  check("v1.34: при метках кнопка НЕ экспортирует категорию (экспорт отмеченного)",
+    folderCalls.length === 0, String(folderCalls));
+  st.markEntries.clear();
+  files.length = 0;
+  await st.exportBtn.onclick();
+  check("v1.34: после сброса меток кнопка снова экспортирует категорию/базу",
+    files.some((f) => f.name === "Фото/Запись одна.md"),
+    files.map((f) => f.name).join(","));
+
+  windowStub.showDirectoryPicker = origPicker;
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);

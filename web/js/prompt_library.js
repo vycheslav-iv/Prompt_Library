@@ -77,7 +77,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.33-export-to-folder";
+const PL_JS_VERSION = "1.34-folder-export";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -379,8 +379,21 @@ app.registerExtension({
             newFolderBtn.textContent = "+ Категория";
             newFolderBtn.title = "Создать категорию (в текущей — подкатегорию)";
             newFolderBtn.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;";
+            const exportBtn = document.createElement("button");
+            exportBtn.textContent = "📤 Экспорт";
+            exportBtn.title = "Экспорт на диск: при Ctrl/Shift-выделении — отмеченные записи и категории, иначе — текущая категория (с подкатегориями)";
+            exportBtn.style.cssText = "background:#2c4a73;color:#dfe8ff;border:1px solid #4a6a9a;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;";
+            exportBtn.onclick = () => {
+                const smartMarked = (st.markEntries.size + st.markFolders.size) > 0;
+                if (smartMarked) return st.exportMarked?.();
+                return st.exportFolder?.(st.selFolder || "__all");
+            };
+            const treeHeadBtns = document.createElement("div");
+            treeHeadBtns.style.cssText = "display:flex;align-items:center;gap:4px;";
+            treeHeadBtns.appendChild(exportBtn);
+            treeHeadBtns.appendChild(newFolderBtn);
             treeHead.appendChild(treeTitle);
-            treeHead.appendChild(newFolderBtn);
+            treeHead.appendChild(treeHeadBtns);
             const tree = document.createElement("div");
             // Тянется с нодой и СЖИМАЕТСЯ до отведённого места (min-height:0):
             // пол даёт минимальная высота ноды (computeLayoutSize), а не CSS.
@@ -434,7 +447,18 @@ app.registerExtension({
             bulkClear.title = "Снять все метки (Esc)";
             bulkClear.style.cssText = "display:none;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
             bulkClear.onclick = () => st.clearMarks?.();
+            // Прогресс-бар массового экспорта: показывается именно во время
+            // экспорта (иначе display:none), живёт в фиксированной строке 22px,
+            // поэтому высоту ноды не двигает. Растягивается на всю свободную
+            // ширину строки (flex:1 1 0) — «резиновый», вместе с нодой (как
+            // flex-дерево выше); размеров DOM не читает, feedback loop невозможен.
+            const progTrack = document.createElement("div");
+            progTrack.style.cssText = "display:none;flex:1 1 0;min-width:0;height:12px;border:1px solid #4a6a9a;border-radius:4px;background:#1a1a1a;overflow:hidden;flex-shrink:0;";
+            const progFill = document.createElement("div");
+            progFill.style.cssText = "width:0%;height:100%;background:linear-gradient(90deg,#3a6ea5,#5ba3e0);transition:width .15s ease;";
+            progTrack.appendChild(progFill);
             hintRow.appendChild(hint);
+            hintRow.appendChild(progTrack);
             hintRow.appendChild(bulkCount);
             hintRow.appendChild(bulkDel);
             hintRow.appendChild(bulkClear);
@@ -645,6 +669,7 @@ app.registerExtension({
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
                 pickupRow, pickupSel, inputTitle,
                 bulkCount, bulkDel, bulkClear,
+                progTrack, progFill, exportBtn,
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel, bExport,
                 entries: [], folders: [], full: new Map(),
                 // id записей, найденных серверным полнотекстовым поиском (v1.27);
@@ -2107,10 +2132,10 @@ app.registerExtension({
                 const s = String(name || "").trim();
                 return s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/^\.+/, "").slice(0, 80) || "запись";
             };
-            st.writeEntryToDir = async (dirHandle, full) => {
-                const written = [];
+            // Сборка .md — общая для одиночного (v1.33) и пакетного (v1.34) экспорта.
+            st._entryToMd = (full) => {
                 const title = st.sanitizeFileName(full.title);
-                const md = [
+                return [
                     `# ${full.title || title}`,
                     "",
                     `- Категория: ${full.folder || "Без категории"}`,
@@ -2123,6 +2148,11 @@ app.registerExtension({
                     full.prompt || "",
                     "",
                 ].join("\n");
+            };
+            st.writeEntryToDir = async (dirHandle, full) => {
+                const written = [];
+                const title = st.sanitizeFileName(full.title);
+                const md = st._entryToMd(full);
                 // Куда писать: подпапка с названием записи — только при обложке.
                 let writeTo = dirHandle;
                 let prefix = "";
@@ -2183,6 +2213,230 @@ app.registerExtension({
                 } catch (err) {
                     console.warn("[PromptLibrary] export error:", err);
                     st.hintSticky = "Ошибка сохранения — файл мог быть занят или папка защищена.";
+                    st.renderHint?.();
+                }
+            };
+
+            // --- Пакетный экспорт: вся папка с подпапками, или отмеченное (v1.34) ---
+            // Формат файла — как одиночный цикл (writeEntryToDir), НО одна разница:
+            // обложка пишется РЯДОМ с .md (name.md + name.png), а не в подпапку
+            // <title>/ — при десятках записей подпапка на каждую превратила бы
+            // папку на диске в чащу. Структура на диске повторяет дерево категорий:
+            // экспорт папки «Фото» создаёт в выбранной директории «Фото/» с её
+            // файлами и подпапками («Фото/Портреты/» и т.д.). «Всё» — зеркало всей
+            // базы от корня. Отмеченное — каждая запись в зеркало своей папки.
+            st.writeEntryFlat = async (writeDir, full) => {
+                const written = [];
+                const title = st.sanitizeFileName(full.title);
+                const md = st._entryToMd(full);
+                const fh = await writeDir.getFileHandle(`${title}.md`, { create: true });
+                const wtr = await fh.createWritable();
+                await wtr.write(md);
+                await wtr.close();
+                written.push(`${title}.md`);
+                if (full.preview) {
+                    try {
+                        const r = await fetch(`/prompt_library/preview?id=${encodeURIComponent(full.id)}`);
+                        if (r.ok) {
+                            const blob = await r.blob();
+                            const ext = String(blob.type || "").includes("jpeg") ? ".jpg" : ".png";
+                            const imgFh = await writeDir.getFileHandle(`${title}${ext}`, { create: true });
+                            const imgWtr = await imgFh.createWritable();
+                            await imgWtr.write(blob);
+                            await imgWtr.close();
+                            written.push(`${title}${ext}`);
+                        }
+                    } catch (e) { /* превью — опционально */ }
+                }
+                return written;
+            };
+            // Последовательное создание вложенных директорий: рекурсивной записи
+            // в File System Access API нет, каждый сегмент — отдельный вызов.
+            st.ensureDirPath = async (dirHandle, relPath) => {
+                let cur = dirHandle;
+                for (const seg of String(relPath || "").split("/")) {
+                    if (!seg) continue;
+                    cur = await cur.getDirectoryHandle(seg, { create: true });
+                }
+                return cur;
+            };
+            // Полный текст записей: в st.entries из /list лежит только head (первые
+            // 120 символов), для экспорта нужен весь prompt. Пул из нескольких
+            // параллельных fetch /entry, порядок результата не важен (Map по id).
+            st.loadFulls = async (ids, limit = 6) => {
+                const out = new Map();
+                let i = 0;
+                const worker = async () => {
+                    while (i < ids.length) {
+                        const id = ids[i++];
+                        try {
+                            const r = await fetch(`/prompt_library/entry?id=${encodeURIComponent(id)}`);
+                            if (r.ok) out.set(id, await r.json());
+                        } catch (e) { /* пропускаем — запишется то, что догрузилось */ }
+                    }
+                };
+                await Promise.all(Array.from({ length: Math.min(limit, ids.length) }, () => worker()));
+                return out;
+            };
+            // Куда ложится запись относительно корня экспорта: последний сегмент
+            // пути папки плюс всё, что глубже. Рядом с корнем — без префикса.
+            st.relFolder = (folder, pathKey) => {
+                if (!folder) return "";
+                if (folder === pathKey) return "";
+                if (pathKey && folder.startsWith(pathKey + "/")) return folder.slice(pathKey.length + 1);
+                return folder; // «Всё»/избранное/отмеченное — зеркало от корня
+            };
+            // Прогресс-бар экспорта: show=true открывает полосу, show=false прячет.
+            // done/total — для частичного заполнения (вызов с каждой записью).
+            st.setExportProgress = (show, done, total) => {
+                st.progTrack.style.display = show ? "" : "none";
+                // На время экспорта прячем подсказку — бар занимает всю строку
+                // (иначе узкий, едва заметный).
+                st.hint.style.display = show ? "none" : "";
+                if (show && total > 0) {
+                    const pct = Math.min(100, Math.max(0, Math.round((done / total) * 100)));
+                    st.progFill.style.width = pct + "%";
+                }
+            };
+            st.exportFolder = async (pathKey) => {
+                st.setExportProgress(true, 0, 1);
+                if (typeof window.showDirectoryPicker !== "function") {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Ваш браузер не поддерживает выбор папки — нужен Chrome или Edge.";
+                    st.renderHint?.();
+                    return;
+                }
+                // Выборка записей: сама папка + все вложенные («Фото» → и записи
+                // «Фото/Портреты», и «Фото/Портреты/Альбом»). Служебные ветки —
+                // их особая выборка.
+                let sel;
+                if (pathKey === "__all") sel = st.entries;
+                else if (pathKey === "__fav") sel = st.entries.filter((e) => e.favorite);
+                else if (pathKey === "__root") sel = st.entries.filter((e) => !e.folder);
+                else sel = st.entries.filter((e) => e.folder === pathKey || e.folder.startsWith(pathKey + "/"));
+                if (!sel.length) {
+                    st.setExportProgress(false);
+                    st.hintSticky = `В «${pathKey === "__all" ? "Всё" : pathKey === "__fav" ? "Избранное" : pathKey === "__root" ? "Без категории" : pathKey}» нечего экспортировать.`;
+                    st.renderHint?.();
+                    return;
+                }
+                let dirHandle = null;
+                try {
+                    dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+                } catch (e) {
+                    st.setExportProgress(false);
+                    if (e && e.name === "AbortError") return; // закрыл диалог — тихо
+                    st.hintSticky = "Не удалось открыть выбор папки.";
+                    st.renderHint?.();
+                    return;
+                }
+                // Зеркало иерархии: для реальной папки создаём в выбранной
+                // директории папку по её имени; внутри — файлы и подпапки.
+                let root = dirHandle;
+                if (!pathKey.startsWith("__")) {
+                    const leaf = pathKey.split("/").pop();
+                    try {
+                        root = await dirHandle.getDirectoryHandle(st.sanitizeFileName(leaf), { create: true });
+                    } catch (e) { /* не создалась — пишем в выбранную директорию */ }
+                }
+                const fulls = await st.loadFulls(sel.map((e) => e.id));
+                let done = 0, failed = 0;
+                const badNames = [];
+                try {
+                    for (const e of sel) {
+                        const full = fulls.get(e.id);
+                        if (!full) { // из /list нет полного текста — битую запись не пишем
+                            failed++;
+                            if (badNames.length < 5) badNames.push(e.title || e.id);
+                            st.hintSticky = `Экспортирую «${pathKey}»: ${done + failed} из ${sel.length}…`;
+                            st.setExportProgress(true, done + failed, sel.length);
+                            st.renderHint?.();
+                            continue;
+                        }
+                        try {
+                            const sub = st.relFolder(e.folder, pathKey.startsWith("__") ? null : pathKey);
+                            const writeDir = sub ? await st.ensureDirPath(root, sub) : root;
+                            await st.writeEntryFlat(writeDir, full);
+                            done++;
+                        } catch (err) {
+                            failed++;
+                            if (badNames.length < 5) badNames.push(e.title || e.id);
+                        }
+                        st.hintSticky = `Экспортирую «${pathKey}»: ${done + failed} из ${sel.length}…`;
+                        st.setExportProgress(true, done + failed, sel.length);
+                        st.renderHint?.();
+                    }
+                } finally {
+                    st.setExportProgress(false);
+                    st.hintSticky = failed
+                        ? `Готово: ${done} из ${sel.length}${badNames.length ? `, не удались: ${badNames.join(", ")}` : ""}.`
+                        : `Экспортировано: ${done} записей.`;
+                    st.renderHint?.();
+                }
+            };
+            // Экспорт отмеченного (bulk-бар): записи ст.entries, помеченные
+            // по Ctrl/Shift, плюс содержимое помеченных папок (тоже с подпапками).
+            st.exportMarked = async () => {
+                const ids = [...st.markEntries];
+                const paths = [...st.markFolders];
+                if (!ids.length && !paths.length) return;
+                st.setExportProgress(true, 0, 1);
+                if (typeof window.showDirectoryPicker !== "function") {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Ваш браузер не поддерживает выбор папки — нужен Chrome или Edge.";
+                    st.renderHint?.();
+                    return;
+                }
+                const pick = (e) => ids.includes(e.id)
+                    || paths.some((p) => e.folder === p || e.folder.startsWith(p + "/"));
+                const sel = st.entries.filter(pick);
+                if (!sel.length) {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Помеченного нечего экспортировать.";
+                    st.renderHint?.();
+                    return;
+                }
+                let dirHandle = null;
+                try {
+                    dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+                } catch (e) {
+                    st.setExportProgress(false);
+                    if (e && e.name === "AbortError") return; // закрыл диалог — тихо
+                    st.hintSticky = "Не удалось открыть выбор папки.";
+                    st.renderHint?.();
+                    return;
+                }
+                const fulls = await st.loadFulls(sel.map((e) => e.id));
+                let done = 0, failed = 0;
+                const badNames = [];
+                try {
+                    for (const e of sel) {
+                        const full = fulls.get(e.id);
+                        if (!full) {
+                            failed++;
+                            if (badNames.length < 5) badNames.push(e.title || e.id);
+                            st.hintSticky = `Экспортирую отмеченное: ${done + failed} из ${sel.length}…`;
+                            st.setExportProgress(true, done + failed, sel.length);
+                            st.renderHint?.();
+                            continue;
+                        }
+                        try {
+                            const writeDir = e.folder ? await st.ensureDirPath(dirHandle, e.folder) : dirHandle;
+                            await st.writeEntryFlat(writeDir, full);
+                            done++;
+                        } catch (err) {
+                            failed++;
+                            if (badNames.length < 5) badNames.push(e.title || e.id);
+                        }
+                        st.hintSticky = `Экспортирую отмеченное: ${done + failed} из ${sel.length}…`;
+                        st.setExportProgress(true, done + failed, sel.length);
+                        st.renderHint?.();
+                    }
+                } finally {
+                    st.setExportProgress(false);
+                    st.hintSticky = failed
+                        ? `Готово: ${done} из ${sel.length}${badNames.length ? `, не удались: ${badNames.join(", ")}` : ""}.`
+                        : `Экспортировано: ${done} записей.`;
                     st.renderHint?.();
                 }
             };
