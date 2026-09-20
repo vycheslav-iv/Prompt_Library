@@ -1426,6 +1426,11 @@ app.registerExtension({
                     if (d.kind === "entry") {
                         const ids = d.ids || (d.id ? [d.id] : []);
                         if (!ids.length) return;
+                        if (target === "__fav") {
+                            const fav = await st.apiPost("/prompt_library/favorite_many", { ids });
+                            if (fav.ok) { st.full.clear(); await reload(); }
+                            return;
+                        }
                         const dest = target && !target.startsWith("__") ? target : (target === "__root" ? "" : null);
                         if (dest === null) return;
                         const moved = await st.apiPost("/prompt_library/move_many", { entry_ids: ids, folder: dest });
@@ -1433,6 +1438,11 @@ app.registerExtension({
                     } else if (d.kind === "folder") {
                         const paths = d.paths || (d.path ? [d.path] : []);
                         if (!paths.length) return;
+                        if (target === "__fav") {
+                            const fav = await st.apiPost("/prompt_library/favorite_many", { folder_paths: paths });
+                            if (fav.ok) { st.syncSaveFolder(); await reload(); }
+                            return;
+                        }
                         const new_parent = (!target || target === "__all" || target === "__root")
                             ? ""
                             : target;
@@ -1448,7 +1458,7 @@ app.registerExtension({
                 ev.preventDefault();
                 let d = null;
                 try { d = JSON.parse(ev.dataTransfer.getData("text/plain")); } catch (e) { /* silent */ }
-                if (d && d.kind === "entry" && st.selFolder && !st.selFolder.startsWith("__")) {
+                if (d && d.kind === "entry" && st.selFolder) {
                     await st.plDrop(d, st.selFolder);
                 }
             };

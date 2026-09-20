@@ -1108,6 +1108,33 @@ try:
             _broadcast_refresh()
         return web.json_response({"ok": True})
 
+    @routes.post("/prompt_library/favorite_many")
+    @_locked
+    async def _pl_favorite_many(request, body=None):
+        """Массовая отметка записей как избранных (v1.36, §drag→★).
+        Тело: { ids: [...] } или { folder_paths: [...] }"""
+        ids = body.get("ids", None)
+        folder_paths = body.get("folder_paths", None)
+        want = set()
+        if isinstance(ids, list):
+            want.update(i for i in ids if isinstance(i, str) and i)
+        entries, folders = _load_db()
+        marked = 0
+        if folder_paths and isinstance(folder_paths, list):
+            fp_set = set(f for f in folder_paths if isinstance(f, str) and f)
+            for e in entries:
+                if e.get("folder") in fp_set and not e.get("favorite"):
+                    e["favorite"] = True
+                    marked += 1
+        for e in entries:
+            if e.get("id") in want and not e.get("favorite"):
+                e["favorite"] = True
+                marked += 1
+        if marked:
+            _save_db(entries, folders)
+            _broadcast_refresh()
+        return web.json_response({"ok": True, "marked": marked})
+
     @routes.post("/prompt_library/pin")
     @_locked
     async def _pl_pin(request, body=None):
