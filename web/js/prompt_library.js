@@ -77,7 +77,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.32-hide-in-panel";
+const PL_JS_VERSION = "1.33-export-to-folder";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -609,6 +609,15 @@ app.registerExtension({
             dBtns.appendChild(bPreview);
             bWorkflow.onclick = () => { try { st.openWorkflow?.(st.detailId); } catch (e) { /* silent */ } };
 
+            // Экспорт записи в папку на диске (v1.33, §38): по клику —
+            // системный выбор папки (showDirectoryPicker, Chrome/Edge), в неё
+            // пишутся <title>.md (текст + метаданные) и, если есть превью,
+            // <title>.png/.jpg. Никаких тонких мест вроде sizing — файл
+            // сохраняется браузером напрямую в выбранную папку.
+            const bExport = mkBtn("💾 Сохранить в папку", "Сохранить текст записи (.md) и обложку (если есть) в выбранную на диске папку");
+            bExport.onclick = () => { try { st.exportEntry?.(); } catch (e) { /* silent */ } };
+            dBtns.appendChild(bExport);
+
             detail.appendChild(dTitle);
             detail.appendChild(dFolder);
             detail.appendChild(dText);
@@ -635,7 +644,7 @@ app.registerExtension({
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
                 pickupRow, pickupSel, inputTitle,
                 bulkCount, bulkDel, bulkClear,
-                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel,
+                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel, bExport,
                 entries: [], folders: [], full: new Map(),
                 // id записей, найденных серверным полнотекстовым поиском (v1.27);
                 // null = активного поиска нет (обычный локальный фильтр)
@@ -2081,6 +2090,88 @@ app.registerExtension({
                 st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача» или «📤📥 Выдача + запись».";
                 st.hintSticky = null;
                 return full;
+            };
+
+            // --- Экспорт записи в папку на диске (v1.33, §38) -----------------
+            // По клику кнопки открываем системный выбор папки (File System Access
+            // API, Chrome/Edge), пишем <title>.md (текст + метаданные) и, если у
+            // записи есть обложка, <title>.png/.jpg (байты берём тем же роутом
+            // /prompt_library/preview, что и карточка — никаких дополнительных
+            // данных серверу не нужно). Имя файла — из названия записи,
+            // недопустимые для файловой системы символы вырезаются.
+            st.sanitizeFileName = (name) => {
+                const s = String(name || "").trim();
+                return s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/^\.+/, "").slice(0, 80) || "запись";
+            };
+            st.writeEntryToDir = async (dirHandle, full) => {
+                const written = [];
+                const title = st.sanitizeFileName(full.title);
+                const md = [
+                    `# ${full.title || title}`,
+                    "",
+                    `- Категория: ${full.folder || "Без категории"}`,
+                    `- Создана: ${full.created_at || ""}`,
+                    `- Тип: ${full.media === "video" ? "🎬 видео" : full.media === "image" ? "📷 фото" : ""}`,
+                    `- В избранном: ${full.favorite ? "да" : "нет"}`,
+                    "",
+                    "## Промпт",
+                    "",
+                    full.prompt || "",
+                    "",
+                ].join("\n");
+                const fh = await dirHandle.getFileHandle(`${title}.md`, { create: true });
+                const wtr = await fh.createWritable();
+                await wtr.write(md);
+                await wtr.close();
+                written.push(`${title}.md`);
+                if (full.preview) {
+                    try {
+                        const r = await fetch(`/prompt_library/preview?id=${encodeURIComponent(full.id)}`);
+                        if (r.ok) {
+                            const blob = await r.blob();
+                            const ext = String(blob.type || "").includes("jpeg") ? ".jpg" : ".png";
+                            const imgFh = await dirHandle.getFileHandle(`${title}${ext}`, { create: true });
+                            const imgWtr = await imgFh.createWritable();
+                            await imgWtr.write(blob);
+                            await imgWtr.close();
+                            written.push(`${title}${ext}`);
+                        }
+                    } catch (e) { /* превью — опционально */ }
+                }
+                return written;
+            };
+            st.exportEntry = async () => {
+                const full = st.full.get(st.detailId) || {};
+                if (!full || !full.id) {
+                    st.hintSticky = "Сначала выберите запись — экспортировать пока нечего.";
+                    st.renderHint?.();
+                    return;
+                }
+                if (typeof window.showDirectoryPicker !== "function") {
+                    st.hintSticky = "Ваш браузер не поддерживает выбор папки — нужен Chrome или Edge.";
+                    st.renderHint?.();
+                    return;
+                }
+                let dirHandle = null;
+                try {
+                    dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+                } catch (e) {
+                    if (e && e.name === "AbortError") return; // пользователь закрыл диалог — тихо
+                    st.hintSticky = "Не удалось открыть выбор папки.";
+                    st.renderHint?.();
+                    return;
+                }
+                try {
+                    const written = await st.writeEntryToDir(dirHandle, full);
+                    st.hintSticky = written.length
+                        ? `Сохранено: ${written.join(", ")}`
+                        : "Текст не сохранился — попробуйте ещё раз.";
+                    st.renderHint?.();
+                } catch (err) {
+                    console.warn("[PromptLibrary] export error:", err);
+                    st.hintSticky = "Ошибка сохранения — файл мог быть занят или папка защищена.";
+                    st.renderHint?.();
+                }
             };
 
             // --- Сторож цикла: IMAGE подключён + выход куда-то идёт = кольцо в графе ---

@@ -169,6 +169,7 @@ const windowStub = {
   addEventListener() {}, removeEventListener() {},
   innerWidth: 1920, innerHeight: 1080,
   matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
+  showDirectoryPicker: undefined, // v1.33: включается в фазе экспорта
 };
 windowStub.window = windowStub;
 
@@ -240,7 +241,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.32-hide-in-panel");
+  check(`${tag}: версия JS видна`, st.version === "1.33-export-to-folder");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -1578,6 +1579,125 @@ await run("v1.27: метка кэша превью чистится при уд�
   } finally {
     sandbox.fetch = origFetch;
   }
+});
+
+// --- v1.33: экспорт записи в папку на диске (§38) ----------------------------
+// Кнопка «💾 Сохранить в папку» в панели книги: по клику открывается системный
+// выбор папки (showDirectoryPicker), в неё пишутся <title>.md (текст + метаданные)
+// и, если у записи есть обложка, <title>.png/.jpg.
+let pickerCalled = false;
+await run("v1.33: экспорт записи в папку (кнопка + файлы + метаданные)", async () => {
+  const node = makeNode();
+  node.id = 82;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+
+  // Какие файлы «записаны» в выбранную папку и с каким содержимым
+  const files = [];
+  const fakeDirHandle = {
+    getFileHandle: async (name) => {
+      const blobBytes = null;
+      return {
+        createWritable: async () => {
+          let content = "";
+          for (const chunk of []) { content += chunk; }
+          return {
+            write: async (chunk) => { content = chunk; },
+            close: async () => { files.push({ name, content }); },
+          };
+        },
+      };
+    },
+  };
+
+  const origFetch = sandbox.fetch;
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => { pickerCalled = true; return fakeDirHandle; };
+  // Превью отдаём как PNG с честным blob.type
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    if (url.includes("/prompt_library/preview")) {
+      return { ok: true, status: 200, blob: async () => ({ type: "image/png", size: 3 }) };
+    }
+    return jsonResponse({ ok: true });
+  };
+  try {
+    // Запись с обложкой и спецсимволами в названии (санитизация имени файла)
+    st.full.set("e1", {
+      id: "e1", title: 'Запись "важная" / фото?', folder: "Фото",
+      prompt: "красивая девушка в парке", media: "image", favorite: true,
+      preview: "previews/e1.png", created_at: "2026-09-20 10:00",
+    });
+    await st.fillDetail("e1");
+
+    // Кнопка на месте, в ряду действий, кликабельна
+    check("v1.33: кнопка экспорта создана", !!st.bExport,
+      String(st.detail.children.length));
+    check("v1.33: кнопка лежит в ряду действий панели",
+      st.detail.children.some((c) => Array.isArray(c.children) && c.children.includes(st.bExport)));
+    check("v1.33: текст кнопки — «Сохранить в папку»",
+      String(st.bExport.textContent).includes("Сохранить в папку"), st.bExport.textContent);
+
+    // Клик → диалог выбора папки → файлы записаны
+    files.length = 0;
+    await st.exportEntry();
+    check("v1.33: диалог выбора папки открылся", pickerCalled === true);
+
+    // Имя файла: разбор строки, мы вырезаем спецсимволы файловой системы
+    const md = files.find((f) => f.name.endsWith(".md"));
+    const img = files.find((f) => f.name.endsWith(".png"));
+    check("v1.33: записан .md с очищенным названием", !!md && md.name === "Запись _важная_ _ фото_.md",
+      files.map((f) => f.name).join(","));
+    check("v1.33: записана обложка (превью есть) в .png",
+      !!img && img.name === "Запись _важная_ _ фото_.png");
+    check("v1.33: текст промпта попал в .md", !!md && String(md.content).includes("красивая девушка в парке"),
+      String(md.content));
+    check("v1.33: метаданные в .md (категория + тип + избранное)",
+      !!md && String(md.content).includes("Категория: Фото")
+        && String(md.content).includes("📷 фото")
+        && String(md.content).includes("В избранном: да"),
+      String(md.content));
+
+    // Без обложки — только .md
+    files.length = 0;
+    st.full.set("e2", { id: "e2", title: "Текст", folder: "", prompt: "просто текст", media: null, favorite: false });
+    await st.fillDetail("e2");
+    await st.exportEntry();
+    check("v1.33: без превью пишется только .md",
+      files.length === 1 && files[0].name === "Текст.md",
+      files.map((f) => f.name).join(","));
+
+    // Отмена диалога — тихо, ничего не пишется
+    files.length = 0;
+    windowStub.showDirectoryPicker = async () => { const e = new Error("cancel"); e.name = "AbortError"; throw e; };
+    await st.exportEntry();
+    check("v1.33: отмена выбора папки — файлы не пишутся и ошибок нет",
+      files.length === 0, files.map((f) => f.name).join(","));
+
+    // Браузер без File System Access API — человечная подсказка
+    windowStub.showDirectoryPicker = undefined;
+    await st.exportEntry();
+    check("v1.33: браузер без поддержки — стойкая подсказка про Chrome/Edge",
+      !!st.hintSticky && String(st.hintSticky).includes("Chrome"), String(st.hintSticky));
+  } finally {
+    windowStub.showDirectoryPicker = origPicker;
+    sandbox.fetch = origFetch;
+  }
+});
+
+await run("v1.33: sanitizeFileName режет недопустимые символы", () => {
+  const node = makeNode();
+  node.id = 83;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  check("v1.33: слэши/двоеточия/елочки вырезаны",
+    st.sanitizeFileName('a/b\\c:d*e?f"g<h>i|j') === "a_b_c_d_e_f_g_h_i_j",
+    st.sanitizeFileName('a/b\\c:d*e?f"g<h>i|j'));
+  check("v1.33: пустое название — фолбэк «запись»",
+    st.sanitizeFileName("") === "запись", st.sanitizeFileName(""));
+  check("v1.33: точки в начале отрезаны (не dot-file)",
+    st.sanitizeFileName("...hidden") === "hidden", st.sanitizeFileName("...hidden"));
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
