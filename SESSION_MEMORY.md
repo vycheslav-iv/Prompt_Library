@@ -39,6 +39,13 @@
 - Нет bulk favorite эндпоинта — добавлен `_pl_favorite_many` с поддержкой `ids` и `folder_paths`
 - Папки не имели поля `pinned` (в отличие от записей) — добавлено `pinned_folders` как отдельный список в `library.json`
 - Изменение `_load_db`/`_save_db` сломало бы все 39 вызовов — решение: отдельные хелперы `_load_pinned_folders`/`_save_pinned_folders`
+- **Найдены и исправлены 5 багов:**
+  - `_pl_folder_delete` не чистил `pinned_folders` → «призраки» закреплённых папок
+  - `_pl_folder_delete_many` то же
+  - `_pl_folder_rename` не обновлял пути в `pinned_folders`
+  - `_pl_move_many` не обновлял пути в `pinned_folders`
+  - `_pl_folder_pin` не валидировал `__` префикс и не проверял существование папки
+- Все тесты зелёные: Python 244/244, smoke 80/80, аудит чист (19 роутов)
 
 ## 4. Что важно не сломать при продолжении работы
 
