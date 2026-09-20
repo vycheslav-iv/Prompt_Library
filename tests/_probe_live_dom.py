@@ -9,7 +9,15 @@
     cd Prompt_Library
     python tests/_probe_live_dom.py                 # базовая цепочка
     python tests/_probe_live_dom.py --panel         # + открыть панель свойств
+    python tests/_probe_live_dom.py --audit-writer --canvas   # кто пишет widget.width (§37.9)
     python tests/_probe_live_dom.py --url http://127.0.0.1:8188/
+
+⚠️ Научено горьким опытом (§37.7): ловушка/аудит имеют смысл ТОЛЬКО когда нода
+реально выделена, а панель реально отрисовала её виджеты. Выделять надо через
+`app.canvas.selectNodes([node])` — клик по `[data-node-id]` в канвас-режиме
+попадает в никуда (таких элементов там нет), и тогда `hits: []` не доказывает
+ничего. Флаг `--audit-writer` делает это правильно и отключает страж
+`unstickWidth`, иначе он сносит саму ловушку после первой записи.
 
 Зависимости — только те, что уже есть в ComfyUI (websockets, aiohttp).
 Профиль Chrome — временный, удаляется в конце; ничего вне проекта не меняется.
@@ -391,6 +399,41 @@ OPEN_PANEL_JS = r"""
 })()
 """
 
+# Панель свойств открывается через НАСТРОЙКУ `Comfy.RightSidePanel.IsOpen`,
+# а стор отказывается её открывать в legacy-меню (`Comfy.UseNewMenu === 'Disabled'`)
+# — именно на этом пустом месте провалились прежние прогоны: панели в
+# headless-профиле не было вовсе, а замеры «до/после» сравнивали одно и то же.
+OPEN_PANEL_STRONG_JS = r"""
+(() => {
+  const out = {};
+  const em = window.app && window.app.extensionManager;
+  let pinia = null;
+  for (const el of document.querySelectorAll('*')) {
+    const a = el.__vue_app__;
+    if (a && a.config && a.config.globalProperties && a.config.globalProperties.$pinia) {
+      pinia = a.config.globalProperties.$pinia; break;
+    }
+  }
+  const store = pinia && pinia._s && pinia._s.get && pinia._s.get('rightSidePanel');
+  out.store = !!store;
+  try { out.useNewMenu = em.setting.get('Comfy.UseNewMenu'); } catch (e) { out.useNewMenuErr = e.message; }
+  if (out.useNewMenu === 'Disabled') {
+    try { em.setting.set('Comfy.UseNewMenu', 'Top'); out.newMenuForced = true; }
+    catch (e) { out.forceErr = e.message; }
+  }
+  try { em.setting.set('Comfy.RightSidePanel.IsOpen', true); } catch (e) { out.setErr = e.message; }
+  if (store) {
+    try { store.activeTab = 'parameters'; } catch (e) { /* silent */ }
+    out.isOpen = !!store.isOpen;
+    out.activeTab = store.activeTab;
+  }
+  const panel = document.querySelector('[data-testid="properties-panel"]');
+  out.panelEl = !!panel;
+  out.panelText = panel ? (panel.textContent || '').replace(/\\s+/g, ' ').slice(0, 120) : null;
+  return out;
+})()
+"""
+
 LIST_BUTTONS_JS = r"""
 (() => {
   const top = document.querySelector('[data-testid="legacy-topbar-container"]') || document.body;
@@ -424,6 +467,125 @@ PANEL_DIAG_JS = r"""(() => {
     panelNodes: Array.from(document.querySelectorAll('[data-node-id]'))
       .filter((e) => !e.closest('[data-testid="properties-panel"]')).length,
   };
+})()
+"""
+
+
+# --- Аудит писателя widget.width (v1.31, §37.9) -------------------------------
+# Прежний прогон --trap в canvas-режиме был НЕВАЛИДЕН: он «выделял» ноду кликом
+# по элементу [data-node-id], а такие элементы существуют только в Vue-режиме.
+# В canvas-режиме панель свойств оставалась без выбранного узла, ничего не
+# рендерила — и писателя, естественно, не находила. Здесь выделение идёт
+# штатным API канваса (selectNodes), а страж unstickWidth на время опыта
+# снимается (иначе он снесёт саму ловушку после первой же записи).
+SELECT_NODE_JS = r"""
+(() => {
+  const n = window.__plProbeNode;
+  if (!n) return "no node";
+  const c = window.app.canvas;
+  try { c.selectNodes([n]); } catch (e) { return "selectNodes failed: " + e.message; }
+  try { n.onSelected && n.onSelected(); } catch (e) { /* silent */ }
+  c.setDirty(true, true);
+  let sel = null;
+  try { sel = Object.keys(c.selected_nodes || {}); } catch (e) { /* silent */ }
+  return "selected=" + JSON.stringify(sel) + " flag=" + !!n.selected;
+})()
+"""
+
+AUDIT_TRAP_JS = r"""
+(() => {
+  const n = window.__plProbeNode;
+  if (!n) return "no node";
+  // Страж снимаем: он удаляет чужое width, а ловушка — это свойство-аксессор
+  // на том же месте (после первой записи страж снес бы и её).
+  if (n._pl) n._pl.unstickWidth = () => {};
+  const w = (n.widgets || []).find((x) => x.name === "pl_browser");
+  if (!w) return "no widget";
+  delete w.width;
+  delete w.__trapVal;
+  const hits = (window.__widthTrap = []);
+  try {
+    Object.defineProperty(w, "width", {
+      configurable: true,
+      get() { return this.__trapVal; },
+      set(v) {
+        this.__trapVal = v;
+        try {
+          hits.push({ value: v, at: Date.now(),
+            stack: new Error("trap").stack.split("\n").slice(1, 8).join(" | ") });
+        } catch (e) { /* silent */ }
+      },
+    });
+  } catch (e) { return "defineProperty failed: " + e.message; }
+  return "trap ready (guard off)";
+})()
+"""
+
+AUDIT_DUMP_JS = r"""
+(() => {
+  const n = window.__plProbeNode;
+  const w = n && (n.widgets || []).find((x) => x.name === "pl_browser");
+  let desc = null, width = null;
+  try { desc = Object.getOwnPropertyDescriptor(w, "width"); } catch (e) { /* silent */ }
+  try { width = w.width ?? null; } catch (e) { /* silent */ }
+  const panel = document.querySelector('[data-testid="properties-panel"]');
+  const el = w && w.element;
+  const wrapper = el && el.closest('.dom-widget');
+  return {
+    hits: (window.__widthTrap || []).length,
+    lastHits: (window.__widthTrap || []).slice(0, 3),
+    stillTrapped: !!(desc && desc.set),
+    widgetWidth: width,
+    options: w ? { canvasOnly: !!w.options?.canvasOnly, hideInPanel: !!w.options?.hideInPanel,
+                   hidden: !!w.options?.hidden } : null,
+    nodeW: n ? Math.round(n.size[0] * 100) / 100 : null,
+    panelOpen: !!panel,
+    panelHasOurWidget: panel ? /pl_browser|custom/.test(panel.textContent || "") : null,
+    panelWidgetRows: panel ? panel.querySelectorAll('[data-testid="section-widgets-list"] > div').length : null,
+    // Панель может открыться без нашего тест-иd (сборки разные) — ищем шире:
+    panelAnywhere: (() => {
+      for (const el of document.querySelectorAll('[data-testid]')) {
+        if (/properties|right-side/i.test(el.dataset.testid || '')) return el.dataset.testid;
+      }
+      return null;
+    })(),
+    panelMirrors: document.querySelectorAll('[data-testid="properties-panel"] canvas').length,
+    wrapperW: wrapper ? Math.round(wrapper.getBoundingClientRect().width * 100) / 100 : null,
+    guardInstalled: !!(n && n._pl && n._pl.unstickWidth),
+  };
+})()
+"""
+
+AUDIT_FIX_JS = r"""
+(() => {
+  const n = window.__plProbeNode;
+  const w = n && (n.widgets || []).find((x) => x.name === "pl_browser");
+  if (!w || !w.options) return "no widget options";
+  w.options.hideInPanel = true;
+  return "hideInPanel=true";
+})()
+"""
+
+AUDIT_TOGGLE_PANEL_JS = r"""
+(() => {
+  const piniaOf = (a) => a && a.config && a.config.globalProperties
+    && a.config.globalProperties.$pinia;
+  let pinia = null;
+  for (const el of document.querySelectorAll('*')) {
+    const a = el.__vue_app__;
+    if (piniaOf(a)) { pinia = piniaOf(a); break; }
+  }
+  if (pinia && pinia._s) {
+    for (const [key, store] of pinia._s) {
+      if (store && typeof store.togglePanel === "function"
+          && typeof store.closePanel === "function") {
+        try { store.activeTab = store.activeTab || 'nodes'; } catch (e) { /* silent */ }
+        store.togglePanel();
+        return 'toggled:' + key + ' open=' + !!store.isOpen;
+      }
+    }
+  }
+  return 'no panel store';
 })()
 """
 
@@ -483,6 +645,11 @@ async def main() -> int:
     ap.add_argument("--trap", action="store_true",
                     help="ловушка на widget.width: ставит accessor-trap и долбит UI "
                          "(панель ×3, зум, ресайз ноды) — кто запишет width, тот и писатель")
+    ap.add_argument("--audit-writer", action="store_true",
+                    help="аудит ПИСАТЕЛЯ widget.width (v1.31, §37.9): канвас-режим, "
+                         "выделение ноды через canvas.selectNodes, ловушка со снятым "
+                         "стражем, открытие панели свойств, затем живая проверка "
+                         "hideInPanel")
     args = ap.parse_args()
 
     import websockets  # noqa: WPS433 — зависимость ComfyUI
@@ -529,6 +696,11 @@ async def main() -> int:
                 await asyncio.sleep(1.5)
 
             if args.trap:
+                # Без выделения ноды панель показывает глобальные параметры и наши
+                # виджеты не рендерит — тогда `hits: []` ничего не доказывает
+                # (§37.7). Выделяем штатным API канваса — работает в обоих режимах.
+                print(f"→ выделение ноды: {await cdp.eval(SELECT_NODE_JS)}")
+                await asyncio.sleep(0.8)
                 print(f"→ ловушка: {await cdp.eval(TRAP_JS)}")
                 # Долбёжка UI: панель открыть/закрыть ×3, зум туда-сюда,
                 # программный ресайз ноды (как тяга за угол)
@@ -551,8 +723,40 @@ async def main() -> int:
                 print("\n=== ЛОВУШКА: итог ===")
                 print(json.dumps(dump, ensure_ascii=False, indent=2))
                 if not dump.get("hits"):
-                    print("→ вывод: писатель НЕ сработал за сессию долбёжки "
-                          "(панель ×3, зум, ресайз). Значение — ископаемое, страж достаточен.")
+                    print("→ вывод: за сессию долбёжки записей width не было. НО прежде "
+                          "чем говорить «писателя нет», убедись, что панель РЕАЛЬНО "
+                          "отрисовала виджеты (panelWidgetRows/panelMirrors в "
+                          "`--audit-writer`, §37.7): без выделенной ноды панель их не "
+                          "рендерит, и ноль хитов не доказывает ничего.")
+
+            if args.audit_writer:
+                print(f"→ выделение ноды (canvas.selectNodes): {await cdp.eval(SELECT_NODE_JS)}")
+                await asyncio.sleep(1.0)
+                print(f"→ ловушка: {await cdp.eval(AUDIT_TRAP_JS)}")
+                await asyncio.sleep(0.5)
+                print(f"→ панель (strong): {json.dumps(await cdp.eval(OPEN_PANEL_STRONG_JS), ensure_ascii=False)}")
+                await asyncio.sleep(2.0)
+                print(f"→ состояние панели: {json.dumps(await cdp.eval(PANEL_DIAG_JS), ensure_ascii=False)}")
+                for _ in range(4):
+                    await asyncio.sleep(1.0)
+                    await cdp.eval("(() => { window.app.canvas.setDirty(true, true); return 1; })()")
+                print("\n=== ФАЗА 1: панель открыта, страж снят, ловушка стоит ===")
+                phase1 = await cdp.eval(AUDIT_DUMP_JS)
+                print(json.dumps(phase1, ensure_ascii=False, indent=2))
+                print("\n→ фикс: " + str(await cdp.eval(AUDIT_FIX_JS)))
+                await cdp.eval("(() => { app.extensionManager.setting.set('Comfy.RightSidePanel.IsOpen', false); return 1; })()")
+                await asyncio.sleep(1.5)
+                print(f"→ панель переоткрыта: {json.dumps(await cdp.eval(OPEN_PANEL_STRONG_JS), ensure_ascii=False)}")
+                await asyncio.sleep(1.5)
+                for _ in range(4):
+                    await asyncio.sleep(1.0)
+                    await cdp.eval("(() => { window.app.canvas.setDirty(true, true); return 1; })()")
+                print("\n=== ФАЗА 2: hideInPanel=true, панель переоткрыта ===")
+                phase2 = await cdp.eval(AUDIT_DUMP_JS)
+                print(json.dumps(phase2, ensure_ascii=False, indent=2))
+                delta = (phase2.get("hits") or 0) - (phase1.get("hits") or 0)
+                print(f"\n→ ВЫВОД: записей до фикса {(phase1.get('hits') or 0)}, "
+                      f"после {(phase2.get('hits') or 0)} (прирост {delta})")
 
             base = await cdp.eval(MEASURE_JS)
             print("\n=== ДО открытия панели ===")

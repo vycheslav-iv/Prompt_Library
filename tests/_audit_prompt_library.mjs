@@ -55,6 +55,16 @@ else ok("нет ссылок на удалённые механизмы (autoFit
 if (!/st\.dropAutoSockets\s*=/.test(js)) bad("dropAutoSockets не определён (нода не создастся)");
 else ok("dropAutoSockets определён");
 
+// Панель свойств не должна рендерить виджеты ноды (v1.32, §37): для типа `custom`
+// подходящего компонента в реестре нет, панель монтирует WidgetLegacy, а тот
+// пишет widget.width = ширину панели — DomWidgets.vue предпочитает widget.width
+// живой ширине ноды, и контент зажимается навсегда.
+if (!/browserWidget\.options\.hideInPanel\s*=\s*true/.test(js)) {
+  bad("pl_browser без options.hideInPanel — панель свойств зажмёт контент (§37)");
+} else ok("pl_browser скрыт из панели свойств (hideInPanel)");
+if (!/st\.unstickWidth\s*=\s*\(\)\s*=>/.test(js)) bad("страж unstickWidth удалён (§37)");
+else ok("страж unstickWidth на месте (страховка от заражённых сессий)");
+
 // виджет prompt удалён из INPUT_TYPES — в JS его быть не должно
 if (/\bname === "prompt"|widgets_values\[3\]/.test(js)) bad("JS ещё ожидает виджет prompt (удалён в v1.7)");
 else ok("нет ожиданий удалённого виджета prompt");

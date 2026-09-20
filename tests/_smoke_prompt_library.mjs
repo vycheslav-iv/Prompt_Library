@@ -240,7 +240,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.31-unstick-width");
+  check(`${tag}: версия JS видна`, st.version === "1.32-hide-in-panel");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -1311,6 +1311,27 @@ await run("редактирование: ✖ Отмена возвращает �
   } finally {
     appStub.extensionManager.dialog.confirm = origConfirm;
   }
+});
+
+// --- v1.32: панель свойств не трогает наши виджеты (§37.10) ------------------
+// Корень зажатия: панель рендерит виджеты узла; для типа `custom` компонента в
+// реестре нет → монтируется WidgetLegacy, который пишет widget.width = ширине
+// панели. Лечение — не пускать виджеты ноды в панель вообще (options.hideInPanel:
+// панель фильтрует по нему, остальной фронтенд — нет).
+await run("v1.32: виджеты ноды скрыты из панели свойств", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const w = node.widgets.find((x) => x.name === "pl_browser");
+  check("v1.32: pl_browser создан", !!w);
+  check("v1.32: pl_browser с hideInPanel (панель его не рендерит)",
+    !!(w && w.options && w.options.hideInPanel === true), JSON.stringify(w && w.options));
+  for (const name of ["selected", "save_folder", "pickup"]) {
+    const tw = node.widgets.find((x) => x.name === name);
+    check(`v1.32: технический ${name} с hideInPanel`,
+      !!(tw && tw.options && tw.options.hideInPanel === true));
+  }
+  // width мы по-прежнему никогда не задаём сами
+  check("v1.32: свой width не выставляется", !!w && w.width === undefined);
 });
 
 // --- v1.31: stale widget.width сносится (§37) --------------------------------

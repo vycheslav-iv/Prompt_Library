@@ -1,0 +1,7 @@
+{
+  "checks": [
+    { "label": "логика ноды (Python-песочница)", "cmd": "python tests/_test_prompt_library.py", "expect": ["FAIL: 0"] },
+    { "label": "JS-смоук (канвас + Vue)", "cmd": "node tests/_smoke_prompt_library.mjs", "expect": ["SMOKE OK", "phases ok:"] },
+    { "label": "статический аудит", "cmd": "node tests/_audit_prompt_library.mjs", "expect": ["аудит чист"] }
+  ]
+}

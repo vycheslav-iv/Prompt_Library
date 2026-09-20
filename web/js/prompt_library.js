@@ -77,7 +77,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.31-unstick-width";
+const PL_JS_VERSION = "1.32-hide-in-panel";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -90,14 +90,24 @@ app.registerExtension({
             const ret = origOnNodeCreated?.apply(this, arguments);
 
             // Скрыть технические selected/save_folder (ими управляет дерево и список)
+            // `hidden` (свойство) фронтенд учитывает на канвасе, но панель
+            // свойств фильтрует по `options.hidden`/`options.hideInPanel`
+            // (rightSidePanel/shared.ts → computedSectionDataList), поэтому
+            // техническим полям ставим и `hideInPanel` (v1.32): в панели они не
+            // нужны (ими управляют дерево и список), а любой лишний рендер
+            // виджета в панели — это лишний шанс, что панель тронет сам виджет.
+            // `w.options && …` — без падения, если у виджета options нет (нода
+            // обязана создаваться на любом фронтенде, SPEC §18.5).
             const selWidget = this.widgets?.find((w) => w.name === "selected");
             if (selWidget) {
                 selWidget.hidden = true;
+                selWidget.options && (selWidget.options.hideInPanel = true);
                 selWidget.computeSize = () => [0, -4];
             }
             const saveFolderW = this.widgets?.find((w) => w.name === "save_folder");
             if (saveFolderW) {
                 saveFolderW.hidden = true;
+                saveFolderW.options && (saveFolderW.options.hideInPanel = true);
                 saveFolderW.computeSize = () => [0, -4];
             }
             // Узел-источник подхвата (v1.25): значение пишет DOM-селектор,
@@ -105,6 +115,7 @@ app.registerExtension({
             const pickupW = this.widgets?.find((w) => w.name === "pickup");
             if (pickupW) {
                 pickupW.hidden = true;
+                pickupW.options && (pickupW.options.hideInPanel = true);
                 pickupW.computeSize = () => [0, -4];
             }
 
@@ -2190,14 +2201,28 @@ app.registerExtension({
             // pl_browser:"") — ставим свойство явно, иначе позиционный маппинг
             // widgets_values хрупок при добавлении виджетов.
             try { browserWidget.serialize = false; } catch (e) { /* silent */ }
-            // Страж ширины оверлея (v1.31, §37): DomWidgets.vue считает ширину
-            // обёртки КАЖДЫЙ кадр как (widget.width ?? node.width) - 2*margin.
-            // Если на виджете осело чужое widget.width (замерено живьём: 213
-            // при живой ширине ноды 1137 — обёртка застыла на 193px и контент
-            // зажат навсегда), ресайз ноды его не лечит, лечит только F5.
-            // Мы width никогда не задаём — сносим чужое, оверлей берёт живую
-            // ширину ноды. Только удаление свойства, никаких dirty/layout —
-            // петель нет по построению.
+            // КОРЕНЬ зажатия контента (v1.32, §37): панель свойств рендерит
+            // каждый виджет узла, а для типа `custom` (наш pl_browser) в реестре
+            // компонентов нет — панель монтирует WidgetLegacy.vue, который в
+            // draw() пишет `widgetInstance.width = canvasEl.parentElement.clientWidth`,
+            // т.е. ШИРИНУ ПАНЕЛИ — прямо в наш живой объект виджета. Дальше
+            // DomWidgets.vue каждый кадр считает ширину обёртки как
+            // `(widget.width ?? node.width) - 2*margin` — чужое число побеждает
+            // живую ширину ноды, обёртка застывает на ширине панели, контент
+            // зажат навсегда (замерено живьём: width=235 при ноде 1000 → обёртка
+            // 215; у пользователя 213 → 193). Лечил только F5 — свежий виджет
+            // без чужого width.
+            // Лечение — не давать панели вообще рендерить наш DOM-виджет (большой
+            // DOM-UI в панели бессмыслен: там он всё равно рисуется пустым
+            // canvas-зеркалом). Панель фильтрует по options.hideInPanel
+            // (rightSidePanel/shared.ts), остальной фронтенд этот флаг не читает:
+            // DOM-оверлей, Nodes 2.0 (WidgetDOM) и сериализация не затронуты.
+            try { browserWidget.options.hideInPanel = true; } catch (e) { /* silent */ }
+            // Страж (v1.31) остаётся страховкой: у уже заражённых сессий (вкладка,
+            // открытая до этой правки) чужое width лежит на виджете, и панель
+            // успела его записать до перезагрузки. Сносим чужое — оверлей берёт
+            // живую ширину ноды. Только удаление свойства, никаких dirty/layout —
+            // петель нет по построению. Мы width не задаём никогда.
             st.unstickWidth = () => {
                 try {
                     const w = this.widgets?.find((x) => x && x.name === "pl_browser");
