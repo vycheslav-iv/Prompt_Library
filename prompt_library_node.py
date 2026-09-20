@@ -1327,6 +1327,9 @@ try:
                 e["category"] = e["folder"]
                 e["hash"] = _dedup_hash(e["prompt"], e["folder"])
         _save_db(entries, sorted(new_folders))
+        # Обновляем закреплённые папки: переименованная папка и подпапки
+        _rename_pinned = lambda f: new + f[len(old):] if (f == old or f.startswith(old + "/")) else f
+        _save_pinned_folders([_rename_pinned(f) for f in _load_pinned_folders()])
         _broadcast_refresh()
         return web.json_response({"ok": True, "path": new})
 
@@ -1398,6 +1401,10 @@ try:
             moved_folders = len(renames)
 
         _save_db(entries, folders)
+        # Обновляем закреплённые папки: перемещённые папки получают новые пути
+        if isinstance(folder_paths, list) and new_parent is not None:
+            _rename_pinned = lambda f: next((new_f + f[len(old_f):] for old_f, new_f in renames.items() if f == old_f or f.startswith(old_f + "/")), f)
+            _save_pinned_folders([_rename_pinned(f) for f in _load_pinned_folders()])
         _broadcast_refresh()
         return web.json_response({"ok": True, "moved_entries": moved_entries, "moved_folders": moved_folders})
 
@@ -1417,6 +1424,7 @@ try:
                 e["category"] = ""
                 e["hash"] = _dedup_hash(e["prompt"], "")
         _save_db(entries, folders)
+        _save_pinned_folders([f for f in _load_pinned_folders() if f != path and not f.startswith(path + "/")])
         _broadcast_refresh()
         return web.json_response({"ok": True})
 
@@ -1444,6 +1452,8 @@ try:
                 e["category"] = ""
                 e["hash"] = _dedup_hash(e["prompt"], "")
         _save_db(entries, folders)
+        # Чистим закреплённые папки: удалённая папка и все подпапки больше не существуют
+        _save_pinned_folders([f for f in _load_pinned_folders() if not _killed(f)])
         _broadcast_refresh()
         return web.json_response({"ok": True, "deleted_folders": len(paths)})
 
