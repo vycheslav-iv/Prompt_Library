@@ -241,7 +241,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.34-folder-export");
+  check(`${tag}: версия JS видна`, st.version === "1.35-use-count");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);

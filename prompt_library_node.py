@@ -134,6 +134,8 @@ def _load_db():
         e.setdefault("media", None)
         # То же для закрепа (v1.30): старых записей с pinned нет, отсутствие = False.
         e.setdefault("pinned", False)
+        # Счётчик использований (v1.35): старым записям = 0.
+        e.setdefault("use_count", 0)
 
     # Папки из записей + родители для дерева
     fset = set(_norm_folder(f) for f in folders if _norm_folder(f))
@@ -543,20 +545,21 @@ def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None, m
             return e.get("id"), False
     entry_id = _new_id(h)
     entries.insert(0, {
-        "id": entry_id,
-        "hash": h,
-        "title": title.strip() or _auto_title(prompt),
-        "prompt": prompt,
-        "folder": folder,
-        "category": folder,  # legacy-дубль для совместимости
-        "favorite": False,
-        "pinned": False,  # закреп вверху папки (v1.30, §36)
-        "created_at": _now(),
-        "last_used": None,  # дата последней выдачи (как в библиотеке)
-        "preview": preview,  # уже относительный путь 'previews/{id}.png' или None
-        "workflow": workflow,  # снапшот воркфлоу (открытие с канваса); None = нет
-        "media": media,  # 'video' / 'image' / None (старые записи — None = неизвестно)
-    })
+            "id": entry_id,
+            "hash": h,
+            "title": title.strip() or _auto_title(prompt),
+            "prompt": prompt,
+            "folder": folder,
+            "category": folder,  # legacy-дубль для совместимости
+            "favorite": False,
+            "pinned": False,  # закреп вверху папки (v1.30, §36)
+            "created_at": _now(),
+            "last_used": None,  # дата последней выдачи (как в библиотеке)
+            "use_count": 0,  # счётчик выдач (для сортировки «Частые»)
+            "preview": preview,  # уже относительный путь 'previews/{id}.png' или None
+            "workflow": workflow,  # снапшот воркфлоу (открытие с канваса); None = нет
+            "media": media,  # 'video' / 'image' / None (старые записи — None = неизвестно)
+        })
     return entry_id, True
 
 
@@ -691,6 +694,7 @@ class PromptLibrary:
                 if e.get("id") == sel:
                     out_text = e.get("prompt", "")
                     e["last_used"] = _now()
+                    e["use_count"] = e.get("use_count", 0) + 1
                     dirty = True
                     break
 
@@ -807,6 +811,7 @@ class PromptLibrary:
                 "favorite": bool(e.get("favorite", False)),
                 "created_at": e.get("created_at", ""),
                 "last_used": e.get("last_used"),
+                "use_count": e.get("use_count", 0),
                 "has_preview": bool(e.get("preview")),
                 "has_workflow": bool(e.get("workflow")),
                 "media": e.get("media"),

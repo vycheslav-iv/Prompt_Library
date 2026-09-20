@@ -11,6 +11,7 @@ function plMap(e) {
         pinned: !!e.pinned, // закреп вверху папки (v1.30, §36)
         created_at: e.created_at || "",
         last_used: e.last_used || null,
+        use_count: e.use_count || 0, // счётчик выдач (v1.35, сортировка «Частые»)
         has_preview: !!e.preview,
         has_workflow: !!e.has_workflow,
         media: e.media || null, // 'video' / 'image' / null (старые записи — неизвестно)
@@ -77,7 +78,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.34-folder-export";
+const PL_JS_VERSION = "1.35-use-count";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -156,7 +157,8 @@ app.registerExtension({
                 <option value="new">Сначала новые</option>
                 <option value="title">По названию А–Я</option>
                 <option value="old">Сначала старые</option>
-                <option value="used">Недавно выданные</option>`;
+                <option value="used">Недавно выданные</option>
+                <option value="freq">Частые</option>`;
             // Режимы вида как в проводнике Windows
             const viewSel = document.createElement("select");
             viewSel.title = "Вид списка";
@@ -1643,6 +1645,7 @@ app.registerExtension({
                 if (by === "title") arr = [...arr].sort((a, b) => (a.title || a.head).localeCompare(b.title || b.head, "ru"));
                 else if (by === "old") arr = [...arr].sort((a, b) => ts(a.created_at) < ts(b.created_at) ? -1 : ts(a.created_at) > ts(b.created_at) ? 1 : 0);
                 else if (by === "used") arr = [...arr].sort((a, b) => ts(b.last_used || "") < ts(a.last_used || "") ? -1 : ts(b.last_used || "") > ts(a.last_used || "") ? 1 : 0);
+                else if (by === "freq") arr = [...arr].sort((a, b) => (b.use_count || 0) - (a.use_count || 0) || ts(b.last_used || "") < ts(a.last_used || "") ? -1 : ts(b.last_used || "") > ts(a.last_used || "") ? 1 : 0);
                 else arr = [...arr].sort((a, b) => ts(b.created_at) < ts(a.created_at) ? -1 : ts(b.created_at) > ts(a.created_at) ? 1 : 0);
                 // Закреп (v1.30, §36): ТОЛЬКО в папке — закреплённые всплывают
                 // поверх выбранного порядка, внутри групп порядок сохраняется.
@@ -1721,9 +1724,10 @@ app.registerExtension({
                     }
                     const meta = document.createElement("div");
                     meta.style.cssText = "color:#888;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                    const freq = e.use_count ? ` · ×${e.use_count}` : "";
                     meta.textContent = grid
-                        ? (e.folder || "Без категории")
-                        : `${e.folder || "Без категории"} · ${e.created_at || ""}${e.last_used ? " · выдана " + e.last_used : ""}`;
+                        ? (e.folder || "Без категории") + freq
+                        : `${e.folder || "Без категории"} · ${e.created_at || ""}${e.last_used ? " · выдана " + e.last_used : ""}${freq}`;
                     body.appendChild(meta);
 
                     const fav = document.createElement("button");
@@ -2082,7 +2086,8 @@ app.registerExtension({
                 try {
                     const f = full || {};
                     const mediaLabel = f.media === "video" ? " · 🎬 видео" : f.media === "image" ? " · 📷 фото" : "";
-                    st.dMeta.textContent = `№ ${f.id} · создана ${f.created_at || "—"} · выдана ${f.last_used || "—"}${mediaLabel}`;
+                    const freq = f.use_count ? ` · ×${f.use_count}` : "";
+                    st.dMeta.textContent = `№ ${f.id} · создана ${f.created_at || "—"} · выдана ${f.last_used || "—"}${freq}${mediaLabel}`;
                 } catch (e) { /* silent */ }
             };
 
