@@ -65,6 +65,29 @@ def _norm_folder(path):
     return "/".join(parts)
 
 
+def _sanitize_folder_path(path):
+    """Санитизирует путь папки для вывода по проводу.
+    Заменяет пробелы и нечитаемые символы на '_', исключает служебные ветки.
+    Пример: 'Пейзажи/Аляска' → 'Пейзажи/Аляска', 'Мои Пейзажи' → 'Мои_Пейзажи'
+    """
+    if not path or not isinstance(path, str):
+        return ""
+    parts = path.strip().replace("\\", "/").split("/")
+    if any(p.startswith("__") for p in parts if p):
+        return ""
+    cleaned = []
+    for part in parts:
+        if not part.strip():
+            continue
+        s = part.strip()
+        s = "".join(c if (c.isalnum() or c in "-_" or ord(c) > 127) else "_" for c in s)
+        s = re.sub(r"_+", "_", s)
+        s = s.strip("_")
+        if s:
+            cleaned.append(s)
+    return "/".join(cleaned)
+
+
 def _storage_folder(path):
     """Папка для ЗАПИСИ: нормализация + служебные ветки дерева
     (__all/__fav/__root) → корень. Один путь для execute() и роутов,
@@ -628,8 +651,8 @@ class PromptLibrary:
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("prompt_out",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("prompt_out", "category_out")
     FUNCTION = "execute"
     CATEGORY = "My_custom_nodes/Prompts"
     OUTPUT_NODE = True
@@ -862,7 +885,7 @@ class PromptLibrary:
                         "pickup": [pickup_token] if pickup_token else [],
                         "pickup_node": [pickup_node] if pickup_token else [],
                         "mode_notice": [notice]},
-                "result": (out_text,)}
+                "result": (out_text, _sanitize_folder_path(folder))}
 
 
 # --- HTTP-endpoints для JS ---------------------------------------------------
