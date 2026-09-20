@@ -7,9 +7,10 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-Реализация v1.36–v1.37: массовый drag-and-drop + закрепление папок в проводнике:
+Реализация v1.36–v1.37: массовый drag-and-drop + закрепление папок + вывод категории по проводу:
 - v1.36: `POST /prompt_library/move_many`, `POST /prompt_library/favorite_many`, drag-and-drop с массивами ID/путей, drop на ★ Избранное
 - v1.37: `POST /prompt_library/folder_pin`, `pinned_folders` в `library.json`, кнопка 📌/📍 в `folderRow`, закреплённые папки сортируются вверх
+- **Новая выходная ветка `category_out`** (v1.37): `RETURN_TYPES = ("STRING", "STRING")`, возвращает санитизированный путь категории (пробелы → "_", служебные ветки исключены)
 - **Найдены и исправлены 5 багов:** `_pl_folder_delete`, `_pl_folder_delete_many`, `_pl_folder_rename`, `_pl_move_many` не обновляли `pinned_folders`; `_pl_folder_pin` не валидировал `__` префикс
 - Обновлена `SPECIFICATION.md` до v1.37
 - Все тесты зелёные: Python 244/244, smoke 80/80, аудит 19 роутов
