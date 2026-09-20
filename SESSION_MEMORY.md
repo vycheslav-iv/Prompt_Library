@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (v1.35, 2026-09-20)
+# Память сессии — Prompt Library (v1.36, 2026-09-20)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,32 +7,30 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-Реализация v1.35: счётчик использований `use_count` + сортировка «Частые»:
-- Добавлено поле `use_count` в схему записи (default 0, миграция старых записей через `setdefault`)
-- Инкремент `use_count` при выдаче записи (режимы `📤 Выдача` / `📤📥 Выдача + запись`)
-- Добавлена опция «Частые» в селектор сортировки (value=`freq`, по убыванию `use_count`, затем `last_used` desc)
-- Отображение счётчика в мета-строке карточки как `×N` и в формуляре панели книги
-- Обновлена SPECIFICATION.md, версия JS `1.35-use-count`
+Реализация v1.36: массовое перемещение карточек и папок drag-and-drop:
+- Добавлен бэкенд эндпоинт `POST /prompt_library/move_many` для массового перемещения записей и папок
+- Модифицирован `card.ondragstart` — отправляет все помеченные entry IDs (`d.ids` массив)
+- Модифицирован `row.ondragstart` для папок — отправляет все помеченные folder paths (`d.paths` массив)
+- Модифицирован `plDrop` — обрабатывает массивы ID/путей, вызывает `/prompt_library/move_many`
+- Обновлён canvas drop — читает comma-separated IDs из `application/x-pl-entry`
+- Версия JS `1.36-bulk-move`
 - Все тесты зелёные: Python 244/244, smoke 80/80, аудит чист
 - Git-коммит и пуш, синхронизация в рабочую копию
 
 ## 2. Итоговое состояние кода
 
-- `prompt_library_node.py:558` — `use_count: 0` в `_add_entry` (новая запись)
-- `prompt_library_node.py:571` — `e.setdefault("use_count", 0)` миграция старых записей
-- `prompt_library_node.py:696` — `e["use_count"] = e.get("use_count", 0) + 1` при выдаче
-- `prompt_library_node.py:812` — `use_count` в UI payload
-- `web/js/prompt_library.js:81` — `PL_JS_VERSION = "1.35-use-count"`
-- `web/js/prompt_library.js:161` — опция `<option value="freq">Частые</option>`
-- `web/js/prompt_library.js:1648` — сортировка `freq`: `(b.use_count||0)-(a.use_count||0) || ts(b.last_used)...`
-- `web/js/prompt_library.js:1728` — мета-строка: `freq = e.use_count ? \` · ×${e.use_count}\` : ""`
-- `web/js/prompt_library.js:6` — `use_count` в `plMap()`
-- `web/js/prompt_library.js:2092` — формуляр панели: `freq = f.use_count ? \` · ×${f.use_count}\` : ""`
+- `prompt_library_node.py` — новый эндпоинт `_pl_move_many` (~1252)
+- `web/js/prompt_library.js:81` — `PL_JS_VERSION = "1.36-bulk-move"`
+- `web/js/prompt_library.js:1669` — `card.ondragstart` отправляет `d.ids` массив
+- `web/js/prompt_library.js:1471` — `row.ondragstart` отправляет `d.paths` массив
+- `web/js/prompt_library.js:1425` — `plDrop` обрабатывает массивы через `/prompt_library/move_many`
+- `web/js/prompt_library.js:849` — canvas drop читает comma-separated IDs
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- `entries.insert(0, {` потерял отступ (4 пробела) после правки — пофикшен ручным edit
-- Smoke тест проверял старую версию JS (`1.34-folder-export`) — обновлён на `1.35-use-count`
+- Drag-and-drop перемещал только один элемент при мультивыделении — фикс: отправка всех помеченных ID/путей
+- `plDrop` обрабатывал только один элемент — фикс: поддержка `d.ids` и `d.paths` массивов
+- Backend не имел bulk move эндпоинта — добавлен `_pl_move_many`
 
 ## 4. Что важно не сломать при продолжении работы
 
@@ -46,14 +44,14 @@
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-- Живая проверка сортировки «Частые» после рестарта ComfyUI: выбрать в селекторе, проверить порядок карточек.
-- Первичный смоук в ComfyUI: счётчик `×N` виден на карточках и в панели книги.
+- Живая проверка массового drag-and-drop в ComfyUI: выбрать Ctrl+клик несколько карточек/папок, перетащить в другую папку.
+- Проверить, что `application/x-pl-entry` на канвасе корректно обрабатывает несколько ID.
 
 ## 6. Связанные файлы
 
-- `prompt_library_node.py` — `_add_entry` (~547), `_load_db` (~571), `execute` (~696), UI payload (~812)
-- `web/js/prompt_library.js` — `PL_JS_VERSION` (81), sort options (161), sorting (1648), meta (1728), `plMap` (6), panel (2092)
-- `SPECIFICATION.md` — версия v1.35 (строка 3), схема записи (~93), поле use_count (~108), порядок категории (~272), критерии приёмки (~372)
+- `prompt_library_node.py` — `_pl_move_many` (~1252), `_pl_update` (~1128), `_pl_folder_rename` (~1222)
+- `web/js/prompt_library.js` — `PL_JS_VERSION` (81), `card.ondragstart` (1669), `row.ondragstart` (1471), `plDrop` (1425), canvas drop (849)
+- `SPECIFICATION.md` — версия v1.36
 - `tests/_smoke_prompt_library.mjs` — проверка версии JS (244)
 - `tests/_test_prompt_library.py` — 244/244
 - `tests/_audit_prompt_library.mjs` — 16 роутов чисты
