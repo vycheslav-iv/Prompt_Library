@@ -1173,10 +1173,13 @@ try:
     @_locked
     async def _pl_folder_pin(request, body=None):
         """Закреп/откреп папки в дереве проводника (v1.37)."""
-        folder_path = body.get("path", "")
+        folder_path = _norm_folder(body.get("path", ""))
         pinned = body.get("pinned", None)
-        if not folder_path:
+        if not folder_path or folder_path.startswith("__"):
             return web.json_response({"error": "path required"}, status=400)
+        entries, folders = _load_db()
+        if folder_path not in folders:
+            return web.json_response({"error": "folder not found"}, status=404)
         pinned_folders = _load_pinned_folders()
         fp_set = set(pinned_folders)
         if pinned is None:
