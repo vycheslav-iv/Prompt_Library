@@ -674,6 +674,7 @@ app.registerExtension({
                 progTrack, progFill, exportBtn,
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel, bExport,
                 entries: [], folders: [], full: new Map(),
+                pinnedFolders: new Set(),
                 // id записей, найденных серверным полнотекстовым поиском (v1.27);
                 // null = активного поиска нет (обычный локальный фильтр)
                 deepIds: null,
@@ -1055,6 +1056,7 @@ app.registerExtension({
                     const data = await r.json();
                     st.entries = (data.entries || []).map(plMap);
                     st.folders = data.folders || [];
+                    st.pinnedFolders = new Set(data.pinned_folders || []);
                     // Чистим протухшие метки (запись удалена в другой вкладке,
                     // папка переименована через ✏️): сервер мусор игнорирует,
                     // но bulk-бар не должен врать о числе помеченных.
@@ -1500,6 +1502,19 @@ app.registerExtension({
                     await st.plDrop(d, key);
                 };
                 if (isFolder) {
+                    const pn = document.createElement("button");
+                    pn.textContent = st.pinnedFolders.has(key) ? "📌" : "📍";
+                    pn.title = st.pinnedFolders.has(key) ? "Открепить из проводника" : "Закрепить в проводнике";
+                    pn.style.cssText = "background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;";
+                    pn.onclick = async (ev) => {
+                        ev.stopPropagation();
+                        try {
+                            const r = await st.apiPost("/prompt_library/folder_pin",
+                                { path: key, pinned: !st.pinnedFolders.has(key) });
+                            if (r.ok) { renderTree(); }
+                        } catch (e) { /* silent */ }
+                    };
+                    row.appendChild(pn);
                     const rn = document.createElement("button");
                     rn.textContent = "✏️"; rn.title = "Переименовать категорию (правка прямо в строке)";
                     rn.style.cssText = "background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;";
@@ -1581,7 +1596,14 @@ app.registerExtension({
                 st.tree.appendChild(folderRow("__all", "📚 Всё", 0, false));
                 st.tree.appendChild(folderRow("__fav", "★ Избранное", 0, false));
                 st.tree.appendChild(folderRow("__root", "📥 Без категории", 0, false));
-                const all = [...new Set([...st.folders, ...st.entries.map((e) => e.folder).filter(Boolean)])].sort();
+                const all = [...new Set([...st.folders, ...st.entries.map((e) => e.folder).filter(Boolean)])];
+                all.sort((a, b) => {
+                    const aP = st.pinnedFolders.has(a);
+                    const bP = st.pinnedFolders.has(b);
+                    if (aP && !bP) return -1;
+                    if (!aP && bP) return 1;
+                    return a.localeCompare(b);
+                });
                 const kids = new Map(); // parent -> [childPath]
                 for (const f of all) {
                     const parent = f.split("/").slice(0, -1).join("/");

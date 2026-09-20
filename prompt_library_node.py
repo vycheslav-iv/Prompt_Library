@@ -150,11 +150,43 @@ def _load_db():
     return entries, folders
 
 
+def _load_pinned_folders():
+    root = _ensure_dirs()
+    lib = root / "library.json"
+    if not lib.exists():
+        return []
+    try:
+        data = json.loads(lib.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(data, dict) and isinstance(data.get("pinned_folders"), list):
+        return [f for f in data["pinned_folders"] if isinstance(f, str) and f]
+    return []
+
+
+def _save_pinned_folders(pinned):
+    root = _ensure_dirs()
+    lib = root / "library.json"
+    if not lib.exists():
+        return
+    try:
+        data = json.loads(lib.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if isinstance(data, dict):
+        data["pinned_folders"] = sorted(set(pinned))
+        tmp = root / "library.json.tmp"
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, lib)
+
+
 def _save_db(entries, folders):
     root = _ensure_dirs()
     lib = root / "library.json"
     tmp = root / "library.json.tmp"
-    tmp.write_text(json.dumps({"entries": entries, "folders": sorted(set(folders))},
+    pinned = _load_pinned_folders()
+    tmp.write_text(json.dumps({"entries": entries, "folders": sorted(set(folders)),
+                                 "pinned_folders": pinned},
                               ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, lib)
 
@@ -1031,8 +1063,10 @@ try:
     @_locked_get
     async def _pl_list(request):
         entries, folders = _load_db()
+        pinned_folders = _load_pinned_folders()
         return web.json_response({"entries": [_strip_entry(e) for e in entries[:MAX_ENTRIES]],
-                                  "folders": folders})
+                                  "folders": folders,
+                                  "pinned_folders": pinned_folders})
 
     @routes.get("/prompt_library/entry")
     @_locked_get
@@ -1134,6 +1168,26 @@ try:
             _save_db(entries, folders)
             _broadcast_refresh()
         return web.json_response({"ok": True, "marked": marked})
+
+    @routes.post("/prompt_library/folder_pin")
+    @_locked
+    async def _pl_folder_pin(request, body=None):
+        """Закреп/откреп папки в дереве проводника (v1.37)."""
+        folder_path = body.get("path", "")
+        pinned = body.get("pinned", None)
+        if not folder_path:
+            return web.json_response({"error": "path required"}, status=400)
+        pinned_folders = _load_pinned_folders()
+        fp_set = set(pinned_folders)
+        if pinned is None:
+            pinned = folder_path not in fp_set
+        if pinned:
+            fp_set.add(folder_path)
+        else:
+            fp_set.discard(folder_path)
+        _save_pinned_folders(fp_set)
+        _broadcast_refresh()
+        return web.json_response({"ok": True, "pinned": folder_path in fp_set})
 
     @routes.post("/prompt_library/pin")
     @_locked
