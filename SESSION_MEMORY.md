@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (v1.34, 2026-09-20)
+# Память сессии — Prompt Library (v1.35, 2026-09-20)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,33 +7,32 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-Реализация v1.34 массового экспорта на диск по фидбеку пользователя:
-- Одна **умная кнопка «📤 Экспорт»** в шапке проводника (рядом с «+ Категория»): при активных метках (Ctrl/Shift) экспортирует отмеченные записи и категории, без меток — текущую выбранную категорию («Всё», «Избранное», «Без категории» — вся база).
-- Прогресс-бар **резиновый** (`flex:1 1 0`, height 12px) — растягивается с нодой, во время экспорта скрывает подсказку, после экспорта возвращает.
-- Удалена **bulk-кнопка экспорта** из нижней строки (шум, переработано).
-- Обновлена документация (SPECIFICATION.md, README.md), smoke-тесты (80 фаз), Python-песочница (244/244), аудит чист.
-- Синхронизация в рабочую копию ComfyUI (`D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library`).
-- Git-коммит и пуш выполнены.
+Реализация v1.35: счётчик использований `use_count` + сортировка «Частые»:
+- Добавлено поле `use_count` в схему записи (default 0, миграция старых записей через `setdefault`)
+- Инкремент `use_count` при выдаче записи (режимы `📤 Выдача` / `📤📥 Выдача + запись`)
+- Добавлена опция «Частые» в селектор сортировки (value=`freq`, по убыванию `use_count`, затем `last_used` desc)
+- Отображение счётчика в мета-строке карточки как `×N` и в формуляре панели книги
+- Обновлена SPECIFICATION.md, версия JS `1.35-use-count`
+- Все тесты зелёные: Python 244/244, smoke 80/80, аудит чист
+- Git-коммит и пуш, синхронизация в рабочую копию
 
 ## 2. Итоговое состояние кода
 
-- `web/js/prompt_library.js` (2781 строка), `PL_JS_VERSION = "1.34-folder-export"`:
-  - `exportBtn` (~:382-391) — умный: `onclick` возвращает Promise, при метках → `st.exportMarked()`, без меток → `st.exportFolder(st.selFolder || "__all")`; `title` перезаписан.
-  - `progTrack` (~:446-460) — резиновый (`flex:1 1 0;min-width:0;height:12px;...`), `setExportProgress` скрывает `st.hint` на время показа, возвращает после.
-  - `bulkExport` полностью удалён из JS: создание, `appendChild`, поле `st` (осталось `bulkCount, bulkDel, bulkClear,`), строка видимости в `renderHint`.
-  - `st.exportMarked` (~:2379) — экспорт отмеченного (записи + категории), без помеченного — тихо, без диалога.
-- `tests/_smoke_prompt_library.mjs` — фаза 86 `exportMarked`, новая фаза 87 «умная кнопка экспорта»: проверки `exportMarked`/`exportFolder`, `folderCalls` (перехват `exportFolder`), отсутствие `bulkExport` в `st`; 80 фаз ok.
-- `tests/_test_prompt_library.py` — 244/244 ok.
-- `SPECIFICATION.md` — обновлены §39 (кнопки, хроника, таблица), строка 3, §17, хроника 27, таблица ~:362, README ~:85,87.
-- `README.md` — одна умная кнопка в шапке, без 📤 на строках, резиновый прогресс-бар, обновлённые биуллеты.
-- `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library` — синхронизирована через `sync.py`.
-- `check.json` — `python _process/check.py Prompt_Library` зелёный (0 ошибок).
+- `prompt_library_node.py:558` — `use_count: 0` в `_add_entry` (новая запись)
+- `prompt_library_node.py:571` — `e.setdefault("use_count", 0)` миграция старых записей
+- `prompt_library_node.py:696` — `e["use_count"] = e.get("use_count", 0) + 1` при выдаче
+- `prompt_library_node.py:812` — `use_count` в UI payload
+- `web/js/prompt_library.js:81` — `PL_JS_VERSION = "1.35-use-count"`
+- `web/js/prompt_library.js:161` — опция `<option value="freq">Частые</option>`
+- `web/js/prompt_library.js:1648` — сортировка `freq`: `(b.use_count||0)-(a.use_count||0) || ts(b.last_used)...`
+- `web/js/prompt_library.js:1728` — мета-строка: `freq = e.use_count ? \` · ×${e.use_count}\` : ""`
+- `web/js/prompt_library.js:6` — `use_count` в `plMap()`
+- `web/js/prompt_library.js:2092` — формуляр панели: `freq = f.use_count ? \` · ×${f.use_count}\` : ""`
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- `exportBtn.onclick` изначально не возвращал Promise — `await` в тесте не дожидался экспорта. Исправлен: `return st.exportMarked?.()` / `return st.exportFolder?.(...)`.
-- В фазе «без меток» оставил шпиона `st.exportFolder`, который ничего не пишет — проверки не писали файлы. Переписано: шпион только для проверки вызова, экспорт идёт настоящим методом.
-- Фаза «все база (__all)» имела неверное ожидание имен файлов (S2 с папкой «Без папки» сохраняет дерево) — исправлено на `Без папки/Запись два.md`.
+- `entries.insert(0, {` потерял отступ (4 пробела) после правки — пофикшен ручным edit
+- Smoke тест проверял старую версию JS (`1.34-folder-export`) — обновлён на `1.35-use-count`
 
 ## 4. Что важно не сломать при продолжении работы
 
@@ -47,18 +46,17 @@
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-- Живая проверка экспорта после рестарта ComfyUI: открыть панель книги, умная кнопка «📤 Экспорт», выбрать папку; с метками → отмеченное, без меток → категория/вся база.
-- Первичный смоук в ComfyUI: кнопка не должна лагать, панель не должна менять высоту.
-- Возможность экспорта без File System Access API (Firefox/Safari) — стая подсказка.
+- Живая проверка сортировки «Частые» после рестарта ComfyUI: выбрать в селекторе, проверить порядок карточек.
+- Первичный смоук в ComfyUI: счётчик `×N` виден на карточках и в панели книги.
 
 ## 6. Связанные файлы
 
-- `web/js/prompt_library.js` — `exportBtn` ~:382, `progTrack` ~:446, `exportMarked` ~:2379.
-- `SPECIFICATION.md` — §39, строка 3, §17, хроника 27, таблица ~:362.
-- `README.md` — строки ~:85, ~:87.
-- `tests/_smoke_prompt_library.mjs` — фазы 86/87, 80 фаз ok.
-- `tests/_test_prompt_library.py` — 244/244.
-- `tests/_audit_prompt_library.mjs` — 16 роутов чисты.
-- `check.json` — `python _process/check.py Prompt_Library`.
-- `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library` — рабочая копия.
-- `SESSION_MEMORY-history/2026-09-20-0845.md` — снапшот перед перезаписью.
+- `prompt_library_node.py` — `_add_entry` (~547), `_load_db` (~571), `execute` (~696), UI payload (~812)
+- `web/js/prompt_library.js` — `PL_JS_VERSION` (81), sort options (161), sorting (1648), meta (1728), `plMap` (6), panel (2092)
+- `SPECIFICATION.md` — версия v1.35 (строка 3), схема записи (~93), поле use_count (~108), порядок категории (~272), критерии приёмки (~372)
+- `tests/_smoke_prompt_library.mjs` — проверка версии JS (244)
+- `tests/_test_prompt_library.py` — 244/244
+- `tests/_audit_prompt_library.mjs` — 16 роутов чисты
+- `check.json` — `python _process/check.py Prompt_Library`
+- `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library` — рабочая копия
+- `SESSION_MEMORY-history/2026-09-20-1700.md` — снапшот перед перезаписью

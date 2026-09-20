@@ -1249,6 +1249,77 @@ try:
         _broadcast_refresh()
         return web.json_response({"ok": True, "path": new})
 
+    @routes.post("/prompt_library/move_many")
+    @_locked
+    async def _pl_move_many(request, body=None):
+        """Массовое перемещение записей и/или папок.
+        Тело: { entry_ids: [...], folder: dest } или { folder_paths: [...], new_parent: dest }"""
+        entry_ids = body.get("entry_ids", None)
+        folder_dest = body.get("folder", None)
+        folder_paths = body.get("folder_paths", None)
+        new_parent = body.get("new_parent", None)
+
+        entries, folders = _load_db()
+        moved_entries = 0
+        moved_folders = 0
+
+        # Перемещение записей в папку
+        if isinstance(entry_ids, list) and folder_dest is not None:
+            folder_dest = _storage_folder(folder_dest)
+            want = {i for i in entry_ids if isinstance(i, str) and i}
+            for e in entries:
+                if e.get("id") in want and e.get("folder", "") != folder_dest:
+                    e["folder"] = folder_dest
+                    e["category"] = e["folder"]
+                    e["hash"] = _dedup_hash(e["prompt"], e["folder"])
+                    moved_entries += 1
+            if want:
+                folders = sorted(set(folders) | {folder_dest} | set(_parent_folders(folder_dest)))
+
+        # Перемещение папок в новый родитель
+        if isinstance(folder_paths, list) and new_parent is not None:
+            new_parent = _norm_folder(new_parent)
+            if new_parent.startswith("__"):
+                return web.json_response({"error": "reserved name"}, status=400)
+            paths = {_norm_folder(p) for p in folder_paths if isinstance(p, str) and p}
+            # Сначала собираем все переименования (чтобы не конфликтовали)
+            renames = {}
+            for f in sorted(paths):
+                leaf = f.split("/")[-1]
+                new_f = f"{new_parent}/{leaf}" if new_parent else leaf
+                if new_f == f or new_f.startswith(f + "/"):
+                    continue
+                renames[f] = new_f
+            # Применяем переименования
+            for e in entries:
+                ef = e.get("folder", "")
+                for old_f, new_f in renames.items():
+                    if ef == old_f or ef.startswith(old_f + "/"):
+                        e["folder"] = new_f + ef[len(old_f):]
+                        e["category"] = e["folder"]
+                        e["hash"] = _dedup_hash(e["prompt"], e["folder"])
+            # Обновляем список папок
+            new_folders = set()
+            for f in folders:
+                found = False
+                for old_f, new_f in renames.items():
+                    if f == old_f:
+                        new_folders.add(new_f)
+                        found = True
+                        break
+                    if f.startswith(old_f + "/"):
+                        new_folders.add(new_f + f[len(old_f):])
+                        found = True
+                        break
+                if not found:
+                    new_folders.add(f)
+            folders = sorted(new_folders)
+            moved_folders = len(renames)
+
+        _save_db(entries, folders)
+        _broadcast_refresh()
+        return web.json_response({"ok": True, "moved_entries": moved_entries, "moved_folders": moved_folders})
+
     @routes.post("/prompt_library/folder_delete")
     @_locked
     async def _pl_folder_delete(request, body=None):

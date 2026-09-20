@@ -78,7 +78,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.35-use-count";
+const PL_JS_VERSION = "1.36-bulk-move";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -847,21 +847,19 @@ app.registerExtension({
                         } catch (e) { /* silent */ }
                     }, true);
                     cv.addEventListener("drop", async (ev) => {
-                        let id = null;
+                        let ids = null;
                         try {
                             const t = (ev.dataTransfer && ev.dataTransfer.types) || [];
                             if (!Array.prototype.includes.call(t, "application/x-pl-entry")) return;
-                            id = ev.dataTransfer.getData("application/x-pl-entry") || null;
+                            const raw = ev.dataTransfer.getData("application/x-pl-entry") || null;
+                            if (raw) ids = raw.split(",").filter(Boolean);
                         } catch (e) { return; }
-                        if (!id) return;
+                        if (!ids || !ids.length) return;
                         ev.preventDefault();
                         if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-                        // Слушатель ставится ОДИН раз на страницу (hookCanvasDrop),
-                        // поэтому держит замыкание той ноды, что поставила хук, — её
-                        // могли уже удалить. Берём состояние живой ноды, если есть.
                         let live = null;
                         try { for (const s of plLiveStates) { live = s; break; } } catch (e) { /* silent */ }
-                        await (live || st).openWorkflow(id);
+                        await (live || st).openWorkflow(ids[0]);
                     }, true);
                     window.__plCanvasDropHooked = true;
                 } catch (e) { /* silent */ }
@@ -1426,27 +1424,20 @@ app.registerExtension({
                 if (!d) return;
                 try {
                     if (d.kind === "entry") {
+                        const ids = d.ids || (d.id ? [d.id] : []);
+                        if (!ids.length) return;
                         const dest = target && !target.startsWith("__") ? target : (target === "__root" ? "" : null);
                         if (dest === null) return;
-                        const e = st.entries.find((x) => x.id === d.id);
-                        if (!e || e.folder === dest) return;
-                        await st.apiPost("/prompt_library/update", { id: d.id, folder: dest });
-                        st.full.delete(d.id);
-                        await reload();
+                        const moved = await st.apiPost("/prompt_library/move_many", { entry_ids: ids, folder: dest });
+                        if (moved.ok) { st.full.clear(); await reload(); }
                     } else if (d.kind === "folder") {
-                        const src = d.path;
-                        const dest = (!target || target === "__all" || target === "__root")
-                            ? src.split("/").pop()
-                            : target + "/" + src.split("/").pop();
-                        if (dest === src || dest.startsWith(src + "/")) return;
-                        const r = await st.apiPost("/prompt_library/folder_rename", { old: src, new: dest });
-                        if (r.ok) {
-                            if (st.selFolder === src || st.selFolder.startsWith(src + "/")) {
-                                st.selFolder = dest + st.selFolder.slice(src.length);
-                            }
-                            st.syncSaveFolder();
-                            await reload();
-                        }
+                        const paths = d.paths || (d.path ? [d.path] : []);
+                        if (!paths.length) return;
+                        const new_parent = (!target || target === "__all" || target === "__root")
+                            ? ""
+                            : target;
+                        const moved = await st.apiPost("/prompt_library/move_many", { folder_paths: paths, new_parent });
+                        if (moved.ok) { st.syncSaveFolder(); await reload(); }
                     }
                 } catch (e) { /* silent */ }
             };
@@ -1478,7 +1469,8 @@ app.registerExtension({
                 row.draggable = isFolder;
                 if (isFolder) {
                     row.ondragstart = (ev) => {
-                        ev.dataTransfer.setData("text/plain", JSON.stringify({ kind: "folder", path: key }));
+                        const paths = st.markFolders.size > 1 ? [...st.markFolders] : [key];
+                        ev.dataTransfer.setData("text/plain", JSON.stringify({ kind: "folder", paths }));
                         ev.dataTransfer.effectAllowed = "move";
                         ev.stopPropagation();
                     };
@@ -1675,11 +1667,11 @@ app.registerExtension({
                         : "Воркфлоу нет (ручная запись) — прогони Queue, и воркфлоу прикрепится")
                         + " · Ctrl+клик — пометить, Shift+клик — диапазон";
                     card.ondragstart = (ev) => {
-                        ev.dataTransfer.setData("text/plain", JSON.stringify({ kind: "entry", id: e.id }));
-                        try { ev.dataTransfer.setData("application/x-pl-entry", e.id); } catch (err) { /* silent */ }
-                        // copyMove: на папку — move, на канвас — copy (dropEffect обязан
-                        // входить в effectAllowed, иначе браузер показывает запрет и блочит drop)
+                        const ids = st.markEntries.size > 1 ? [...st.markEntries] : [e.id];
+                        ev.dataTransfer.setData("text/plain", JSON.stringify({ kind: "entry", ids }));
+                        try { ev.dataTransfer.setData("application/x-pl-entry", ids.join(",")); } catch (err) { /* silent */ }
                         ev.dataTransfer.effectAllowed = "copyMove";
+                        ev.stopPropagation();
                     };
                     // Помеченные — левая акцент-полоса (inset box-shadow: на layout
                     // не влияет, в отличие от border) + тёплая подложка
