@@ -1583,8 +1583,9 @@ await run("v1.27: метка кэша превью чистится при уд�
 
 // --- v1.33: экспорт записи в папку на диске (§38) ----------------------------
 // Кнопка «💾 Сохранить в папку» в панели книги: по клику открывается системный
-// выбор папки (showDirectoryPicker), в неё пишутся <title>.md (текст + метаданные)
-// и, если у записи есть обложка, <title>.png/.jpg.
+// выбор папки (showDirectoryPicker). С обложкой — создаётся ПОДПАПКА <title>/ и
+// в неё пишутся <title>.md + обложка <title>.png/.jpg; без обложки — только
+// <title>.md прямо в выбранную папку (подпапку не плодим).
 let pickerCalled = false;
 await run("v1.33: экспорт записи в папку (кнопка + файлы + метаданные)", async () => {
   const node = makeNode();
@@ -1592,23 +1593,22 @@ await run("v1.33: экспорт записи в папку (кнопка + фа
   proto.onNodeCreated.call(node);
   const st = node._pl;
 
-  // Какие файлы «записаны» в выбранную папку и с каким содержимым
+  // Фейковый FileSystemDirectoryHandle: getDirectoryHandle создаёт подпапку,
+  // getFileHandle кладёт файл в текущую папку (путь с префиксом подпапок)
   const files = [];
-  const fakeDirHandle = {
-    getFileHandle: async (name) => {
-      const blobBytes = null;
-      return {
-        createWritable: async () => {
-          let content = "";
-          for (const chunk of []) { content += chunk; }
-          return {
-            write: async (chunk) => { content = chunk; },
-            close: async () => { files.push({ name, content }); },
-          };
-        },
-      };
-    },
-  };
+  const makeDir = (prefix) => ({
+    getFileHandle: async (name) => ({
+      createWritable: async () => {
+        let content = "";
+        return {
+          write: async (chunk) => { content = chunk; },
+          close: async () => { files.push({ name: prefix + name, content }); },
+        };
+      },
+    }),
+    getDirectoryHandle: async (name) => makeDir(prefix + name + "/"),
+  });
+  const fakeDirHandle = makeDir("");
 
   const origFetch = sandbox.fetch;
   const origPicker = windowStub.showDirectoryPicker;
@@ -1639,18 +1639,24 @@ await run("v1.33: экспорт записи в папку (кнопка + фа
     check("v1.33: текст кнопки — «Сохранить в папку»",
       String(st.bExport.textContent).includes("Сохранить в папку"), st.bExport.textContent);
 
-    // Клик → диалог выбора папки → файлы записаны
+    // Клик → диалог выбора папки → создана ПОДПАПКА с названием, файлы внутри
     files.length = 0;
     await st.exportEntry();
     check("v1.33: диалог выбора папки открылся", pickerCalled === true);
+    check("v1.33: подпапка <title>/ + файлы внутри неё (обложка есть)",
+      files.length === 2
+        && files.every((f) => f.name.startsWith("Запись _важная_ _ фото_/")),
+      files.map((f) => f.name).join(","));
 
     // Имя файла: разбор строки, мы вырезаем спецсимволы файловой системы
     const md = files.find((f) => f.name.endsWith(".md"));
     const img = files.find((f) => f.name.endsWith(".png"));
-    check("v1.33: записан .md с очищенным названием", !!md && md.name === "Запись _важная_ _ фото_.md",
+    check("v1.33: .md лежит в подпапке с очищенным названием",
+      !!md && md.name === "Запись _важная_ _ фото_/Запись _важная_ _ фото_.md",
       files.map((f) => f.name).join(","));
-    check("v1.33: записана обложка (превью есть) в .png",
-      !!img && img.name === "Запись _важная_ _ фото_.png");
+    check("v1.33: обложка лежит в той же подпапке (.png)",
+      !!img && img.name === "Запись _важная_ _ фото_/Запись _важная_ _ фото_.png",
+      files.map((f) => f.name).join(","));
     check("v1.33: текст промпта попал в .md", !!md && String(md.content).includes("красивая девушка в парке"),
       String(md.content));
     check("v1.33: метаданные в .md (категория + тип + избранное)",

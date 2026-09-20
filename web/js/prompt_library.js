@@ -610,11 +610,12 @@ app.registerExtension({
             bWorkflow.onclick = () => { try { st.openWorkflow?.(st.detailId); } catch (e) { /* silent */ } };
 
             // Экспорт записи в папку на диске (v1.33, §38): по клику —
-            // системный выбор папки (showDirectoryPicker, Chrome/Edge), в неё
-            // пишутся <title>.md (текст + метаданные) и, если есть превью,
-            // <title>.png/.jpg. Никаких тонких мест вроде sizing — файл
-            // сохраняется браузером напрямую в выбранную папку.
-            const bExport = mkBtn("💾 Сохранить в папку", "Сохранить текст записи (.md) и обложку (если есть) в выбранную на диске папку");
+            // системный выбор папки (showDirectoryPicker, Chrome/Edge). С
+            // обложкой — создаётся подпапка <title>/ и в неё пишутся <title>.md
+            // (текст + метаданные) + обложка; без обложки — только <title>.md
+            // прямо в выбранную папку. Никаких тонких мест вроде sizing — файл
+            // сохраняется браузером напрямую.
+            const bExport = mkBtn("💾 Сохранить в папку", "Сохранить запись на диск: с обложкой — в подпапку <название>/, без обложки — файл .md в выбранную папку");
             bExport.onclick = () => { try { st.exportEntry?.(); } catch (e) { /* silent */ } };
             dBtns.appendChild(bExport);
 
@@ -2094,10 +2095,13 @@ app.registerExtension({
 
             // --- Экспорт записи в папку на диске (v1.33, §38) -----------------
             // По клику кнопки открываем системный выбор папки (File System Access
-            // API, Chrome/Edge), пишем <title>.md (текст + метаданные) и, если у
-            // записи есть обложка, <title>.png/.jpg (байты берём тем же роутом
-            // /prompt_library/preview, что и карточка — никаких дополнительных
-            // данных серверу не нужно). Имя файла — из названия записи,
+            // API, Chrome/Edge). Куда лягут файлы — зависит от содержимого записи:
+            //   • обложки НЕТ   → пишем <title>.md в выбранную папку напрямую;
+            //   • обложка ЕСТЬ  → создаём ПОДПАПКУ <title>/ и пишем в неё
+            //     <title>.md + <title>.png/.jpg (байты обложки — роутом
+            //     /prompt_library/preview, расширение по blob.type).
+            // Подпапку плодим только когда есть что кроме текста — пустую директорию
+            // ради одного файла не создаём. Имя файла/папки — из названия записи,
             // недопустимые для файловой системы символы вырезаются.
             st.sanitizeFileName = (name) => {
                 const s = String(name || "").trim();
@@ -2119,22 +2123,31 @@ app.registerExtension({
                     full.prompt || "",
                     "",
                 ].join("\n");
-                const fh = await dirHandle.getFileHandle(`${title}.md`, { create: true });
+                // Куда писать: подпапка с названием записи — только при обложке.
+                let writeTo = dirHandle;
+                let prefix = "";
+                if (full.preview) {
+                    try {
+                        writeTo = await dirHandle.getDirectoryHandle(title, { create: true });
+                        prefix = `${title}/`;
+                    } catch (e) { /* подпапка не создалась — пишем в выбранную папку */ }
+                }
+                const fh = await writeTo.getFileHandle(`${title}.md`, { create: true });
                 const wtr = await fh.createWritable();
                 await wtr.write(md);
                 await wtr.close();
-                written.push(`${title}.md`);
+                written.push(`${prefix}${title}.md`);
                 if (full.preview) {
                     try {
                         const r = await fetch(`/prompt_library/preview?id=${encodeURIComponent(full.id)}`);
                         if (r.ok) {
                             const blob = await r.blob();
                             const ext = String(blob.type || "").includes("jpeg") ? ".jpg" : ".png";
-                            const imgFh = await dirHandle.getFileHandle(`${title}${ext}`, { create: true });
+                            const imgFh = await writeTo.getFileHandle(`${title}${ext}`, { create: true });
                             const imgWtr = await imgFh.createWritable();
                             await imgWtr.write(blob);
                             await imgWtr.close();
-                            written.push(`${title}${ext}`);
+                            written.push(`${prefix}${title}${ext}`);
                         }
                     } catch (e) { /* превью — опционально */ }
                 }
