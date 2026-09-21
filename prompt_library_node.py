@@ -680,6 +680,13 @@ class PromptLibrary:
         исполняет её каждый Queue (штатный механизм IS_CHANGED). Без подхвата
         возвращаем None — нода кэшируется как обычно.
         """
+        # mode — COMBO, ComfyUI может передавать его как список;
+        # любое изменение mode требует перевыполнения (смена режима = другое поведение).
+        mode_val = kwargs.get("mode")
+        if isinstance(mode_val, (list, tuple)):
+            mode_val = mode_val[0] if len(mode_val) else ""
+        if str(mode_val or "").strip():
+            return float("nan")
         val = kwargs.get("pickup")
         if isinstance(val, (list, tuple)):
             # Страховка: до разворачивания ComfyUI держит виджетные входы
@@ -702,6 +709,10 @@ class PromptLibrary:
 
     def _execute(self, mode="", selected="", save_folder="", pickup="", source=None, image=None,
                  extra_pnginfo=None, unique_id=None, **kwargs):
+        # mode может прийти как список (ComfyUI COMBO через map-over-list) —
+        # приводим к строке, как уже делаем для pickup.
+        if isinstance(mode, (list, tuple)):
+            mode = mode[0] if len(mode) else ""
         # Папка сохранения = выбранная в дереве (скрытый save_folder, пишет JS).
         # Совместимость: старые workflow несли folder/category виджетом
         folder = save_folder or kwargs.get("folder", "") or kwargs.get("category", "")
