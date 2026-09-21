@@ -1,4 +1,4 @@
-"""Живая проба кэша ComfyUI для ноды PromptLibrary (v1.41).
+"""Живая проба кэша ComfyUI для ноды PromptLibrary (v1.42).
 
 Зачем: v1.41 убрала проверку `mode` из `IS_CHANGED` — в v1.39 она делала
 `float("nan")` безусловным, и ComfyUI перестал кэшировать ноду: каждый Queue
@@ -122,7 +122,7 @@ def main():
     except (AttributeError, OSError):
         pass
 
-    ap = argparse.ArgumentParser(description="Живая проба кэша PromptLibrary (v1.41)")
+    ap = argparse.ArgumentParser(description="Живая проба кэша PromptLibrary (v1.42)")
     ap.add_argument("--url", default="http://127.0.0.1:8188",
                     help="адрес запущенного ComfyUI (по умолчанию http://127.0.0.1:8188)")
     ap.add_argument("--json", action="store_true", help="машинный вывод")

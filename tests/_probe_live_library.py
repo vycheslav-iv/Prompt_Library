@@ -1,4 +1,4 @@
-"""Живой аудит данных библиотеки PromptLibrary (v1.41) — с защитой от правки базы.
+"""Живой аудит данных библиотеки PromptLibrary v1.42 — с защитой от правки базы.
 
 Зачем: согласованность РЕАЛЬНЫХ данных пользователя (`user/prompt_library/`) —
 существует ли файл графа, нет ли сирот в `workflows/` и `previews/`, не врёт ли
@@ -199,7 +199,7 @@ def main():
     except (AttributeError, OSError):
         pass
 
-    ap = argparse.ArgumentParser(description="Живой аудит данных PromptLibrary (v1.41)")
+    ap = argparse.ArgumentParser(description="Живой аудит данных PromptLibrary v1.42")
     ap.add_argument("--root", help="папка базы (по умолчанию берётся из sync.py)")
     ap.add_argument("--url", default="http://127.0.0.1:8188", help="адрес ComfyUI для API-проверок")
     ap.add_argument("--no-api", action="store_true", help="не ходить на сервер вовсе")

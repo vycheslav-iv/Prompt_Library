@@ -450,6 +450,7 @@ def _save_thumbnail(image, entry_id, workflow=None):
         pnginfo = _workflow_pnginfo(workflow)
         kw = {"pnginfo": pnginfo} if pnginfo is not None else {}
         img.convert("RGB").save(root / "previews" / name, "PNG", **kw)
+        _drop_legacy_preview_file(entry_id)
         return f"previews/{name}"
     except Exception as e:
         print(f"[PromptLibrary] thumbnail failed: {e}", flush=True)
@@ -514,6 +515,7 @@ def _save_preview_upload(data_url, entry_id, workflow=None):
         pnginfo = _workflow_pnginfo(workflow) if workflow else None
         kw = {"pnginfo": pnginfo} if pnginfo is not None else {}
         img.save(root / "previews" / f"{entry_id}.png", "PNG", **kw)
+        _drop_legacy_preview_file(entry_id)
         return f"previews/{entry_id}.png"
     except Exception as e:
         print(f"[PromptLibrary] upload preview failed: {e}", flush=True)
@@ -546,6 +548,19 @@ def _remove_preview_file(victim):
         if (victim and cand.parent == root / "previews"
                 and cand.suffix.lower() in (".jpg", ".jpeg", ".png")):
             cand.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _drop_legacy_preview_file(entry_id):
+    """После записи нового PNG-превью снести legacy JPG того же id, если он есть
+    (карточки < v1.26 могут нести `previews/{id}.jpg`). Раньше замена обложки
+    оставляла старый JPG на диске навсегда — удаление карточки снимало только PNG."""
+    try:
+        root = _ensure_dirs()
+        f = root / "previews" / f"{entry_id}.jpg"
+        if f.parent == root / "previews":
+            f.unlink(missing_ok=True)
     except Exception:
         pass
 

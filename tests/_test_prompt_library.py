@@ -1099,6 +1099,26 @@ finally:
     mod._load_video_frame = _orig_video5
 
 
+# 19.5. замена превью у записи с legacy JPG — старый файл не остаётся сиротой
+# (моки секции 19 выше уже сняты — тут боевые функции)
+print("\n19.5. замена превью у legacy-JPG записи")
+from PIL import Image as _PIL195
+import io as _io195, base64 as _b64195
+_buf195 = _io195.BytesIO()
+_PIL195.new("RGB", (1, 1), (255, 0, 255)).save(_buf195, "PNG")
+_png195 = "data:image/png;base64," + _b64195.b64encode(_buf195.getvalue()).decode()
+_legacy5 = _entry("видео-прогон")
+_prev_dir5 = mod._ensure_dirs() / "previews"
+(_prev_dir5 / f"{_legacy5['id']}.jpg").write_bytes(b"legacy-jpeg")
+r_legacy = h("POST", "/prompt_library/attach_preview",
+             Req({"id": _legacy5["id"], "preview_data": _png195,
+                  "media": "video", "force": True}))
+check("замена превью у legacy-JPG: старый .jpg удалён (не сирота)",
+      r_legacy["status"] == 200
+      and not (_prev_dir5 / f"{_legacy5['id']}.jpg").exists()
+      and (_prev_dir5 / f"{_legacy5['id']}.png").exists(), str(r_legacy))
+
+
 # --- 20. аудит v1.27: замок базы, guard id, полнотекстовый поиск -------------
 print("\n20. Аудит v1.27: _DB_LOCK, guard id, /prompt_library/search")
 
