@@ -241,7 +241,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.35-use-count");
+  check(`${tag}: версия JS видна`, st.version === "1.39-unique-export");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -1053,6 +1053,50 @@ await run("pickup + кэш: токена нет — записи нет, но п
   }
 });
 
+// --- v1.38: подхват подчиняется режиму ----------------------------------------
+// Подхват — это ЗАПИСЬ (токен -> /save_pickup -> новая запись + обложка), значит
+// в «📤 Выдача» он выключен: сервер не отдаёт токен, а сообщает причину флагом
+// pickup_blocked. Клиент не должен ни звать save_pickup, ни врать про «кэш».
+await run("pickup: режим не пишет — подхват не сохраняет и не врёт про кэш (v1.38)", async () => {
+  const node = makeNode();
+  node.id = 47;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  const prevNodes = appStub.graph._nodes;
+  const prevGet = appStub.graph.getNodeById;
+  appStub.graph._nodes = [node];
+  appStub.graph.getNodeById = () => null;
+  let posts = 0;
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts++;
+    return jsonResponse({ ok: true });
+  };
+  try {
+    st.setPickup("1622");
+    st.hintSticky = null;
+    proto.onExecuted.call(node, { mode_notice: ["Режим «📤 Выдача» ничего не сохраняет: подхват выключен."] });
+    apiStub.dispatch("executed", { node: "47", prompt_id: "b1",
+      output: { pickup: [], pickup_node: [], pickup_blocked: ["1622"] } });
+    apiStub.dispatch("execution_success", { prompt_id: "b1" });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    check("pickup+выдача: save_pickup не зовём", posts === 0, `posts=${posts}`);
+    check("pickup+выдача: о кэше не врём",
+      !String(st.hintSticky || "").includes("кэш"), String(st.hintSticky));
+    check("pickup+выдача: причина видна в нижней строке (подсказка ноды)",
+      String(st.hintSticky || "").includes("не сохраняет"), String(st.hintSticky));
+    check("pickup+выдача: ожидание подхвата пусто", st.pendingPickup.size === 0);
+    check("pickup+выдача: флаг прогона снят", !st.runPickupBlocked.has("b1"));
+  } finally {
+    sandbox.fetch = origFetch;
+    appStub.graph._nodes = prevNodes;
+    appStub.graph.getNodeById = prevGet;
+  }
+});
+
 await run("pickup: отказ сервера (протухший токен) не уходит в тишину", async () => {
   const node = makeNode();
   node.id = 46;
@@ -1527,7 +1571,9 @@ await run("v1.27: серверный полнотекстовый поиск (с
       String(st.entries.length));
 
     st.search.value = "иголка";
-    await st.onSearch();
+    st.onSearch();
+    // v1.39: серверный запрос идёт с паузой (дебаунс) — ждём её в тесте
+    await new Promise((r) => setTimeout(r, st.SEARCH_DEBOUNCE + 60));
     check("v1.27: поиск спросил сервер один раз", calls.length === 1 && calls[0].includes("q="), JSON.stringify(calls));
     check("v1.27: id из глубины текста пришли в st.deepIds", st.deepIds && st.deepIds.has("deep1"));
     check("v1.27: карточка из глубины текста показана вместе с локальными",
@@ -1536,14 +1582,53 @@ await run("v1.27: серверный полнотекстовый поиск (с
     // Запрос без совпадений: ни локально, ни на сервере
     serverIds = [];
     st.search.value = "ничегонесовпадает";
-    await st.onSearch();
+    st.onSearch();
+    await new Promise((r) => setTimeout(r, st.SEARCH_DEBOUNCE + 60));
     check("v1.27: нет совпадений — список пуст", st.list.children.length === 0,
       String(st.list.children.length));
 
     st.search.value = "";
-    await st.onSearch();
+    st.onSearch();
+    await new Promise((r) => setTimeout(r, st.SEARCH_DEBOUNCE + 60));
     check("v1.27: пустой запрос — серверный поиск сброшен, видны все",
       st.deepIds === null && st.list.children.length === 2, String(st.list.children.length));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+// --- v1.39: дебаунс поиска: печать больше не бьёт по базе на каждую букву ----
+// Каждый /search читает и парсит всю library.json под общим замком базы, а
+// oninput срабатывает на КАЖДУЮ букву. Теперь серверный запрос один — на всю серию.
+await run("v1.39: поиск — один запрос на серию нажатий (дебаунс)", async () => {
+  const node = makeNode();
+  node.id = 72;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const origFetch = sandbox.fetch;
+  const calls = [];
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    if (url.includes("/prompt_library/search")) { calls.push(url); return jsonResponse({ ids: [] }); }
+    return jsonResponse({ ok: true });
+  };
+  try {
+    await st.reload();
+    for (const q of ["м", "мо", "мон", "монс", "монст"]) {
+      st.search.value = q;
+      st.search.oninput();
+    }
+    check("v1.39: пока печатаешь — запросов нет", calls.length === 0, JSON.stringify(calls.length));
+    await new Promise((r) => setTimeout(r, st.SEARCH_DEBOUNCE + 80));
+    check("v1.39: после паузы — ровно один запрос", calls.length === 1, JSON.stringify(calls));
+
+    // Пустой запрос сбрасывает поиск синхронно и снимает таймер
+    st.search.value = "";
+    st.onSearch();
+    await new Promise((r) => setTimeout(r, st.SEARCH_DEBOUNCE + 80));
+    check("v1.39: пустой запрос — без запроса и без лока",
+      st.deepIds === null && calls.length === 1, JSON.stringify(calls.length));
   } finally {
     sandbox.fetch = origFetch;
   }
@@ -1936,6 +2021,44 @@ await run("v1.34: bulk-экспорт отмеченного (записи + к�
 // Умная кнопка «📤 Экспорт» в шапке проводника: при активных метках
 // экспортирует отмеченное (exportMarked), без меток — текущую категорию
 // (exportFolder). Отдельной bulk-кнопки в нижней строке БОЛЬШЕ НЕТ.
+// --- v1.39: экспорт не теряет записи с одинаковыми названиями -----------------
+// Имя файла берётся из названия записи (авто-название = первые 60 символов
+// промпта), а `getFileHandle(..., {create:true})` молча перезатирает первый файл.
+// В живой базе таких групп 6 — это 9 записей, которые «Экспорт всего» терял.
+await run("v1.39: экспорт — три записи с одним названием = три файла", async () => {
+  const raw = [
+    { id: "D1", title: "Одинаковое имя", folder: "Дуб", preview: "", prompt: "первый текст" },
+    { id: "D2", title: "Одинаковое имя", folder: "Дуб", preview: "", prompt: "второй текст" },
+    { id: "D3", title: "Одинаковое имя", folder: "Дуб", preview: "", prompt: "третий текст" },
+  ];
+  installFetchStub(raw.map(({ id, title, folder }) => ({ id, title, folder, head: "", favorite: false, pinned: false, has_preview: false, media: null })), new Map(raw.map((e) => [e.id, e])));
+
+  const node = makeNode();
+  node.id = 85;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  await st.reload();
+
+  const files = [];
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => makeDirHandle(files);
+  try {
+    await st.exportFolder("Дуб");
+    const names = files.map((f) => f.name);
+    check("v1.39: три записи с одним названием — три файла (одна раньше терялась)",
+      files.length === 3, JSON.stringify(names));
+    check("v1.39: имена файлов различаются", new Set(names).size === 3, JSON.stringify(names));
+    const all = files.map((f) => String(f.content)).join("\n");
+    check("v1.39: тексты всех записей на диске",
+      all.includes("первый текст") && all.includes("второй текст") && all.includes("третий текст"));
+    check("v1.39: в .md виден № записи (видно, чей файл)",
+      files.every((f) => /- №: D\d/.test(String(f.content))),
+      JSON.stringify(files.map((f) => String(f.content).split("\n")[2])));
+  } finally {
+    windowStub.showDirectoryPicker = origPicker;
+  }
+});
+
 await run("v1.34: умная кнопка экспорта (метки → отмеченное, без меток → категория)", async () => {
   const raw = [
     { id: "S1", title: "Запись одна", folder: "Фото", preview: "", prompt: "textS1", favorite: false },

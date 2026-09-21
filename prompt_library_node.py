@@ -739,6 +739,13 @@ class PromptLibrary:
         # запись из провода, которого для этого случая и не подключают.
         pickup_node = (pickup or "").strip()
         pickup_token = ""
+        # Подхват — это ЗАПИСЬ: токен ведёт в роут /save_pickup, а тот создаёт
+        # запись и обложку. Значит он подчиняется режиму так же, как автосейв из
+        # входа («Выдача» базу не трогает, §29.3). До v1.38 подхват режим
+        # игнорировал: каждый Queue в «📤 Выдача» плодил записи из узла-источника
+        # вместе с превью (поймано на живой базе — 4 записи за 03:31–03:43 со
+        # снапшотом режима «📤 Выдача» и pickup = 1622).
+        pickup_blocked = bool(pickup_node) and not save_on
         entries, folders = _load_db()
 
         # Входящий текст: провод source.
@@ -840,7 +847,8 @@ class PromptLibrary:
         # 2.1. Подхват: сохранять сейчас нечего — текст выбранного узла появится
         # только после прогона. Откладываем воркфлоу и папку под токен, клиент
         # вернёт токен вместе с текстом (роут /prompt_library/save_pickup).
-        if pickup_node:
+        # Токена нет — сохранять нечего: в выдаче подхват выключен (см. выше).
+        if pickup_node and not pickup_blocked:
             pickup_token = _pickup_stash(pickup_node, fld, _snapshot_workflow(extra_pnginfo))
 
         # 3. PNG-персистентность выбора и настроек (паттерн Prompt Keeper)
@@ -863,6 +871,11 @@ class PromptLibrary:
         if mode == self.MODE_WRITE and out_linked:
             notice = ("Режим «Запись»: провод от выхода подключён — текст идёт сквозь, "
                       "как раньше. Отключите провод, чтобы нода только сохраняла.")
+        elif pickup_blocked:
+            # Подхват настроен, а режим не пишет: молчать нельзя — выглядит как
+            # «подхват сломался». Здесь же объясняем, что за это отвечает режим.
+            notice = (f"Режим «{mode}» ничего не сохраняет: подхват из узла №{pickup_node} "
+                      f"выключен. Чтобы сохранять финальный текст — «{self.MODE_BOTH}».")
         elif pickup_node and incoming:
             # Иначе выглядит как молчаливая потеря: на входе текст есть, а записи
             # из него нет (подхват берёт текст из другого узла после прогона).
@@ -897,6 +910,9 @@ class PromptLibrary:
                         "saved_id": [preview_target] if preview_target else [],
                         "pickup": [pickup_token] if pickup_token else [],
                         "pickup_node": [pickup_node] if pickup_token else [],
+                        # Подхват настроен, но режим ничего не сохраняет: клиент по
+                        # этому флагу не выдаёт ложное «нода не исполнялась (кэш)».
+                        "pickup_blocked": [pickup_node] if pickup_blocked else [],
                         "mode_notice": [notice]},
                 "result": (out_text, _sanitize_folder_path(folder))}
 
@@ -1193,7 +1209,15 @@ try:
         if folder_paths and isinstance(folder_paths, list):
             fp_set = set(f for f in folder_paths if isinstance(f, str) and f)
             for e in entries:
-                if e.get("folder") in fp_set and not e.get("favorite"):
+                if e.get("favorite"):
+                    continue
+                # Папка — это ПОДДЕРЕВО, как и везде остальном: перемещение,
+                # удаление и экспорт категории берут и вложенные подпапки. До
+                # v1.39 здесь было точное сравнение — бросок папки на ★ Избранное
+                # отмечал только записи самой папки, а «Фото/Портреты» оставались
+                # неотмеченными (ловилось прогоном: marked=1 при двух записях).
+                ef = e.get("folder", "")
+                if any(ef == f or ef.startswith(f + "/") for f in fp_set):
                     e["favorite"] = True
                     marked += 1
         for e in entries:
@@ -1396,7 +1420,11 @@ try:
                     e["category"] = e["folder"]
                     e["hash"] = _dedup_hash(e["prompt"], e["folder"])
                     moved_entries += 1
-            if want:
+            # Папку заводим ТОЛЬКО если запись реально переехала (v1.39):
+            # раньше условие было `if want` — по непустому списку id, и тогда
+            # при устаревшем id (запись удалили в другой вкладке/ноде) в дереве
+            # появлялась пустая категория-фантом и оставалась навсегда.
+            if moved_entries:
                 folders = sorted(set(folders) | {folder_dest} | set(_parent_folders(folder_dest)))
 
         # Перемещение папок в новый родитель

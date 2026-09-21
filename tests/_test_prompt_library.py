@@ -863,24 +863,57 @@ node3 = mod.PromptLibrary()
 
 
 def _pick_token(folder="Подхват", pick="1622"):
-    """Прогон ноды с включённым подхватом → токен (клиент вернёт его с текстом)."""
-    res = node3.execute(mode=node3.MODE_ISSUE, selected="", save_folder=folder, pickup=pick,
+    """Прогон ноды с включённым подхватом → токен (клиент вернёт его с текстом).
+
+    Режим «📤📥 Выдача + запись»: подхват — это ЗАПИСЬ, в чистой выдаче он
+    выключен (v1.38, см. проверки ниже).
+    """
+    res = node3.execute(mode=node3.MODE_BOTH, selected="", save_folder=folder, pickup=pick,
                         source="входящий не сохраняем", extra_pnginfo={"workflow": {"nodes": [], "links": []}},
                         unique_id=7)
     return (res["ui"].get("pickup") or [""])[0]
 
 
+# v1.38: подхват — это ЗАПИСЬ (токен -> /save_pickup -> новая запись), поэтому он
+# подчиняется режиму. До фикса «📤 Выдача» тоже отдавала токен: каждый Queue в
+# выдаче плодил записи из узла-источника вместе с обложкой (поймано на живой базе:
+# 4 записи за 03:31-03:43 с mode = «📤 Выдача» в снапшоте и pickup = 1622).
+before_block = len(mod._load_db()[0])
+wf_block = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
+res_block = node3.execute(mode=node3.MODE_ISSUE, selected="", save_folder="Подхват", pickup="1622",
+                          source="входящий не сохраняем",
+                          extra_pnginfo={"workflow": wf_block}, unique_id=7)
+check("выдача + подхват: токен НЕ отдан (записи не будет)",
+      res_block["ui"].get("pickup") == [], str(res_block["ui"].get("pickup")))
+check("выдача + подхват: клиенту сказано, что подхват выключен",
+      res_block["ui"].get("pickup_blocked") == ["1622"],
+      str(res_block["ui"].get("pickup_blocked")))
+check("выдача + подхват: saved_id пуст (обложку вешать не на что)",
+      res_block["ui"]["saved_id"] == [], str(res_block["ui"]["saved_id"]))
+check("выдача + подхват: в базе ничего не появилось",
+      len(mod._load_db()[0]) == before_block)
+check("выдача + подхват: подсказка объясняет, как сохранять",
+      "выключен" in (res_block["ui"]["mode_notice"][0] or "")
+      and node3.MODE_BOTH in (res_block["ui"]["mode_notice"][0] or ""),
+      str(res_block["ui"]["mode_notice"]))
+check("выдача + подхват: токенов в отложке нет",
+      not any(v.get("node") == "1622" for v in mod._PICKUP.values()))
+check("выдача: выход по-прежнему выдаёт входящий текст",
+      res_block["result"][0] == "входящий не сохраняем", str(res_block["result"]))
+
 before_pick = len(mod._load_db()[0])
 wf_pick = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
-res_pick = node3.execute(mode=node3.MODE_ISSUE, selected="", save_folder="Подхват", pickup="1622",
+res_pick = node3.execute(mode=node3.MODE_BOTH, selected="", save_folder="Подхват", pickup="1622",
                          source="входящий не сохраняем",
                          extra_pnginfo={"workflow": wf_pick}, unique_id=7)
 tok = (res_pick["ui"].get("pickup") or [""])[0]
 check("подхват: токен отдан клиенту в ui.pickup", bool(tok), str(res_pick["ui"].get("pickup")))
 check("подхват: id узла-источника в ui.pickup_node", res_pick["ui"].get("pickup_node") == ["1622"],
       str(res_pick["ui"].get("pickup_node")))
+check("подхват: в выдающем режиме подхват не заблокирован",
+      res_pick["ui"].get("pickup_blocked") == [], str(res_pick["ui"].get("pickup_blocked")))
 check("подхват: входящий текст НЕ сохранён", len(mod._load_db()[0]) == before_pick)
-check("подхват: выход режима выдачи по-прежнему сквозной",
+check("подхват: выход выдающего режима по-прежнему сквозной",
       res_pick["result"][0] == "входящий не сохраняем", str(res_pick["result"]))
 check("подхват: saved_id пуст (записи ещё нет)", res_pick["ui"]["saved_id"] == [])
 check("подхват: снапшот воркфлоу отложен под токеном",
@@ -889,7 +922,7 @@ check("подхват: подсказка о том, почему вход не 
       "не сохраняется" in (res_pick["ui"]["mode_notice"][0] or ""),
       str(res_pick["ui"]["mode_notice"]))
 check("подхват: PNG-патч несёт pickup 4-м значением",
-      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_ISSUE, "", "Подхват", "1622"],
+      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_BOTH, "", "Подхват", "1622"],
       str(wf_pick["nodes"][0]["widgets_values"]))
 # Без подхвата поведение прежнее (pickup="")
 res_off = node3.execute(mode=node3.MODE_WRITE, selected="", save_folder="", pickup="",
@@ -1188,6 +1221,90 @@ mod._save_db(_e_all, _f_all)
 _e_re, _ = mod._load_db()
 check("запись без поля pinned читается как незакреплённая",
       next(e for e in _e_re if e["id"] == _pin_id)["pinned"] is False)
+
+
+# --- 24. массовые действия: move_many / favorite_many / folder_pin (v1.39) ----
+# Раньше эти три роута (v1.36–v1.37) не проверял НИ ОДИН набор: ни песочница,
+# ни смоук, ни аудит. Именно здесь нашлись два дефекта: фантомная категория
+# и «Избранное» без вложенных папок.
+_p("\n24. Массовые действия: move_many / favorite_many / folder_pin")
+node4 = mod.PromptLibrary()
+
+h("POST", "/prompt_library/folder_create", Req({"parent": "", "name": "МассФото"}))
+h("POST", "/prompt_library/folder_create", Req({"parent": "МассФото", "name": "Портреты"}))
+h("POST", "/prompt_library/folder_create", Req({"parent": "", "name": "МассПрочее"}))
+
+
+for _t, _fld in (("масс-фото", "МассФото"), ("масс-портрет", "МассФото/Портреты"),
+                 ("масс-перенос", "МассФото")):
+    h("POST", "/prompt_library/add", Req({"prompt": _t, "folder": _fld}))
+_mass_ids = {e["prompt"]: e["id"] for e in mod._load_db()[0]}
+
+# 24.1. Фантомная категория: пустой/устаревший id не должен заводить папку
+folders_before = set(mod._load_db()[1])
+r_ghost = h("POST", "/prompt_library/move_many",
+            Req({"entry_ids": ["нет-такого-id"], "folder": "КатегорияПризрак"}))
+check("move_many: устаревший id -> ничего не переехало",
+      r_ghost["json"].get("moved_entries") == 0, str(r_ghost))
+check("move_many: пустая категория-фантом НЕ создаётся",
+      "КатегорияПризрак" not in set(mod._load_db()[1]),
+      str(sorted(set(mod._load_db()[1]) - folders_before)))
+r_empty_ids = h("POST", "/prompt_library/move_many", Req({"entry_ids": [], "folder": "ЕщёПризрак"}))
+check("move_many: пустой список id тоже без папки",
+      "ЕщёПризрак" not in set(mod._load_db()[1]) and r_empty_ids["json"].get("moved_entries") == 0)
+
+# 24.2. Перенос записи в реальную новую папку — папка заводится (не сломали)
+r_move = h("POST", "/prompt_library/move_many",
+           Req({"entry_ids": [_mass_ids["масс-перенос"]], "folder": "МассПрочее"}))
+check("move_many: запись переехала", r_move["json"].get("moved_entries") == 1, str(r_move))
+check("move_many: папка назначения появилась",
+      "МассПрочее" in mod._load_db()[1])
+check("move_many: hash пересчитан под новую папку",
+      (_entry("масс-перенос") or {}).get("hash") == mod._dedup_hash("масс-перенос", "МассПрочее"))
+
+# 24.3. Избранное по категории: подпапки входят в поддерево (v1.39)
+r_fav = h("POST", "/prompt_library/favorite_many", Req({"folder_paths": ["МассФото"]}))
+check("favorite_many: папка + вложенная подпапка (2 записи)",
+      r_fav["json"].get("marked") == 2, str(r_fav))
+check("favorite_many: запись из подпапки отмечена",
+      (_entry("масс-портрет") or {}).get("favorite") is True)
+r_fav2 = h("POST", "/prompt_library/favorite_many", Req({"folder_paths": ["МассФото"]}))
+check("favorite_many: повторно ничего не меняет (marked=0)",
+      r_fav2["json"].get("marked") == 0, str(r_fav2))
+check("favorite_many: папка вне запроса не затронута",
+      (_entry("масс-перенос") or {}).get("favorite") is not True,
+      str((_entry("масс-перенос") or {}).get("favorite")))
+_broadcasts.clear()
+r_fav_noop = h("POST", "/prompt_library/favorite_many", Req({"ids": ["нет-такого"]}))
+check("favorite_many: нечего менять -> без записи и без broadcast",
+      r_fav_noop["json"].get("marked") == 0 and _broadcasts == [], str(_broadcasts))
+
+# 24.4. Закреп папки: тоггл, валидация, чужие данные целы
+_broadcasts.clear()
+r_fpin = h("POST", "/prompt_library/folder_pin", Req({"path": "МассФото"}))
+check("folder_pin: закрепили папку",
+      r_fpin["json"].get("pinned") is True and mod._load_pinned_folders() == ["МассФото"],
+      str(mod._load_pinned_folders()))
+check("folder_pin: записи и папки при этом целы",
+      len(mod._load_db()[0]) > 0 and "МассФото" in mod._load_db()[1])
+check("folder_pin: broadcast разослан", "prompt_library/refresh" in _broadcasts)
+r_fpin2 = h("POST", "/prompt_library/folder_pin", Req({"path": "МассФото"}))
+check("folder_pin: повторный клик = откреп",
+      r_fpin2["json"].get("pinned") is False and mod._load_pinned_folders() == [])
+r_fpin3 = h("POST", "/prompt_library/folder_pin", Req({"path": "НетТакойПапки"}))
+check("folder_pin: несуществующая папка -> 404", r_fpin3["status"] == 404, str(r_fpin3))
+r_fpin4 = h("POST", "/prompt_library/folder_pin", Req({"path": "__fav"}))
+check("folder_pin: служебная ветка -> 400", r_fpin4["status"] == 400, str(r_fpin4))
+# Закреп переживает переименование/удаление папки (v1.37 cleanup)
+h("POST", "/prompt_library/folder_pin", Req({"path": "МассФото", "pinned": True}))
+h("POST", "/prompt_library/folder_rename", Req({"old": "МассФото", "new": "МассФото2"}))
+check("folder_pin: переименование двигает закреп",
+      mod._load_pinned_folders() == ["МассФото2"], str(mod._load_pinned_folders()))
+h("POST", "/prompt_library/folder_delete", Req({"path": "МассФото2"}))
+check("folder_pin: удаление папки чистит закреп",
+      mod._load_pinned_folders() == [], str(mod._load_pinned_folders()))
+check("folder_pin: записи удалённой папки переехали в корень",
+      (_entry("масс-портрет") or {}).get("folder") == "")
 
 
 # --- итог -------------------------------------------------------------------

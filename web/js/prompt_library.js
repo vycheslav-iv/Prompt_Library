@@ -78,7 +78,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.36-bulk-move";
+const PL_JS_VERSION = "1.39-unique-export";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -1127,6 +1127,9 @@ app.registerExtension({
             // { token, node, text }. Токен — от нашей ноды (ui.pickup).
             st.runTexts = new Map();
             st.pendingPickup = new Map();
+            // prompt_id — прогоны, где сервер выключил подхват режимом (v1.38):
+            // по ним не показываем ложное «нода не исполнялась (кэш)».
+            st.runPickupBlocked = new Set();
             const PL_TEXT_LIMIT = 50;      // без таймеров: чистим по количеству
             const PL_PENDING_LIMIT = 20;   // без таймеров: чистим по количеству
             st.rememberPending = (pid, rec) => {
@@ -1331,6 +1334,13 @@ app.registerExtension({
                                     text: st.runTexts.get(String(src)) || "",
                                 });
                             }
+                            // v1.38: подхват — это запись, поэтому он подчиняется
+                            // режиму. В «📤 Выдача» сервер токена не даёт и говорит об
+                            // этом флагом: запоминаем, чтобы на execution_success не
+                            // выдать ложное «нода не исполнялась (кэш)».
+                            const blocked = (d.output && d.output.pickup_blocked
+                                && d.output.pickup_blocked[0]) || "";
+                            if (blocked) st.runPickupBlocked.add(d.prompt_id);
                             // Наша нода сохранила запись — ждём обложку для неё.
                             // Картинка может быть уже в запасе (нода после
                             // SaveImage) — тогда берём её сразу.
@@ -1373,12 +1383,16 @@ app.registerExtension({
                         const rec = st.pendingPreview.get(pid);
                         const shot = st.runImages.get(pid) || null;
                         const pick = st.pendingPickup.get(pid) || null;
+                        // Нода сама сказала, что подхват выключён режимом: причина уже
+                        // показана подсказкой ноды (mode_notice), «кэш» тут — враньё.
+                        const pickupOff = st.runPickupBlocked.delete(pid);
                         st.pendingPreview.delete(pid);
                         st.pendingPickup.delete(pid);
                         st.runImages.delete(pid);
                         // Подхват (v1.25): запись ещё не создана — сначала сохраняем
                         // текст узла-источника, потом (из ответа) прикрепляем обложку.
                         if (pick) st.savePickup(pick, shot);
+                        else if (pickupOff) { /* режим не пишет — не шумим */ }
                         else {
                             // Подхват включён, а токена нет: наша нода не исполнялась в
                             // этом прогоне (ComfyUI закэшировал её — у ноды нет проводов,
@@ -1406,6 +1420,7 @@ app.registerExtension({
                         if (pid) {
                             st.pendingPreview.delete(pid);
                             st.pendingPickup.delete(pid);
+                            st.runPickupBlocked.delete(pid);
                             st.runImages.delete(pid);
                         }
                     } catch (e) { /* silent */ }
@@ -2036,9 +2051,27 @@ app.registerExtension({
             // (/prompt_library/search отдаёт только id). Без таймеров: устаревший
             // ответ отбрасываем по номеру запроса (last-wins).
             let searchSeq = 0;
-            st.onSearch = async () => {
+            // Пауза перед серверным запросом (дебаунс на вводе). Локальный фильтр
+            // по-прежнему мгновенный; пауза только убирает лишние запросы: каждый
+            // /search читает и парсит всю library.json ПОД ОБЩИМ ЗАМКОМ базы
+            // (замер на живой базе: 0.165 с на 18.6 МБ), а `oninput` срабатывает
+            // на каждую букву — 10 букв = 10 полных чтений базы.
+            st.SEARCH_DEBOUNCE = 250;
+            st.searchServer = async (q, my) => {
+                try {
+                    const r = await fetch(`/prompt_library/search?q=${encodeURIComponent(q)}`);
+                    if (my !== searchSeq) return; // устаревший ответ — не выдаём за новый
+                    if (!r.ok) return;
+                    const d = await r.json();
+                    if (my !== searchSeq) return;
+                    st.deepIds = new Set((d && d.ids) || []);
+                    render();
+                } catch (e) { /* silent */ }
+            };
+            st.onSearch = () => {
                 const q = (st.search.value || "").trim();
                 const my = ++searchSeq;
+                if (st._searchTimer) { clearTimeout(st._searchTimer); st._searchTimer = null; }
                 if (!q) {
                     st.deepIds = null;
                     render();
@@ -2046,15 +2079,10 @@ app.registerExtension({
                 }
                 st.deepIds = null; // старый ответ не выдаём за новый
                 render();          // локальные совпадения видны сразу
-                try {
-                    const r = await fetch(`/prompt_library/search?q=${encodeURIComponent(q)}`);
-                    if (my !== searchSeq) return;
-                    if (!r.ok) return;
-                    const d = await r.json();
-                    if (my !== searchSeq) return;
-                    st.deepIds = new Set((d && d.ids) || []);
-                    render();
-                } catch (e) { /* silent */ }
+                st._searchTimer = setTimeout(() => {
+                    st._searchTimer = null;
+                    st.searchServer(q, my);
+                }, st.SEARCH_DEBOUNCE);
             };
             search.oninput = () => { st.onSearch?.(); };
             sortSel.onchange = render;
@@ -2167,6 +2195,9 @@ app.registerExtension({
                 return [
                     `# ${full.title || title}`,
                     "",
+                    // № записи: без него в экспорте нельзя понять, какая карточка
+                    // легла в файл (и нечем доказать потерю).
+                    `- №: ${full.id || "—"}`,
                     `- Категория: ${full.folder || "Без категории"}`,
                     `- Создана: ${full.created_at || ""}`,
                     `- Тип: ${full.media === "video" ? "🎬 видео" : full.media === "image" ? "📷 фото" : ""}`,
@@ -2254,9 +2285,22 @@ app.registerExtension({
             // экспорт папки «Фото» создаёт в выбранной директории «Фото/» с её
             // файлами и подпапками («Фото/Портреты/» и т.д.). «Всё» — зеркало всей
             // базы от корня. Отмеченное — каждая запись в зеркало своей папки.
-            st.writeEntryFlat = async (writeDir, full) => {
+            // Имя файла в пределах ОДНОЙ папки экспорта: два разных промпта с
+            // одинаковым началом дают одно авто-название (первые 60 символов), а
+            // `getFileHandle(..., {create:true})` молча перезаписывает первый файл.
+            // В живой базе таких групп нашлось 6 (9 записей) — «Экспорт всего»
+            // терял их. Второй и следующие получают хвост " (2)", " (3)"…
+            st.uniqueName = (base, used) => {
+                if (!used) return base;
+                let name = base;
+                let n = 2;
+                while (used.has(name) && n < 100) name = `${base} (${n++})`;
+                used.add(name);
+                return name;
+            };
+            st.writeEntryFlat = async (writeDir, full, used) => {
                 const written = [];
-                const title = st.sanitizeFileName(full.title);
+                const title = st.uniqueName(st.sanitizeFileName(full.title), used);
                 const md = st._entryToMd(full);
                 const fh = await writeDir.getFileHandle(`${title}.md`, { create: true });
                 const wtr = await fh.createWritable();
@@ -2371,6 +2415,13 @@ app.registerExtension({
                 const fulls = await st.loadFulls(sel.map((e) => e.id));
                 let done = 0, failed = 0;
                 const badNames = [];
+                // Занятые имена — на каждую папку назначения свою (ключ — её путь
+                // внутри корня экспорта): иначе одинаковые названия затирают друг друга.
+                const usedByDir = new Map();
+                const namesFor = (key) => {
+                    if (!usedByDir.has(key)) usedByDir.set(key, new Set());
+                    return usedByDir.get(key);
+                };
                 try {
                     for (const e of sel) {
                         const full = fulls.get(e.id);
@@ -2385,7 +2436,7 @@ app.registerExtension({
                         try {
                             const sub = st.relFolder(e.folder, pathKey.startsWith("__") ? null : pathKey);
                             const writeDir = sub ? await st.ensureDirPath(root, sub) : root;
-                            await st.writeEntryFlat(writeDir, full);
+                            await st.writeEntryFlat(writeDir, full, namesFor(sub || "."));
                             done++;
                         } catch (err) {
                             failed++;
@@ -2438,6 +2489,12 @@ app.registerExtension({
                 const fulls = await st.loadFulls(sel.map((e) => e.id));
                 let done = 0, failed = 0;
                 const badNames = [];
+                // См. exportFolder: имена уникальны в пределах папки экспорта.
+                const usedByDir = new Map();
+                const namesFor = (key) => {
+                    if (!usedByDir.has(key)) usedByDir.set(key, new Set());
+                    return usedByDir.get(key);
+                };
                 try {
                     for (const e of sel) {
                         const full = fulls.get(e.id);
@@ -2451,7 +2508,7 @@ app.registerExtension({
                         }
                         try {
                             const writeDir = e.folder ? await st.ensureDirPath(dirHandle, e.folder) : dirHandle;
-                            await st.writeEntryFlat(writeDir, full);
+                            await st.writeEntryFlat(writeDir, full, namesFor(e.folder || "."));
                             done++;
                         } catch (err) {
                             failed++;
@@ -2792,8 +2849,10 @@ app.registerExtension({
                 for (const [name, fn] of (st?.execListeners || [])) {
                     st.apiTarget?.removeEventListener?.(name, fn);
                 }
+                if (st?._searchTimer) { clearTimeout(st._searchTimer); st._searchTimer = null; }
                 st.pendingPreview?.clear?.();
                 st.pendingPickup?.clear?.();
+                st.runPickupBlocked?.clear?.();
                 st.runTexts?.clear?.();
                 st.runImages?.clear?.();
                 st.previewStamp?.clear?.();
