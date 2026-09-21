@@ -204,7 +204,12 @@ check("чужой node id не тронут", len(workflow["nodes"]) == 1)
 entries, folders = mod._load_db()
 check("запись сохранена", len(entries) == 1 and entries[0]["prompt"] == "Портрет девушки")
 check("папка сохранена, дубль category", entries[0]["folder"] == "Фото" and entries[0]["category"] == "Фото")
-check("workflow прикреплён к записи", isinstance(entries[0]["workflow"], dict))
+# v1.40: граф лежит отдельным файлом (workflows/{id}.json), а не внутри базы;
+# для читателя разницы нет — _entry_workflow() отдаёт тот же dict.
+check("workflow прикреплён к записи (отдельным файлом)",
+      not entries[0].get("workflow")
+      and entries[0].get("workflow_file") == f"workflows/{entries[0]['id']}.json"
+      and isinstance(mod._entry_workflow(entries[0]), dict))
 
 res2 = node.execute(mode=node.MODE_WRITE, selected="", save_folder="Фото",
                     source="Портрет девушки", image=None,
@@ -605,8 +610,8 @@ _broadcasts.clear()
 node.execute(mode=node.MODE_WRITE, selected="", save_folder="", source="бэкфилл-без-бродкаста",
              extra_pnginfo=pnginfo, unique_id=7)
 check("execute: backfill workflow -> без broadcast", _broadcasts == [], str(_broadcasts))
-check("execute: backfill при этом записан",
-      bool(next(e for e in mod._load_db()[0] if e["id"] == "bf-broadcast").get("workflow")))
+check("execute: backfill при этом записан (файлом графа)",
+      bool(mod._entry_workflow(next(e for e in mod._load_db()[0] if e["id"] == "bf-broadcast"))))
 
 # Ручные роуты: без broadcast соседние Library-ноды и другие вкладки молчат
 _broadcasts.clear()
@@ -938,8 +943,8 @@ check("save_pickup: 200 + id", r_pick["status"] == 200 and bool(r_pick["json"].g
 check("save_pickup: текст обрезан", _entry("финальный текст из LLM") is not None)
 check("save_pickup: папка из токена",
       (_entry("финальный текст из LLM") or {}).get("folder") == "Подхват")
-check("save_pickup: воркфлоу из токена",
-      isinstance((_entry("финальный текст из LLM") or {}).get("workflow"), dict))
+check("save_pickup: воркфлоу из токена (файлом графа)",
+      isinstance(mod._entry_workflow(_entry("финальный текст из LLM") or {}), dict))
 check("save_pickup: broadcast разослан", "prompt_library/refresh" in _broadcasts)
 check("save_pickup: токен одноразовый", tok not in mod._PICKUP)
 r_again = h("POST", "/prompt_library/save_pickup", Req({"token": tok, "text": "повтор"}))
@@ -1170,6 +1175,13 @@ check("/search регистронезависим (кириллица)",
 _p("\n21. Подхват и кэш: IS_CHANGED заставляет ноду исполняться каждый Queue")
 
 _cls = mod.PromptLibrary
+
+
+def _is_nan(v):
+    """NaN не равен сам себе — единственный надёжный признак форсированного прогона."""
+    return isinstance(v, float) and v != v
+
+
 check("IS_CHANGED объявлен как classmethod (механика ComfyUI)",
       isinstance(inspect.getattr_static(_cls, "IS_CHANGED"), classmethod))
 _nan_on = _cls.IS_CHANGED(pickup="1622")
@@ -1185,9 +1197,20 @@ check("pickup из пробелов не включает форсированн
 check("батч-форма значения не ломает решение (страховка)",
       _cls.IS_CHANGED(pickup=["1622"]) != _cls.IS_CHANGED(pickup=["1622"])
       and _cls.IS_CHANGED(pickup=[""]) is None and _cls.IS_CHANGED(pickup=[]) is None)
-check("остальные виджеты на решение не влияют",
-      _cls.IS_CHANGED(pickup="1622", mode="Запись", selected="", save_folder="x")
-      != _cls.IS_CHANGED(pickup="1622", mode="Записи", selected="", save_folder="x"))
+check("остальные виджеты не отменяют NaN при подхвате",
+      _is_nan(_cls.IS_CHANGED(pickup="1622", mode="Запись", selected="", save_folder="x")))
+# ГЛАВНОЕ (v1.41): непустой mode — НЕ повод выключать кэш. `mode` есть всегда,
+# поэтому проверка `if str(mode).strip(): return nan` (v1.39) делала NaN
+# безусловным: докстрока и §33.3 обещают None без подхвата, а ComfyUI
+# перестал кэшировать ноду в «Записи»/«Выдаче» и разбирал базу на каждом Queue.
+# Смена режима и без того меняет значение виджета → ключ кэша → перепрогон.
+check("непустой mode без подхвата -> None: кэш работает (§33.3)",
+      _cls.IS_CHANGED(mode="📥 Запись", pickup="") is None
+      and _cls.IS_CHANGED(mode="📤 Выдача", pickup="") is None)
+check("mode списком без подхвата -> None",
+      _cls.IS_CHANGED(mode=["📤 Выдача"], pickup="") is None)
+check("mode списком не мешает NaN при подхвате",
+      _is_nan(_cls.IS_CHANGED(mode=["📥 Запись"], pickup="1622")))
 
 # Протухший токен: клиент должен получить 400 (а не тихую пустоту), сервер — строку в консоль
 _p("\n22. save_pickup: неизвестный токен — отказ виден клиенту")
@@ -1305,6 +1328,196 @@ check("folder_pin: удаление папки чистит закреп",
       mod._load_pinned_folders() == [], str(mod._load_pinned_folders()))
 check("folder_pin: записи удалённой папки переехали в корень",
       (_entry("масс-портрет") or {}).get("folder") == "")
+
+
+# --- 25. граф записи отдельным файлом (v1.40) --------------------------------
+# Снимок графа — ЗАДУМАННАЯ часть карточки (§24.1), но хранить его внутри
+# library.json нельзя: 340 КБ на запись (12 МБ из 18 на живой базе) делали
+# тяжёлой каждую операцию. Теперь граф лежит в workflows/{id}.json, а клиент
+# получает то же поле workflow от /entry (JS не менялся). Старые записи с
+# inline-графом НЕ переделываем — читаются сначала inline, потом файл.
+_p("\n25. Граф записи: workflows/{id}.json + совместимость со старыми записями")
+node5 = mod.PromptLibrary()
+wf_dir = mod._ensure_dirs() / "workflows"
+check("папка workflows/ создаётся вместе с базой", wf_dir.is_dir())
+
+before5 = len(mod._load_db()[0])
+res40 = node5.execute(mode=node5.MODE_WRITE, selected="", save_folder="Графы",
+                      source="промпт с графом v1.40",
+                      extra_pnginfo={"workflow": {"nodes": [{"id": 1}], "links": []}},
+                      unique_id=9, image=None)
+check("v1.40: запись создана",
+      any(e.get("prompt") == "промпт с графом v1.40" for e in mod._load_db()[0]),
+      str(res40["ui"]["saved_id"]))
+_e40 = _entry("промпт с графом v1.40") or {}
+check("v1.40: inline-граф в записи НЕ пишется", not _e40.get("workflow"),
+      str(bool(_e40.get("workflow"))))
+check("v1.40: в записи — отметка файла графа",
+      _e40.get("workflow_file") == f"workflows/{_e40.get('id')}.json",
+      str(_e40.get("workflow_file")))
+check("v1.40: файл графа существует и читается",
+      isinstance(mod._entry_workflow(_e40), dict)
+      and isinstance(mod._entry_workflow(_e40).get("nodes"), list))
+check("v1.40: GET /list сразу знает про граф (без чтения файлов)",
+      any(e["id"] == _e40["id"] and e["has_workflow"] for e in h("GET", "/prompt_library/list", Req())["json"]["entries"]))
+_r_entry40 = h("GET", "/prompt_library/entry", Req(query={"id": _e40["id"]}))
+check("v1.40: /entry отдаёт то же поле workflow (клиент не менялся)",
+      isinstance(_r_entry40["json"].get("workflow"), dict)
+      and _r_entry40["json"]["workflow"].get("nodes"), str(_r_entry40["json"].get("workflow"))[:80])
+
+# Старые записи: inline-граф читается как раньше, в файлы ничего не двигаем
+# (файл от прошлой проверки убираем — он не часть «старой» записи)
+mod._remove_workflow_file(_e40["id"])
+_e_all5, _f_all5 = mod._load_db()
+for _e in _e_all5:
+    if _e["id"] == _e40["id"]:
+        _e.pop("workflow_file", None)
+        _e["workflow"] = {"nodes": [{"id": 7}], "links": []}
+mod._save_db(_e_all5, _f_all5)
+_legacy = _entry("промпт с графом v1.40")
+check("старая запись с inline-графом читается без файла",
+      mod._entry_workflow(_legacy) == {"nodes": [{"id": 7}], "links": []},
+      str(mod._entry_workflow(_legacy)))
+check("старая запись: has_workflow в списке",
+      any(e["id"] == _legacy["id"] and e["has_workflow"]
+          for e in h("GET", "/prompt_library/list", Req())["json"]["entries"]))
+check("старая запись: файл графа задним числом НЕ создаётся",
+      not (wf_dir / f"{_legacy['id']}.json").exists())
+# Вернём запись в новый формат для дальнейших проверок
+mod._remove_workflow_file(_legacy["id"])
+_e_all5, _f_all5 = mod._load_db()
+for _e in _e_all5:
+    if _e["id"] == _legacy["id"]:
+        _e.pop("workflow", None)
+mod._save_db(_e_all5, _f_all5)
+mod._attach_workflow(_e_all5, _legacy["id"], {"nodes": [{"id": 3}], "links": []})
+mod._save_db(*mod._load_db())
+
+# Битый/чужой файл графа не должен ронять ноду
+_wf_file = wf_dir / f"{_legacy['id']}.json"
+_wf_backup = _wf_file.read_text(encoding="utf-8")
+_wf_file.write_text("{{ это не json", encoding="utf-8")
+check("битый файл графа -> None, без исключения",
+      mod._entry_workflow(_entry("промпт с графом v1.40")) is None)
+_wf_file.write_text(_wf_backup, encoding="utf-8")
+check("id не alfanum -> файл не адресуется (traversal закрыт)",
+      mod._workflow_path("../secret") is None and mod._workflow_path("") is None)
+
+# Замена превью обязана перенести граф в новую картинку (ловушка §24.2)
+_orig_thumb40 = mod._save_thumbnail
+_seen40 = []
+
+def _thumb_stub40(img, entry_id, workflow=None):
+    _seen40.append(workflow)
+    return f"previews/{entry_id}.png"
+
+
+mod._save_thumbnail = _thumb_stub40
+_orig_loader40 = mod._load_image_file
+mod._load_image_file = lambda path: [[[0, 0, 0]]]
+(out_dir / "run40.png").write_bytes(b"x")
+try:
+    _r_repl = h("POST", "/prompt_library/attach_preview", Req(
+        {"id": _legacy["id"], "filename": "run40.png", "subfolder": "", "type": "output", "force": True}))
+    check("замена превью прошла", _r_repl["status"] == 200, str(_r_repl))
+    check("замена превью перенесла граф (чанк в новой картинке)",
+          bool(_seen40) and isinstance(_seen40[0], dict) and _seen40[0].get("nodes"),
+          str(_seen40[:1])[:80])
+finally:
+    mod._save_thumbnail = _orig_thumb40
+    mod._load_image_file = _orig_loader40
+
+# Подхват и удаление — тоже с файлами графов
+_tok40 = node5.execute(mode=node5.MODE_BOTH, selected="", save_folder="Графы", pickup="1622",
+                       source="", extra_pnginfo={"workflow": {"nodes": [{"id": 2}], "links": []}},
+                       unique_id=9)["ui"].get("pickup") or [""]
+_r_pick40 = h("POST", "/prompt_library/save_pickup",
+              Req({"token": _tok40[0], "text": "подхваченный текст с графом"}))
+_pick40 = _entry("подхваченный текст с графом") or {}
+check("подхват: запись создана", bool(_pick40.get("id")), str(_r_pick40))
+check("подхват: граф тоже файлом, без inline",
+      bool(_pick40.get("workflow_file")) and not _pick40.get("workflow"),
+      str(_pick40.get("workflow_file")))
+check("подхват: файл графа на месте", (wf_dir / f"{_pick40['id']}.json").exists())
+
+_prev_file40 = _ensure_preview_file = ""
+for _e in mod._load_db()[0]:
+    if _e.get("preview"):
+        _prev_file40 = mod._ensure_dirs() / _e["preview"]
+        break
+h("POST", "/prompt_library/delete", Req({"id": _pick40["id"]}))
+check("удаление записи убирает файл графа",
+      not (wf_dir / f"{_pick40['id']}.json").exists())
+
+# Обрезка MAX_ENTRIES не оставляет сирот в workflows/
+_orig_max = mod.MAX_ENTRIES
+mod.MAX_ENTRIES = 3
+_trim_probe = [{"id": f"trim{i:04d}", "workflow_file": f"workflows/trim{i:04d}.json"} for i in range(6)]
+for _e in _trim_probe:
+    mod._save_workflow_file(_e["id"], {"nodes": [{"id": 1}], "links": []})
+_left = mod._trim_entries(_trim_probe)
+check("обрезка списка возвращает не больше MAX_ENTRIES", len(_left) == 3, str(len(_left)))
+check("обрезка убирает файлы графов отброшенных записей",
+      not (wf_dir / "trim0005.json").exists() and (wf_dir / "trim0002.json").exists())
+mod.MAX_ENTRIES = _orig_max
+
+
+# --- 26. Самоаудит хранения графа (v1.40) ------------------------------------
+# Три дыры, найденные чтением кода после внедрения файлового хранения:
+#   (а) ui.entries в execute отдавал has_workflow по inline-полю — для новых
+#       записей это ВСЕГДА false, хотя граф есть (у /list флаг честный);
+#   (б) потерянный файл графа (копия базы без workflows/, восстановление из
+#       бэкапа) — /list врал «граф есть», а вылечить запись было нечем;
+#   (в) обрезка MAX_ENTRIES убирала файл графа, но оставляла файл превью.
+_p("\n26. Самоаудит: флаг графа в ui, потерянный файл, сирота-превью")
+node26 = mod.PromptLibrary()
+res26 = node26.execute(mode=node26.MODE_WRITE, selected="", save_folder="Аудит",
+                       source="прогон для проверки флага графа",
+                       extra_pnginfo={"workflow": {"nodes": [{"id": 1}], "links": []}},
+                       unique_id=26, image=None)
+_e26 = _entry("прогон для проверки флага графа") or {}
+check("26: запись с графом создана (граф — файлом)",
+      bool(_e26.get("workflow_file")) and not _e26.get("workflow"),
+      str(_e26.get("workflow_file")))
+_ui26 = [e for e in res26["ui"]["entries"] if e.get("id") == _e26.get("id")]
+check("26: ui.entries говорит has_workflow=true, а не по inline-полю",
+      bool(_ui26) and _ui26[0].get("has_workflow") is True, str(_ui26[:1]))
+
+# (б) файл графа пропал — список не должен врать, а прогон обязан вылечить запись
+_wf26 = wf_dir / f"{_e26['id']}.json"
+check("26: файл графа на месте до потери", _wf26.exists())
+_wf26.unlink()
+check("26: потерянный файл -> /list не врёт про has_workflow",
+      not any(e["id"] == _e26["id"] and e["has_workflow"]
+              for e in h("GET", "/prompt_library/list", Req())["json"]["entries"]))
+check("26: потерянный файл -> /entry отдаёт None, без исключения",
+      h("GET", "/prompt_library/entry", Req(query={"id": _e26["id"]}))["json"].get("workflow") is None)
+node26.execute(mode=node26.MODE_WRITE, selected="", save_folder="Аудит",
+               source="прогон для проверки флага графа",
+               extra_pnginfo={"workflow": {"nodes": [{"id": 5}], "links": []}},
+               unique_id=26, image=None)
+check("26: повторный прогон того же текста вылечил файл графа", _wf26.exists())
+check("26: после лечения /entry снова отдаёт граф",
+      isinstance(h("GET", "/prompt_library/entry", Req(query={"id": _e26["id"]}))
+                 ["json"].get("workflow"), dict))
+
+# папка в favorite_many нормализуется (как во всех остальных роутах)
+h("POST", "/prompt_library/favorite_many", Req({"folder_paths": [" Аудит "]}))
+check("26: favorite_many нормализует путь папки",
+      (_entry("прогон для проверки флага графа") or {}).get("favorite") is True)
+
+# (в) обрезка MAX_ENTRIES не оставляет сирот-превью
+_prev_dir26 = mod._ensure_dirs() / "previews"
+_prev_dir26.mkdir(parents=True, exist_ok=True)
+_orig_max26 = mod.MAX_ENTRIES
+mod.MAX_ENTRIES = 3
+_trim26 = [{"id": f"trim26{i:04d}", "preview": f"previews/trim26{i:04d}.png"} for i in range(6)]
+for _e in _trim26:
+    (_prev_dir26 / f"{_e['id']}.png").write_bytes(b"x")
+mod._trim_entries(_trim26)
+check("26: обрезка убирает и файлы превью отброшенных записей",
+      not (_prev_dir26 / "trim260005.png").exists() and (_prev_dir26 / "trim260002.png").exists())
+mod.MAX_ENTRIES = _orig_max26
 
 
 # --- итог -------------------------------------------------------------------

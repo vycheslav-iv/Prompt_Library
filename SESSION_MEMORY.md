@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (v1.37, 2026-09-20)
+# Память сессии — Prompt Library (v1.41, 2026-09-21)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,60 +7,76 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-Реализация v1.36–v1.37: массовый drag-and-drop + закрепление папок + вывод категории по проводу:
-- v1.36: `POST /prompt_library/move_many`, `POST /prompt_library/favorite_many`, drag-and-drop с массивами ID/путей, drop на ★ Избранное
-- v1.37: `POST /prompt_library/folder_pin`, `pinned_folders` в `library.json`, кнопка 📌/📍 в `folderRow`, закреплённые папки сортируются вверх
-- **Новая выходная ветка `category_out`** (v1.37): `RETURN_TYPES = ("STRING", "STRING")`, возвращает санитизированный путь категории (пробелы → "_", служебные ветки исключены)
-- **Найдены и исправлены 5 багов:** `_pl_folder_delete`, `_pl_folder_delete_many`, `_pl_folder_rename`, `_pl_move_many` не обновляли `pinned_folders`; `_pl_folder_pin` не валидировал `__` префикс
-- Обновлена `SPECIFICATION.md` до v1.37
-- Все тесты зелёные: Python 244/244, smoke 80/80, аудит 19 роутов
-- Коммиты и пуш, синхронизация в рабочую копию
+- **v1.40: снимок графа вынесен из базы** — `workflows/{id}.json` вместо inline `entry["workflow"]`
+  (замер: 5 новых карточек → база +2.5 КБ вместо ~1700 КБ; было 18.6 МБ / 95 записей).
+  Старые записи с inline-графом НЕ переделывались — читаются как есть, миграции нет.
+- **v1.41: `IS_CHANGED` перестал смотреть на `mode`** — проверка из v1.39 давала `float("nan")`
+  при каждом Queue (`mode` непустой всегда), кэш ComfyUI для ноды не работал, база
+  перечитывалась на каждом прогоне (0.165 с).
+- **Новая живая проба** `tests/_probe_live_cache.py` — 5 прогонов на живом ComfyUI 0.36.0: ЗЕЛЁНАЯ.
+- Спека обновлена до v1.41 (шапка, хроника 32–33, §24.3, §25.3.1, §33.3–§33.6, §17, дерево тестов).
+- Пользователь подтвердил живьём: старые карточки, новая карточка, drag на канвас, замена
+  превью с сохранением графа.
 
 ## 2. Итоговое состояние кода
 
-- `prompt_library_node.py` — `_pl_folder_pin` (~1172), `_pl_favorite_many` (~1145), `_pl_move_many` (~1345), `_pl_folder_delete` (~1407), `_pl_folder_delete_many` (~1425), `_pl_folder_rename` (~1310)
-- `prompt_library_node.py` — `_load_pinned_folders()` (~153), `_save_pinned_folders()` (~167), `_save_db` обновлён (~183)
-- `web/js/prompt_library.js` — `st.pinnedFolders` (~677), `reload` (~1059), `folderRow` pin button (~1504), `renderTree` sort (~1599), `plDrop` (~1425), `list.ondrop` (~1447)
-- `SPECIFICATION.md` — обновлена до v1.37, добавлены §37.10, хроника 28-29
+- `prompt_library_node.py:74` — `_entry_workflow()` (сначала inline, потом файл)
+- `prompt_library_node.py:89` — `_workflow_path()` (id строго alfanum, иначе None — traversal закрыт)
+- `prompt_library_node.py:97` — `_save_workflow_file()` (tmp + `os.replace`)
+- `prompt_library_node.py:116` — `_remove_workflow_file()`
+- `prompt_library_node.py:125` — `_attach_workflow()` (не перезатирает существующий граф; лечит
+  потерянный файл — проверяет через `_entry_has_workflow`, а не сырые поля)
+- `prompt_library_node.py:151` — `_entry_has_workflow()` (отметка + файл существует)
+- `prompt_library_node.py:167` — `_trim_entries()` (убирает файл графа И файл превью)
+- `prompt_library_node.py:539` — `_remove_preview_file()` (поднят на уровень модуля)
+- `prompt_library_node.py:800` — `IS_CHANGED` (только `pickup`; `mode` больше не проверяется)
+- `prompt_library_node.py:843` — `_execute()`; запись в базу только при `save_on` и непустом `incoming`
+- `/entry` досыпает граф из файла; `/attach_preview` переносит граф; `/delete`, `/delete_many`
+  и обрезка `MAX_ENTRIES` убирают файл графа
+- `tests/_probe_live_cache.py` — живая проба кэша (в `check.py` не входит)
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- Drag-and-drop перемещал только один элемент при мультивыделении — фикс: отправка всех помеченных ID/путей
-- `plDrop` обрабатывал только один элемент — фикс: поддержка `d.ids` и `d.paths` массивов
-- Backend не имел bulk move/favorite эндпоинтов — добавлены `_pl_move_many`, `_pl_favorite_many`
-- Drop на `__fav` блокировался проверкой `!st.selFolder.startsWith("__")` — убрана проверка
-- Папки не имели поля `pinned` — добавлено `pinned_folders` как отдельный список в `library.json`
-- `_save_db`/`_save_pinned_folders` оба пишут `library.json` — решение: `_save_db` читает `pinned_folders` из файла
-- **5 багов в cleanup `pinned_folders`** при delete/rename/move — все исправлены
-- `_pl_folder_pin` не валидировал `__` префикс и не проверял существование папки — исправлено
-- Smoke test assertion failures (CANVAS/VUE version) — предсуществующие, не связаны с изменениями
+- **v1.39 сломал кэш**: `if str(mode).strip(): return nan` в `IS_CHANGED` — `mode` непустой всегда,
+  NaN безусловный. Убрано в v1.41; отдельная проверка не нужна — `mode` входит в ключ кэша виджетом.
+- **Живая проба: формат истории** — `status.messages` это пары `[тип, данные]`, а события
+  `executing`/`executed` туда НЕ попадают. Прибор: `execution_cached` со списком id; «исполнена» =
+  «отчёт есть, нашего id в списке нет».
+- **Проба падала на печати** — эмодзи режима в консоли cp1251 → `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`.
+- **Первый прогон пробы мог приехать закэшированным** от прошлого запуска → уникальная метка в `save_folder`.
+- **Итог аудита на мутирующей базе невалиден**: во время чистки базы пользователем счётчики и файлы
+  меняются под читателем (ложные «ошибки»). Мерить на копии базы или при остановленном ComfyUI.
 
 ## 4. Что важно не сломать при продолжении работы
 
-- `node --check web/js/prompt_library.js` — всегда зелёный перед смоук/аудитом.
-- Smoke тесты: 80 фаз, проверки `exportMarked`/`exportFolder`, `folderCalls`, `st.bulkExport` absent.
-- Python-песочница: 244/244, аудит `_audit_prompt_library.mjs` — 19 роутов чисты.
-- Sizing: запрет `setInterval`/`offsetHeight`/`scrollHeight` — чистый CSS-flex безопасен.
-- XSS: только `textContent`, все id — через `encodeURIComponent`.
-- Синхронизация и коммит обязательны (рабочая копия ComfyUI обновляется через `sync.py`).
-- Память сессии — только в папке проекта (там где `.git`), never в корень бандла.
-- `_save_db` сохраняет `pinned_folders` — при миграции legacy `library.json` без этого поля `_load_pinned_folders` вернёт `[]`.
-- При удалении/переименовании/перемещении папок `pinned_folders` автоматически обновляется.
+- НЕ возвращать проверку `mode` в `IS_CHANGED` (§33.3, §33.6).
+- Старые inline-записи читаются как есть; файл графа задним числом не создаётся.
+- Замена превью обязана переносить граф (`_entry_workflow`), иначе карточка теряет воркфлоу.
+- `_trim_entries` и удаление убирают и файл графа, и файл превью — сирот быть не должно.
+- Проба кэша безопасна только в режиме «📤 Выдача» с пустым `selected` (`save_on = False`);
+  в «Запись» она бы писала в живую базу.
+- Тесты лежат только в `tests/` и в рабочую копию ComfyUI не копируются (AGENTS.md §1.1).
+- После правок: `python sync.py Prompt_Library` → перезапуск ComfyUI → `node --check` для JS.
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-- Живая проверка закрепления папок в ComfyUI: кликнуть 📍 на папке, проверить что она вверху дерева.
-- Живая проверка drag-and-drop на ★ Избранное.
-- Проверить, что `application/x-pl-entry` на канвасе корректно обрабатывает несколько ID.
+- Живьём глазами: удаление карточки с файловым графом убирает `workflows/{id}.json`
+  (автотест есть, живьём не смотрели).
+- Живьём: самолечение при дубле — подхват текста, который уже есть карточкой без графа
+  (в базе таких 17 из 26).
+- Прогонять `tests/_probe_live_cache.py` после любого изменения `IS_CHANGED` и виджетов.
+- Дальше по масштабированию базы: `_load_db()` всё ещё читает весь JSON на каждую операцию
+  (при 500+ записях — SQLite; обсуждено, не делали).
 
 ## 6. Связанные файлы
 
-- `prompt_library_node.py` — `_pl_folder_pin`, `_pl_favorite_many`, `_pl_move_many`, `_pl_folder_delete`, `_pl_folder_delete_many`, `_pl_folder_rename`, `_load_pinned_folders`, `_save_pinned_folders`, `_save_db`, `_pl_list`
-- `web/js/prompt_library.js` — `PL_JS_VERSION` (81), `st.pinnedFolders`, `folderRow` pin button (1504), `renderTree` sort (1599), `reload` (1059), `plDrop` (1425), `list.ondrop` (1447)
-- `SPECIFICATION.md` — версия v1.37, §37.10, хроника 28-29
-- `tests/_smoke_prompt_library.mjs` — проверка версии JS (244)
-- `tests/_test_prompt_library.py` — 244/244
-- `tests/_audit_prompt_library.mjs` — 19 роутов чисты
+- `prompt_library_node.py` — хранение графов (§24.3), `IS_CHANGED` (§33)
+- `SPECIFICATION.md` — версия v1.41; §24.3, §25.3.1, §33.3–§33.6, §17, хроника 32–33
+- `tests/_test_prompt_library.py` — 304/304 (песочница; блоки 25–26 — граф и самоаудит)
+- `tests/_smoke_prompt_library.mjs` — 83 фазы; `tests/_audit_prompt_library.mjs` — аудит чист
+- `tests/_probe_live_cache.py` — живая проба кэша (запуск: `python tests/_probe_live_cache.py`)
+- `tests/_probe_live_dom.py`, `tests/_probe_snippet.js` — живые пробы DOM (§34)
 - `check.json` — `python _process/check.py Prompt_Library`
 - `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library` — рабочая копия
+- `D:\ComfyUI_windows_portable\ComfyUI\user\prompt_library\` — живая база (`library.json`, `workflows/`, `previews/`)
 - `SESSION_MEMORY-history/` — снапшоты

@@ -54,7 +54,125 @@ def _library_root():
 def _ensure_dirs():
     root = _library_root()
     (root / "previews").mkdir(parents=True, exist_ok=True)
+    # v1.40: снимки графов живут отдельными файлами (§24.2), а не внутри базы
+    (root / "workflows").mkdir(parents=True, exist_ok=True)
     return root
+
+
+# --- Графы записей (v1.40) ----------------------------------------------------
+# Снимок графа — это ЗАДУМАННАЯ часть карточки (§24.1): по ней открывается
+# воркфлоу кнопкой «📥 Воркфлоу» и перетаскиванием карточки на канвас. Но лежать
+# он должен ОТДЕЛЬНЫМ файлом: в library.json снимок весит ~340 КБ на запись
+# (замер 2026-09-21: 12.1 МБ из 18.6 МБ — 36 снимков), а база перечитывается
+# целиком на каждое действие (§25.3.1).
+#
+# Записи до v1.40 несут граф inline (`entry["workflow"]`) — их НЕ переделываем:
+# `_entry_workflow()` читает сначала inline, потом файл, поэтому старые карточки
+# открываются как и раньше. Клиенту разницы нет: /entry отдаёт то же поле
+# `workflow` в том же виде (браузерная часть не менялась вовсе).
+
+def _entry_workflow(entry):
+    """Граф записи: inline (записи < v1.40) или из workflows/{id}.json."""
+    wf = entry.get("workflow")
+    if isinstance(wf, dict):
+        return wf
+    path = _workflow_path(entry.get("id"))
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _workflow_path(entry_id):
+    """Файл графа записи. id идёт в имя файла, поэтому проверяем его как
+    везде остальном (алfanum): запись с id из `../x` иначе ушла бы за папку."""
+    if not re.fullmatch(r"[a-zA-Z0-9]+", str(entry_id or "")):
+        return None
+    return _ensure_dirs() / "workflows" / f"{entry_id}.json"
+
+
+def _save_workflow_file(entry_id, workflow):
+    """Положить граф в workflows/{id}.json (компактный JSON, как в снапшоте).
+    Возвращает относительный путь для записи или None (нет графа / ошибка)."""
+    if not isinstance(workflow, dict):
+        return None
+    path = _workflow_path(entry_id)
+    if path is None:
+        return None
+    try:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(workflow, ensure_ascii=False, separators=(",", ":")),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+        return f"workflows/{entry_id}.json"
+    except Exception as e:
+        print(f"[PromptLibrary] workflow file failed: {e}", flush=True)
+        return None
+
+
+def _remove_workflow_file(entry_id):
+    try:
+        path = _workflow_path(entry_id)
+        if path is not None:
+            path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _attach_workflow(entries, entry_id, workflow):
+    """Отметить у записи граф и положить его отдельным файлом (v1.40).
+    Возвращает True, если запись изменилась. Запись с уже имеющимся графом
+    (inline у старых, файл у новых) не трогаем — чужое не затираем."""
+    if not isinstance(workflow, dict):
+        return False
+    for e in entries:
+        if e.get("id") != entry_id:
+            continue
+        # _entry_has_workflow, а не сырые поля: если файл графа потерян (копию
+        # базы перенесли без папки workflows/), отметка врала бы «граф есть» и
+        # запись нельзя было бы вылечить — теперь прогон перезапишет файл.
+        if _entry_has_workflow(e):
+            return False
+        rel = _save_workflow_file(entry_id, workflow)
+        if rel:
+            e["workflow_file"] = rel
+        else:
+            # Файл не записался: id не годится для имени файла (правленная вручную
+            # база вида "bf-broadcast") или на диске нет прав. Лучше старое
+            # inline-хранение, чем молчаливая потеря графа — читатель понимает оба вида.
+            e["workflow"] = workflow
+        return True
+    return False
+
+
+def _entry_has_workflow(entry):
+    """Флаг для списка и кнопки «📥 Воркфлоу»: граф ЕСТЬ и он читается.
+
+    Проверяем не только отметку, но и существование файла: `os.path.exists`
+    на 500 записей — 1.8 мс (замер), дешевле разбора одной карточки, зато
+    список не врёт, если файлы графов потеряны (база восстановлена из бэкапа,
+    папку workflows/ не скопировали вручную) — иначе кнопка есть, а графа нет."""
+    if entry.get("workflow"):
+        return True  # inline (записи < v1.40)
+    rel = entry.get("workflow_file")
+    if not rel:
+        return False
+    path = _workflow_path(entry.get("id"))
+    return bool(path is not None and path.exists())
+
+
+def _trim_entries(entries):
+    """Обрезка до MAX_ENTRIES: у отброшенных записей убираем файл графа и
+    файл превью, иначе они остаются сиротами в workflows/ и previews/."""
+    if len(entries) <= MAX_ENTRIES:
+        return entries
+    for e in entries[MAX_ENTRIES:]:
+        _remove_workflow_file(e.get("id"))
+        _remove_preview_file(e.get("preview"))
+    return entries[:MAX_ENTRIES]
 
 
 # --- Папки -------------------------------------------------------------------
@@ -418,6 +536,20 @@ def _preview_path(entry_id):
     return None
 
 
+def _remove_preview_file(victim):
+    """Удалить файл превью по относительному пути из записи ("previews/x.png").
+    Guard: только файл прямо в previews/ с картинковым расширением — значение
+    приходит из базы (её правят и руками), выйти за папку нельзя."""
+    try:
+        root = _ensure_dirs()
+        cand = root / (victim or "")
+        if (victim and cand.parent == root / "previews"
+                and cand.suffix.lower() in (".jpg", ".jpeg", ".png")):
+            cand.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _snapshot_workflow(extra_pnginfo, cap=2_000_000):
     """Снапшот воркфлоу для записи: deep-copy + проверка сериализуемости + кап.
     Возвращает dict или None (нет данных / слишком большой / ошибка)."""
@@ -679,14 +811,15 @@ class PromptLibrary:
         `float("nan")` не равен сам себе — ComfyUI считает ноду изменившейся и
         исполняет её каждый Queue (штатный механизм IS_CHANGED). Без подхвата
         возвращаем None — нода кэшируется как обычно.
+
+        v1.41: проверки `mode` здесь БОЛЬШЕ НЕТ. В v1.39 было
+        `if str(mode).strip(): return nan`, а `mode` непустой всегда — получался
+        NaN при любом запуске (докстрока и §33.3 при этом обещают None). Это
+        выключало кэш ComfyUI для всей ноды и заставляло её на каждом Queue
+        заново разбирать library.json (замер: 0.165 с на живой базе). Для смены
+        режима отдельная проверка не нужна: `mode` — виджет, его значение входит
+        в ключ кэша, поэтому переключение режима и без IS_CHANGED даёт перепрогон.
         """
-        # mode — COMBO, ComfyUI может передавать его как список;
-        # любое изменение mode требует перевыполнения (смена режима = другое поведение).
-        mode_val = kwargs.get("mode")
-        if isinstance(mode_val, (list, tuple)):
-            mode_val = mode_val[0] if len(mode_val) else ""
-        if str(mode_val or "").strip():
-            return float("nan")
         val = kwargs.get("pickup")
         if isinstance(val, (list, tuple)):
             # Страховка: до разворачивания ComfyUI держит виджетные входы
@@ -795,7 +928,8 @@ class PromptLibrary:
                 print(f"[PromptLibrary] duplicate skipped (already in '{skipped['folder'] or 'root'}')", flush=True)
                 entry_id, added = dup.get("id"), False
             else:
-                entry_id, added = _add_entry(entries, incoming, fld, workflow=wf_copy, media=media)
+                # v1.40: граф НЕ пишем inline (он тяжёлый) — ниже он уйдёт файлом
+                entry_id, added = _add_entry(entries, incoming, fld, media=media)
             if added:
                 need_broadcast = True
                 preview = _save_thumbnail(frame, entry_id, wf_copy) if frame is not None else None
@@ -815,8 +949,8 @@ class PromptLibrary:
                 for e in entries:
                     if e.get("id") != entry_id:
                         continue
-                    if not e.get("workflow") and wf_copy:
-                        e["workflow"] = wf_copy
+                    if not _entry_has_workflow(e) and wf_copy:
+                        # сам граф приедет отдельным файлом ниже (v1.40)
                         _upgrade_preview_to_png(e, wf_copy)
                         dirty = True
                     if not e.get("media") and media:
@@ -831,11 +965,14 @@ class PromptLibrary:
                         # Старая/ручная запись без обложки — возьмём картинку прогона
                         preview_target = entry_id
                     break
+            # Граф — отдельным файлом (v1.40): старые записи с inline не трогаем
+            if _attach_workflow(entries, entry_id, wf_copy):
+                dirty = True
             if fld and fld not in folders:
                 folders.append(fld)
                 folders = sorted(set(folders) | set(_parent_folders(fld)))
                 dirty = True
-            entries = entries[:MAX_ENTRIES]
+            entries = _trim_entries(entries)
         if dirty:
             try:
                 _save_db(entries, folders)
@@ -894,7 +1031,9 @@ class PromptLibrary:
                 "last_used": e.get("last_used"),
                 "use_count": e.get("use_count", 0),
                 "has_preview": bool(e.get("preview")),
-                "has_workflow": bool(e.get("workflow")),
+                # Тот же флаг, что у /list: для новых записей граф лежит файлом,
+                # поэтому сырое e.get("workflow") здесь всегда давало false.
+                "has_workflow": _entry_has_workflow(e),
                 "media": e.get("media"),
             }
             for e in entries[:200]
@@ -936,7 +1075,8 @@ try:
     def _strip_entry(e):
         """Лёгкая проекция для списка: без workflow (тяжёлый), но с флагами."""
         c = {k: v for k, v in e.items() if k != "workflow"}
-        c["has_workflow"] = bool(e.get("workflow"))
+        # v1.40: граф лежит файлом (workflow_file); inline остаётся у старых
+        c["has_workflow"] = _entry_has_workflow(e)
         return c
 
     def _locked(handler):
@@ -1022,7 +1162,9 @@ try:
         if preview_data:
             # Кадр, снятый браузером: первый кадр видео с диска или замена обложки
             media = media_hint or "image"
-            prev = _save_preview_upload(preview_data, entry_id, target.get("workflow") or None)
+            # v1.40: граф может лежать файлом — чанк в новом превью обязан его
+            # перенести, иначе карточка потеряет воркфлоу (§24.2)
+            prev = _save_preview_upload(preview_data, entry_id, _entry_workflow(target))
             if not prev:
                 return web.json_response({"error": "preview_data rejected"}, status=400)
         else:
@@ -1031,7 +1173,7 @@ try:
                 arr = _load_media_frame(src)
             except Exception as exc:
                 return web.json_response({"error": f"media read failed: {exc}"}, status=400)
-            prev = _save_thumbnail(arr, entry_id, target.get("workflow") or None)
+            prev = _save_thumbnail(arr, entry_id, _entry_workflow(target))
             if not prev:
                 return web.json_response({"error": "thumbnail failed"}, status=500)
         target["preview"] = prev
@@ -1077,10 +1219,12 @@ try:
             print(f"[PromptLibrary] duplicate skipped (already in '{dup.get('folder', '') or 'root'}')", flush=True)
             return web.json_response({"ok": True, "id": dup.get("id"), "duplicate": True,
                                       "folder": dup.get("folder", "")})
-        # Воркфлоу из токена: запись самодостаточна, как у автосейва из execute()
-        entry_id, created = _add_entry(entries, text, folder, workflow=rec.get("workflow"))
+        # Воркфлоу из токена: запись самодостаточна, как у автосейва из execute().
+        # v1.40: граф — отдельным файлом, а не внутри library.json
+        entry_id, created = _add_entry(entries, text, folder)
         if created:
-            entries = entries[:MAX_ENTRIES]
+            _attach_workflow(entries, entry_id, rec.get("workflow"))
+            entries = _trim_entries(entries)
             if folder and folder not in folders:
                 folders = sorted(set(folders) | {folder} | set(_parent_folders(folder)))
             try:
@@ -1127,7 +1271,11 @@ try:
         entries, _ = _load_db()
         for e in entries:
             if e.get("id") == entry_id:
-                return web.json_response(e)
+                # v1.40: граф досыпаем из workflows/{id}.json — клиент получает
+                # ТО ЖЕ поле в том же виде, что и раньше (JS не менялся)
+                out = dict(e)
+                out["workflow"] = _entry_workflow(e)
+                return web.json_response(out)
         return web.json_response({"error": "not found"}, status=404)
 
     @routes.get("/prompt_library/preview")
@@ -1169,7 +1317,7 @@ try:
                     if e.get("id") == entry_id:
                         e["preview"] = prev
                         break
-            entries = entries[:MAX_ENTRIES]
+            entries = _trim_entries(entries)
             if folder and folder not in folders:
                 folders = sorted(set(folders) | {folder} | set(_parent_folders(folder)))
             _save_db(entries, folders)
@@ -1207,7 +1355,10 @@ try:
         entries, folders = _load_db()
         marked = 0
         if folder_paths and isinstance(folder_paths, list):
-            fp_set = set(f for f in folder_paths if isinstance(f, str) and f)
+            # _norm_folder: " Фото/ " из чужого/устаревшего клиента не совпало бы
+            # ни с одной записью (folder в базе уже нормализован _load_db)
+            fp_set = {_norm_folder(f) for f in folder_paths if isinstance(f, str) and f}
+            fp_set.discard("")
             for e in entries:
                 if e.get("favorite"):
                     continue
@@ -1294,17 +1445,6 @@ try:
             _broadcast_refresh()
         return web.json_response({"ok": True})
 
-    def _remove_preview_file(victim):
-        try:
-            root = _ensure_dirs()
-            cand = root / (victim or "")
-            # guard: удаляем только файл прямо в previews/
-            if (victim and cand.parent == root / "previews"
-                    and cand.suffix.lower() in (".jpg", ".jpeg", ".png")):
-                cand.unlink(missing_ok=True)
-        except Exception:
-            pass
-
     @routes.post("/prompt_library/delete")
     @_locked
     async def _pl_delete(request, body=None):
@@ -1319,6 +1459,7 @@ try:
         if len(new_entries) < len(entries):
             _save_db(new_entries, folders)
             _remove_preview_file(victim)
+            _remove_workflow_file(entry_id)  # v1.40: и файл графа
             _broadcast_refresh()
         return web.json_response({"ok": True})
 
@@ -1334,13 +1475,16 @@ try:
         if not want:
             return web.json_response({"ok": True, "deleted": 0})
         entries, folders = _load_db()
-        victims = [e.get("preview") for e in entries if e.get("id") in want]
+        gone = [e for e in entries if e.get("id") in want]
+        victims = [e.get("preview") for e in gone]
         new_entries = [e for e in entries if e.get("id") not in want]
         deleted = len(entries) - len(new_entries)
         if deleted:
             _save_db(new_entries, folders)
             for v in victims:
                 _remove_preview_file(v)
+            for e in gone:  # v1.40: файлы графов удалённых записей
+                _remove_workflow_file(e.get("id"))
             _broadcast_refresh()
         return web.json_response({"ok": True, "deleted": deleted})
 
