@@ -197,8 +197,8 @@ res = node.execute(mode=node.MODE_WRITE, selected="", save_folder="Фото",
 check("«Запись»: выход пуст + ui на месте", res["result"][0] == "" and "ui" in res,
       str(res["result"]))
 check("входной текст обрезан", res["ui"]["text"] == ["Портрет девушки"])
-check("PNG-патч записал widgets_values позиционно (4 значения, v1.25)",
-      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото", ""],
+check("PNG-патч записал widgets_values позиционно (5 значений, v1.44)",
+      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото", "", ""],
       str(workflow["nodes"][0]["widgets_values"]))
 check("чужой node id не тронут", len(workflow["nodes"]) == 1)
 entries, folders = mod._load_db()
@@ -926,8 +926,8 @@ check("подхват: снапшот воркфлоу отложен под т�
 check("подхват: подсказка о том, почему вход не сохраняется",
       "не сохраняется" in (res_pick["ui"]["mode_notice"][0] or ""),
       str(res_pick["ui"]["mode_notice"]))
-check("подхват: PNG-патч несёт pickup 4-м значением",
-      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_BOTH, "", "Подхват", "1622"],
+check("подхват: PNG-патч несёт pickup 4-м значением, slots_out 5-м",
+      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_BOTH, "", "Подхват", "1622", ""],
       str(wf_pick["nodes"][0]["widgets_values"]))
 # Без подхвата поведение прежнее (pickup="")
 res_off = node3.execute(mode=node3.MODE_WRITE, selected="", save_folder="", pickup="",
@@ -1555,6 +1555,96 @@ mod._trim_entries(_trim26)
 check("26: обрезка убирает и файлы превью отброшенных записей",
       not (_prev_dir26 / "trim260005.png").exists() and (_prev_dir26 / "trim260002.png").exists())
 mod.MAX_ENTRIES = _orig_max26
+
+
+print("\n27. Мультивывод (§40): 12 выходов, slots_out")
+check("27: RETURN_TYPES — 12 STRING", mod.PromptLibrary.RETURN_TYPES == tuple(["STRING"] * 12),
+      str(mod.PromptLibrary.RETURN_TYPES))
+check("27: RETURN_NAMES — prompt_out, category_out, out_2..out_11",
+      mod.PromptLibrary.RETURN_NAMES == ("prompt_out", "category_out", *[f"out_{i}" for i in range(2, 12)]),
+      str(mod.PromptLibrary.RETURN_NAMES))
+
+node27 = mod.PromptLibrary()
+
+# Базовые записи для слотов
+node27.execute(mode=node27.MODE_WRITE, selected="", save_folder="Слоты",
+               source="текст-карточки-1", extra_pnginfo=None, unique_id=1)
+node27.execute(mode=node27.MODE_WRITE, selected="", save_folder="Слоты/Под",
+               source="текст-карточки-2", extra_pnginfo=None, unique_id=2)
+_e27a = _entry("текст-карточки-1")
+_e27b = _entry("текст-карточки-2")
+
+# Пустой slots_out → пустые дополнительные выходы
+res27 = node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out="",
+                       extra_pnginfo=None, unique_id=1)
+check("27: пустой slots_out → слоты пусты", len(res27["result"]) == 12
+      and all(s == "" for s in res27["result"][2:]), str(len(res27["result"])))
+check("27: 0-1 выходы на месте", res27["result"][0] == "" and res27["result"][1] == "",
+      str(res27["result"][:2]))
+
+# Битый JSON не роняет ноду
+res27x = node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out="{{{",
+                        extra_pnginfo=None, unique_id=1)
+check("27: битый JSON → слоты пусты, нода не падает", len(res27x["result"]) == 12
+      and all(s == "" for s in res27x["result"][2:]))
+
+# Карточка в слоте 2, папка в слоте 3 (active_id — выбранная запись папки)
+slots27 = json.dumps([
+    {"i": 2, "kind": "card", "id": _e27a["id"], "name": "Карточка 1"},
+    {"i": 3, "kind": "folder", "path": "Слоты/Под", "active_id": _e27b["id"], "name": "Под"},
+])
+res27s = node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out=slots27,
+                        extra_pnginfo=None, unique_id=1)
+check("27: слот-карточка выдаёт prompt записи", res27s["result"][2] == "текст-карточки-1",
+      str(res27s["result"][2]))
+check("27: слот-папка выдаёт prompt active_id", res27s["result"][3] == "текст-карточки-2",
+      str(res27s["result"][3]))
+check("27: незанятые слоты пусты", res27s["result"][4] == "" and res27s["result"][11] == "")
+
+# Удалённая запись → «(запись удалена)»
+slots27g = json.dumps([
+    {"i": 5, "kind": "card", "id": "нет-такого-id", "name": "Потеряшка"},
+    {"i": 6, "kind": "folder", "path": "Слоты", "active_id": "нет-такого-id", "name": "Слоты"},
+])
+res27g = node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out=slots27g,
+                        extra_pnginfo=None, unique_id=1)
+check("27: карточка без записи → «(запись удалена)»", res27g["result"][5] == "(запись удалена)",
+      str(res27g["result"][5]))
+check("27: папка с несуществующим active_id → пусто", res27g["result"][6] == "",
+      str(res27g["result"][6]))
+
+# Индекс вне диапазона и не-int игнорируются
+slots27o = json.dumps([
+    {"i": 0, "kind": "card", "id": _e27a["id"]},
+    {"i": 12, "kind": "card", "id": _e27a["id"]},
+    {"i": "2", "kind": "card", "id": _e27a["id"]},
+    {"i": 7, "kind": "unknown", "id": _e27a["id"]},
+])
+res27o = node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out=slots27o,
+                        extra_pnginfo=None, unique_id=1)
+check("27: вне 2..11 / не-int / незнакомый kind отброшены",
+      all(s == "" for s in res27o["result"][2:]), str(res27o["result"][2:]))
+
+# List-форма (map-over-list) — как pickup
+res27l = node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out=[slots27],
+                        extra_pnginfo=None, unique_id=1)
+check("27: slots_out списком (map-over-list) работает", len(res27l["result"]) == 12
+      and res27l["result"][2] == "текст-карточки-1", str(res27l["result"][:4]))
+
+# PNG-патч несёт slots_out 5-м значением
+wf27 = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
+node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out=slots27,
+               extra_pnginfo={"workflow": wf27}, unique_id=7)
+check("27: PNG-патч несёт slots_out 5-м значением",
+      wf27["nodes"][0]["widgets_values"] == [node27.MODE_ISSUE, "", "", "", slots27],
+      str(wf27["nodes"][0]["widgets_values"]))
+
+# Выдача + слоты одновременно: prompt_out своим, слоты своими
+res27x2 = node27.execute(mode=node27.MODE_ISSUE, selected=_e27a["id"], save_folder="",
+                         slots_out=slots27, extra_pnginfo=None, unique_id=1)
+check("27: prompt_out (выбор) и слот (та же запись) не конфликтуют",
+      res27x2["result"][0] == "текст-карточки-1" and res27x2["result"][2] == "текст-карточки-1",
+      str(res27x2["result"][:3]))
 
 
 # --- итог -------------------------------------------------------------------

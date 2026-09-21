@@ -183,6 +183,45 @@ def _norm_folder(path):
     return "/".join(parts)
 
 
+def _parse_slots(raw):
+    """Парсит JSON-привязки доп. выходов (slots_out, §40).
+
+    Вход: строка JSON (или пусто) → список слотов [{i, kind, ...}].
+    Любой мусор (битый JSON, не-список, не-словари) → пустой список:
+    мультивывод молча выключен, но нода не падает. Результат чистится от
+    невалидных записей: i должен быть int в 2..11, kind — card или folder.
+    """
+    if isinstance(raw, (list, tuple)):
+        if len(raw) == 1:
+            raw = raw[0]
+        else:
+            return []
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for s in data:
+        if not isinstance(s, dict):
+            continue
+        i = s.get("i")
+        kind = s.get("kind")
+        if not isinstance(i, int) or not (2 <= i <= 11):
+            continue
+        if kind not in ("card", "folder"):
+            continue
+        if kind == "card" and not isinstance(s.get("id", ""), str):
+            continue
+        if kind == "folder" and not isinstance(s.get("path", ""), str):
+            continue
+        out.append(s)
+    return out
+
+
 def _sanitize_folder_path(path):
     """Санитизирует путь папки для вывода по проводу.
     Сохраняет пробелы и нечитаемые символы заменяет на '_', исключает
@@ -788,6 +827,9 @@ class PromptLibrary:
                 # id узла, из которого брать текст для сохранения после прогона
                 # (подхват, v1.25). Виджет скрыт: значение пишет DOM-селектор.
                 "pickup": ("STRING", {"multiline": False, "default": ""}),
+                # v1.44 (§40, мультивывод): JSON-привязки доп. выходов. Скрытый
+                # виджет — значение пишет JS по дропам в категории «Выходы».
+                "slots_out": ("STRING", {"multiline": False, "default": "[]"}),
             },
             "optional": {
                 "source": ("*", {}),
@@ -802,8 +844,13 @@ class PromptLibrary:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("prompt_out", "category_out")
+    # v1.44 (§40, мультивывод): 12 STRING-выходов. Слоты 0-1 (prompt_out,
+    # category_out) — без изменений; 2-11 — доп. выходы из категории «Выходы»
+    # (создаются дропом в ней). Неиспользуемые слоты возвращают "".
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING",
+                    "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("prompt_out", "category_out", "out_2", "out_3", "out_4", "out_5",
+                    "out_6", "out_7", "out_8", "out_9", "out_10", "out_11")
     FUNCTION = "execute"
     CATEGORY = "My_custom_nodes/Prompts"
     OUTPUT_NODE = True
@@ -847,17 +894,17 @@ class PromptLibrary:
             return float("nan")
         return None
 
-    def execute(self, mode="", selected="", save_folder="", pickup="", source=None, image=None,
+    def execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", source=None, image=None,
                 extra_pnginfo=None, unique_id=None, **kwargs):
         # Весь прогон узла держит общий с HTTP-роутами замок (§25.3.2): execute()
         # исполняется в потоке ComfyUI, а роуты — в event loop; без замка их циклы
         # «load -> mutate -> save» могли наложиться и потерять чужое изменение
         # (например, только что созданную вручную запись или удаление).
         with _DB_LOCK:
-            return self._execute(mode, selected, save_folder, pickup, source, image,
+            return self._execute(mode, selected, save_folder, pickup, slots_out, source, image,
                                  extra_pnginfo, unique_id, **kwargs)
 
-    def _execute(self, mode="", selected="", save_folder="", pickup="", source=None, image=None,
+    def _execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", source=None, image=None,
                  extra_pnginfo=None, unique_id=None, **kwargs):
         # mode может прийти как список (ComfyUI COMBO через map-over-list) —
         # приводим к строке, как уже делаем для pickup.
@@ -1013,8 +1060,9 @@ class PromptLibrary:
                     for node_data in workflow["nodes"]:
                         if str(node_data.get("id")) == str(unique_id):
                             # Порядок = порядок INPUT_TYPES required:
-                            # mode, selected, save_folder (prompt-виджет удалён в v1.7)
-                            node_data["widgets_values"] = [mode, selected, save_folder, pickup]
+                            # mode, selected, save_folder, pickup, slots_out
+                            # (prompt-виджет удалён в v1.7; slots_out — v1.44)
+                            node_data["widgets_values"] = [mode, selected, save_folder, pickup, slots_out]
                             break
             except Exception:
                 pass
@@ -1035,6 +1083,35 @@ class PromptLibrary:
             # из него нет (подхват берёт текст из другого узла после прогона).
             notice = (f"Подхват включён: входящий текст не сохраняется — запись "
                       f"берётся из узла №{pickup_node} после прогона.")
+
+        # 3.2. Мультивывод (§40): доп. слоты 2-11 из категории «Выходы».
+        # slots_out — JSON: [{i, kind: "card"|"folder", id или path+active_id}].
+        # Текст слота = prompt записи; карточка без записи → «(запись удалена)».
+        slot_texts = [""] * 10
+        try:
+            slots = _parse_slots(slots_out)
+        except Exception:
+            slots = []
+        for s in slots:
+            i = s.get("i")
+            if not isinstance(i, int) or not (2 <= i <= 11):
+                continue
+            text = ""
+            if s.get("kind") == "card":
+                eid = s.get("id", "")
+                for e in entries:
+                    if e.get("id") == eid:
+                        text = e.get("prompt", "")
+                        break
+                if not text:
+                    text = "(запись удалена)"
+            elif s.get("kind") == "folder":
+                aid = s.get("active_id", "")
+                for e in entries:
+                    if e.get("id") == aid:
+                        text = e.get("prompt", "")
+                        break
+            slot_texts[i - 2] = text
 
         # 4. Лёгкий UI-пакет (без полных текстов — только заголовки, полный текст по клику)
         ui_entries = [
@@ -1070,7 +1147,7 @@ class PromptLibrary:
                         # этому флагу не выдаёт ложное «нода не исполнялась (кэш)».
                         "pickup_blocked": [pickup_node] if pickup_blocked else [],
                         "mode_notice": [notice]},
-                "result": (out_text, _sanitize_folder_path(folder))}
+                "result": (out_text, _sanitize_folder_path(folder), *slot_texts)}
 
 
 # --- HTTP-endpoints для JS ---------------------------------------------------

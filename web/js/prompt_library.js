@@ -119,6 +119,15 @@ app.registerExtension({
                 pickupW.options && (pickupW.options.hideInPanel = true);
                 pickupW.computeSize = () => [0, -4];
             }
+            // v1.44 (§40): JSON-привязки доп. выходов — пишет JS по дропам в
+            // категории «Выходы». Скрыт и не сериализуется как виджет — значение
+            // пишется в widgets_values PNG-патчем (как pickup).
+            const slotsOutW = this.widgets?.find((w) => w.name === "slots_out");
+            if (slotsOutW) {
+                slotsOutW.hidden = true;
+                slotsOutW.options && (slotsOutW.options.hideInPanel = true);
+                slotsOutW.computeSize = () => [0, -4];
+            }
 
 
             // --- DOM: библиотека ---
@@ -692,6 +701,9 @@ app.registerExtension({
                 // только при открытой панели книги, а этот — всегда, до действия
                 // пользователя (клик по папке/карточке сбрасывает).
                 hintSticky: null,
+                // v1.44 (§40): привязки доп. выходов. Зеркало скрытого виджета
+                // slots_out: [{i, kind:"card"|"folder", id|path, active_id?, name?}].
+                slotsOut: [],
             };
             this._pl = st;
             plLiveStates.add(st);
@@ -1045,6 +1057,90 @@ app.registerExtension({
                     const v = st.selFolder === "__all" ? "" : (st.selFolder || "");
                     if (sf && sf.value !== v) sf.value = v;
                 } catch (e) { /* silent */ }
+            };
+
+            // --- Мультивывод (§40): привязки доп. выходов 2..11 --------------
+            // Скрытый виджет slots_out несёт JSON [{i, kind, id|path, active_id, name}].
+            // st.slotsOut — зеркало на время сессии; пишем в виджет при каждом
+            // изменении (он персистится PNG-патчем и входит в cache-key ноды).
+            st.outSlotsWidget = () => this.widgets?.find((w) => w.name === "slots_out") || null;
+            st.readOutSlots = () => {
+                try {
+                    const w = st.outSlotsWidget();
+                    if (!w) return st.slotsOut;
+                    if (Array.isArray(w.value)) return w.value;
+                    if (w.value === undefined || w.value === null || w.value === "") return [];
+                    const d = typeof w.value === "string" ? JSON.parse(w.value) : w.value;
+                    return Array.isArray(d) ? d : [];
+                } catch (e) { return st.slotsOut; }
+            };
+            st.writeOutSlots = (arr) => {
+                try {
+                    st.slotsOut = arr;
+                    const w = st.outSlotsWidget();
+                    if (w) w.value = JSON.stringify(arr);
+                } catch (e) { /* silent */ }
+            };
+            // Индекс ближайшего свободного слота 2..11; null — все заняты.
+            st.nextOutSlot = () => {
+                const used = new Set(st.readOutSlots().map((s) => s && s.i));
+                for (let i = 2; i <= 11; i++) if (!used.has(i)) return i;
+                return null;
+            };
+            st.outSlotBy = (pred) => st.readOutSlots().find((s) => s && pred(s)) || null;
+            st.outSlotOfEntry = (id) => st.outSlotBy((s) => s.kind === "card" && s.id === id);
+            st.outSlotOfFolder = (path) => st.outSlotBy((s) => s.kind === "folder" && s.path === path);
+            // Показ/скрытие сокета выхода + имя провода. Сокеты 2..11 скрыты,
+            // пока слот не занят; имя — название привязки (обрезка).
+            st.applyOutSockets = () => {
+                try {
+                    const slots = st.readOutSlots();
+                    const byIndex = new Map(slots.filter((s) => s).map((s) => [s.i, s]));
+                    if (!this.outputs) return;
+                    for (let i = 0; i < this.outputs.length; i++) {
+                        if (i < 2) continue;
+                        const o = this.outputs[i];
+                        if (!o) continue;
+                        const s = byIndex.get(i);
+                        if (s) {
+                            o.hide = false;
+                            if (s.name) o.name = s.name.slice(0, 16);
+                            else o.name = `out_${i}`;
+                        } else {
+                            o.hide = true;
+                        }
+                    }
+                } catch (e) { /* silent */ }
+                try { this.setDirtyCanvas?.(true, true); } catch (e) { /* silent */ }
+            };
+            // Открытая папка = папка-слот и эта карточка — её активный вывод
+            // (v1.44): карточка в списке папки подсвечивается зелёным и держит
+            // маркер 🔌, пока слот подключён.
+            st.folderActOf = (eid) => st.outSlotBy((s) => s.kind === "folder" && s.path === st.selFolder && s.active_id === eid);
+            st.bindOutSlot = (slot) => {
+                try {
+                    const arr = st.readOutSlots().filter((s) => s);
+                    const dup = arr.some((s) => (slot.kind === "card" ? s.id === slot.id : s.path === slot.path));
+                    if (dup) return;
+                    const i = (slot.i === undefined || slot.i === null) ? st.nextOutSlot() : slot.i;
+                    if (i === null) {
+                        st.toast("warn", "Prompt Library: выходы", "Все 10 слотов заняты — отвяжите лишние в категории «🔌 Выходы».");
+                        return;
+                    }
+                    arr.push({ i, kind: slot.kind, id: slot.id, path: slot.path, active_id: slot.active_id, name: slot.name });
+                    st.writeOutSlots(arr);
+                    st.applyOutSockets();
+                    renderTree(); render();
+                } catch (e) { /* silent */ }
+            };
+            st.unbindOutSlot = (i) => {
+                try {
+                    if (this.outputs && this.outputs[i] && this.outputs[i].links && this.outputs[i].links.length) this.disconnectOutput(i);
+                } catch (e) { /* silent */ }
+                const arr = st.readOutSlots().filter((s) => s && s.i !== i);
+                st.writeOutSlots(arr);
+                st.applyOutSockets();
+                renderTree(); render();
             };
 
 
@@ -1440,6 +1536,31 @@ app.registerExtension({
             st.plDrop = async (d, target) => {
                 if (!d) return;
                 try {
+                    // v1.44 (§40): дроп в категорию «Выходы» — создаёт слот
+                    // (привязку доп. выхода). Ближайший свободный индекс берёт
+                    // bindOutSlot; дубль (та же карточка/папка) игнорируется.
+                    if (target === "__outs") {
+                        if (d.kind === "entry") {
+                            for (const id of (d.ids || (d.id ? [d.id] : []))) {
+                                const e = st.entries.find((x) => x.id === id);
+                                st.bindOutSlot({ kind: "card", id, name: (e && (e.title || e.head)) || id });
+                            }
+                        } else if (d.kind === "folder") {
+                            for (const p of (d.paths || (d.path ? [d.path] : []))) {
+                                // Карточка-вывод папки: наследуем текущее выделение,
+                                // если оно лежит в этой папке (иначе — пусто, слот
+                                // отдаст «», пока карточку не кликнут внутри папки).
+                                let active = "";
+                                try {
+                                    const s = selWidget ? String(selWidget.value || "") : "";
+                                    const e = st.entries.find((x) => x.id === s && x.folder === p);
+                                    if (e) active = e.id;
+                                } catch (err) { /* silent */ }
+                                st.bindOutSlot({ kind: "folder", path: p, active_id: active, name: (p.split("/").pop()) || p });
+                            }
+                        }
+                        return;
+                    }
                     if (d.kind === "entry") {
                         const ids = d.ids || (d.id ? [d.id] : []);
                         if (!ids.length) return;
@@ -1607,9 +1728,11 @@ app.registerExtension({
                 st.tree.innerHTML = "";
                 // Порядок строк для Shift-диапазона (включая служебные — при
                 // применении диапазона они пропускаются, метятся только папки).
-                st.folderOrder = ["__all", "__fav", "__root"];
+                st.folderOrder = ["__all", "__fav", "__outs", "__root"];
                 st.tree.appendChild(folderRow("__all", "📚 Всё", 0, false));
                 st.tree.appendChild(folderRow("__fav", "★ Избранное", 0, false));
+                // v1.44 (§40): категория привязок доп. выходов (виртуальная ветка)
+                st.tree.appendChild(folderRow("__outs", "🔌 Выходы", 0, false));
                 st.tree.appendChild(folderRow("__root", "📥 Без категории", 0, false));
                 const all = [...new Set([...st.folders, ...st.entries.map((e) => e.folder).filter(Boolean)])];
                 all.sort((a, b) => {
@@ -1706,9 +1829,52 @@ app.registerExtension({
                 st.list.innerHTML = "";
                 const selVal = selWidget ? selWidget.value : "";
                 let shown = 0;
+                // v1.44 (§40): категория «Выходы» показывает не записи, а слоты
+                // (привязки доп. выходов) с кнопкой отвязки. Графика не нужна —
+                // строки: 🔌 + имя (карточка/папка) + индекс слота + «отвязать».
+                if (st.selFolder === "__outs") {
+                    const slots = (st.readOutSlots() || []).filter((s) => s).sort((a, b) => a.i - b.i);
+                    for (const slot of slots) {
+                        const row = document.createElement("div");
+                        row.draggable = false;
+                        row.style.cssText = `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid #2e6b4f;background:#14302a;flex-shrink:0;`;
+                        const icon = document.createElement("span");
+                        icon.textContent = "🔌";
+                        icon.title = `Слот out_${slot.i}`;
+                        const body = document.createElement("div");
+                        body.style.cssText = "flex:1;min-width:0;";
+                        const t = document.createElement("div");
+                        t.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                        const m = document.createElement("div");
+                        m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                        if (slot.kind === "card") {
+                            const e = st.entries.find((x) => x.id === slot.id);
+                            t.textContent = (e && (e.title || e.head)) || "(запись удалена)";
+                            m.textContent = e ? (e.folder || "Без категории") : "записи нет — слот отдаст «(запись удалена)»";
+                        } else {
+                            t.textContent = slot.path || "?";
+                            const e = st.entries.find((x) => x.id === slot.active_id);
+                            m.textContent = "папка" + (e ? ` · вывод: ${e.title || e.head}` : " · вывод: не выбран");
+                        }
+                        const del = document.createElement("button");
+                        del.textContent = "✖";
+                        del.title = "Отвязать выход (провод отключится, сокет скроется)";
+                        del.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;color:#e08a3c;flex-shrink:0;";
+                        del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
+                        body.appendChild(t); body.appendChild(m);
+                        row.appendChild(icon); row.appendChild(body); row.appendChild(del);
+                        st.list.appendChild(row);
+                        shown++;
+                    }
+                    st.renderHint(shown);
+                    return;
+                }
                 for (const e of sortedFiltered()) {
                     const card = document.createElement("div");
                     card.draggable = true;
+                    // v1.44 (§40): карточка, привязанная к слоту (или активный
+                    // вывод папки-слота), несёт маркер 🔌 и зелёную подсветку.
+                    const outMark = !!(st.outSlotOfEntry(e.id) || st.folderActOf(e.id));
                     card.title = (e.has_workflow
                         ? "Тяни на канвас — открыть сохранённый воркфлоу"
                         : "Воркфлоу нет (ручная запись) — прогони Queue, и воркфлоу прикрепится")
@@ -1724,8 +1890,8 @@ app.registerExtension({
                     // не влияет, в отличие от border) + тёплая подложка
                     const marked = st.markEntries.has(e.id);
                     const acct = marked ? "box-shadow:inset 4px 0 0 #e08a3c;" : "";
-                    const bg = marked ? "#4a2f18" : e.id === selVal ? "#1e2c44" : "#1e1e1e";
-                    const border = `1px solid ${e.id === selVal ? "#4a9eff" : "#333"}`;
+                    const bg = marked ? "#4a2f18" : outMark ? "#1c3525" : e.id === selVal ? "#1e2c44" : "#1e1e1e";
+                    const border = `1px solid ${outMark ? "#2e6b4f" : e.id === selVal ? "#4a9eff" : "#333"}`;
                     card.style.cssText = grid
                         ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}flex-shrink:0;`
                         : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}`;
@@ -1752,7 +1918,7 @@ app.registerExtension({
                     body.style.cssText = grid ? "min-width:0;text-align:center;" : "flex:1;min-width:0;";
                     const title = document.createElement("div");
                     title.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                    title.textContent = (e.pinned ? "📌 " : "") + plBadge(e) + (e.title || e.head || "(без названия)");
+                    title.textContent = (outMark ? "🔌 " : "") + (e.pinned ? "📌 " : "") + plBadge(e) + (e.title || e.head || "(без названия)");
                     title.title = e.title || e.head || "";
                     body.appendChild(title);
                     if (!grid) {
@@ -1850,6 +2016,16 @@ app.registerExtension({
                         if (st.markEntries.size || st.markFolders.size) st.clearMarks();
                         if (selWidget) selWidget.value = e.id;
                         st.anchorEntry = e.id; // обычный клик ставит якорь для Shift-диапазона
+                        // v1.44 (§40): открыта папка-слот и кликнули карточку —
+                        // слот сразу выводит её (перезапись active_id → cache-key
+                        // меняется → нода переисполняется).
+                        const arr = st.readOutSlots();
+                        const folderSlot = arr.find((s) => s && s.kind === "folder" && s.path === st.selFolder);
+                        if (folderSlot && folderSlot.active_id !== e.id) {
+                            folderSlot.active_id = e.id;
+                            st.writeOutSlots(arr);
+                            st.applyOutSockets();
+                        }
                         await st.fillDetail(e.id);
                         render();
                         // Vue: размером ноды владеет layout, перерисовку канваса
@@ -2582,7 +2758,7 @@ app.registerExtension({
             st.dropAutoSockets = () => {
                 try {
                     if (typeof this.removeInput !== "function" || !this.inputs) return;
-                    for (const n of ["selected", "save_folder", "pickup"]) {
+                    for (const n of ["selected", "save_folder", "pickup", "slots_out"]) {
                         const idx = this.inputs.findIndex((i) => i.widget && i.widget.name === n);
                         if (idx >= 0 && this.inputs[idx].link == null) this.removeInput(idx);
                     }
@@ -2786,10 +2962,31 @@ app.registerExtension({
                     if (v) st.selFolder = v;
                 }
             } catch (e) { /* silent */ }
+            // v1.44 (§40): восстановить привязки слотов из данных воркфлоу и
+            // показать занятые сокеты. Читаем столько форм, сколько есть —
+            // старые графы без slots_out просто дадут пустой список.
+            try {
+                const st = this._pl;
+                if (st && info) {
+                    let sv = null;
+                    const named = info.widgets_values_named;
+                    if (named && typeof named.slots_out === "string") sv = named.slots_out;
+                    if (sv == null && Array.isArray(info.widgets_values) && typeof info.widgets_values[4] === "string") sv = info.widgets_values[4];
+                    if (sv) {
+                        try {
+                            const arr = JSON.parse(sv);
+                            if (Array.isArray(arr)) st.slotsOut = arr;
+                        } catch (err) { /* silent */ }
+                    }
+                    const sw = st.outSlotsWidget?.();
+                    if (sw && sw.value !== sv) sw.value = sv || "";
+                }
+            } catch (e) { /* silent */ }
             requestAnimationFrame(() => {
                 try { this._pl?.applyPaneLayout?.(); } catch (e) { /* silent */ }
                 try { this._pl?.applyNodeMinWidth?.(); } catch (e) { /* silent */ }
                 try { this._pl?.dropAutoSockets?.(); } catch (e) { /* silent */ }
+                try { this._pl?.applyOutSockets?.(); } catch (e) { /* silent */ }
                 try { this._pl?.checkCycle?.(); } catch (e) { /* silent */ }
                 // Список узлов-источников подхвата собирается из живого графа:
                 // после загрузки воркфлоу он другой (SPEC §30).
@@ -2808,7 +3005,7 @@ app.registerExtension({
                             const wv = ((sf && sf.value) || "").trim();
                             // Валидны: служебные ветки + реальные папки из базы.
                             // Виджет теперь тоже несёт __fav/__root (см. syncSaveFolder).
-                            const valid = (f) => !!f && (f === "__all" || f === "__fav" || f === "__root" || st.folders.includes(f));
+                            const valid = (f) => !!f && (f === "__all" || f === "__fav" || f === "__root" || f === "__outs" || st.folders.includes(f));
                             let want = null;
                             if (valid(wv)) want = wv;
                             else if (st.selFolder !== "__all" && !valid(st.selFolder)) want = "__all";

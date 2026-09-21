@@ -2130,6 +2130,199 @@ await run("v1.34: умная кнопка экспорта (метки → от�
   windowStub.showDirectoryPicker = origPicker;
 });
 
+// --- v1.44 (§40): мультивывод — привязки доп. выходов 2..11 ---------------
+// bindOutSlot/unbindOutSlot/applyOutSockets/nextOutSlot/plDrop→__outs,
+// папка-слот (active_id + маркер 🔌), рендер «🔌 Выходы», гидрация slots_out,
+// предупреждение о полном списке и дубли.
+const ftext = (el) => {
+  const a = [];
+  const walk = (x) => {
+    if (x.children && x.children.length) { for (const c of x.children) walk(c); return; }
+    if (x.textContent) a.push(String(x.textContent));
+  };
+  walk(el);
+  return a.join("|");
+};
+const mkSlotEntry = (id, folder = "", title = null) => ({ id, title: title || id, head: id, folder, favorite: false,
+  created_at: "2026-09-18T01:00:00", last_used: null,
+  has_preview: false, has_workflow: false, media: "image" });
+const addSlotEnv = (node) => {
+  for (let i = 2; i <= 11; i++) node.outputs.push({ name: `out_${i}`, type: "STRING", links: [] });
+  node.disconnectOutput = (i) => { if (node.outputs[i]) node.outputs[i].links = []; };
+  node.addWidget("text", "slots_out", "", null, { hidden: true, hideInPanel: true, serialize: true });
+};
+
+await run("slots: карточка → слот 2, сокет виден, имя обрезано, дубль игнор", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries = [mkSlotEntry("e1", "", "abcdefghijklmnopqrstuvwxyz"), mkSlotEntry("e2")];
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  st.plDrop({ kind: "entry", ids: ["e1"], id: "e1" }, "__outs");
+  const slots = st.readOutSlots();
+  check("слот занял индекс 2 (card e1)",
+    slots.length === 1 && slots[0].i === 2 && slots[0].kind === "card" && slots[0].id === "e1");
+  check("сокет out_2 виден", node.outputs[2].hide === false);
+  check("неиспользуемые сокеты скрыты", node.outputs[3].hide === true && node.outputs[11].hide === true);
+  check("имя провода обрезано до 16", node.outputs[2].name === "abcdefghijklmnop", node.outputs[2].name);
+  check("привязка записана в виджет", (() => { const w = node.widgets.find((x) => x.name === "slots_out"); return typeof w.value === "string" && JSON.parse(w.value).length === 1; })());
+  st.plDrop({ kind: "entry", ids: ["e1"], id: "e1" }, "__outs");
+  check("дубль той же карточки игнорируется", st.readOutSlots().length === 1);
+  st.plDrop({ kind: "entry", ids: ["e2"], id: "e2" }, "__outs");
+  check("следующая привязка → индекс 3 и сокет показан",
+    st.readOutSlots().length === 2 && st.readOutSlots()[1].i === 3 && node.outputs[3].hide === false);
+});
+
+await run("slots: папка-слот наследует выделение, клик в папке меняет active_id", async () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries = [mkSlotEntry("e10", "ПапкаA"), mkSlotEntry("e11", "ПапкаA")];
+  st.folders = ["ПапкаA"];
+  st.selFolder = "ПапкаA";
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "e11"; // активное выделение лежит в этой папке
+  st.renderTree(); st.render();
+  st.plDrop({ kind: "folder", path: "ПапкаA" }, "__outs");
+  const slot = st.readOutSlots()[0];
+  check("папка-слот: kind folder, active_id наследует выделение",
+    slot && slot.kind === "folder" && slot.path === "ПапкаA" && slot.active_id === "e11");
+  check("сокет out_2 виден", node.outputs[2].hide === false);
+  st.render();
+  const cards = st.list.children.filter((c) => c.draggable);
+  const greens = cards.filter((c) => String(c.style.cssText).includes("background:#1c3525"));
+  check("активная карточка папки-слота подсвечена зелёным", greens.length === 1, `greens=${greens.length}`);
+  const nonGreen = cards.find((c) => !String(c.style.cssText).includes("background:#1c3525"));
+  check("есть вторая (неактивная) карточка", !!nonGreen);
+  await nonGreen.onclick({});
+  check("клик в папке-слоте перезаписал active_id",
+    st.selWidget.value !== "e11" && st.outSlotOfFolder("ПапкаA").active_id === st.selWidget.value,
+    String(st.outSlotOfFolder("ПапкаA").active_id));
+});
+
+await run("slots: отвязка отключает провод и прячет сокет", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries = [mkSlotEntry("e1")];
+  st.selFolder = "__all";
+  st.bindOutSlot({ kind: "card", id: "e1", name: "e1" });
+  node.outputs[2].links = [7]; // к выходу подключён провод
+  st.unbindOutSlot(2);
+  check("провод отключён", node.outputs[2].links.length === 0);
+  check("сокет скрыт", node.outputs[2].hide === true);
+  check("привязка удалена", st.readOutSlots().length === 0);
+  check("виджет обновлён", JSON.parse(node.widgets.find((w) => w.name === "slots_out").value).length === 0);
+});
+
+await run("slots: рендер «🔌 Выходы» — строки слотов, битая привязка, отвязка ✖", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries = [mkSlotEntry("e1")];
+  st.selFolder = "__all";
+  st.bindOutSlot({ kind: "card", id: "e1", name: "e1" });
+  st.bindOutSlot({ kind: "card", id: "ghost", name: "ghost" }); // записи нет в базе
+  st.selFolder = "__outs";
+  st.render();
+  const rows = st.list.children.filter((c) => String(c.style.cssText).includes("#2e6b4f"));
+  check("отрисованы строки слотов", rows.length === 2, String(rows.length));
+  check("первый слот — карточка e1", rows.some((r) => ftext(r).includes("T e1") || ftext(r).includes("e1")), ftext(rows[0]));
+  const ghost = rows.find((r) => ftext(r).includes("(запись удалена)"));
+  check("битая привязка показана как удалённая", !!ghost);
+  check("мета битой привязки объясняет поведение",
+    ghost && ftext(ghost).includes("записи нет"), ghost ? ftext(ghost) : "");
+  const delB = ghost && ghost.children[2];
+  check("кнопка ✖ найдена", delB && delB.textContent === "✖");
+  delB.onclick({ stopPropagation() {} });
+  check("✖ отвязала слот", st.outSlotOfEntry("ghost") === null && st.readOutSlots().length === 1);
+  const rows2 = st.list.children.filter((c) => String(c.style.cssText).includes("#2e6b4f"));
+  check("список перерисован без снятого слота", rows2.length === 1 && st.outSlotOfEntry("e1") !== null);
+});
+
+await run("slots: 10 занято — лишняя привязка предупреждает, дубль молчит", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  addSlotEnv(node);
+  let toasts = [];
+  st.toast = (...a) => { toasts.push(a); };
+  st.entries = [];
+  st.selFolder = "__all";
+  for (let i = 2; i <= 11; i++) st.bindOutSlot({ kind: "card", id: `e${i}`, name: `x${i}`, i });
+  check("заняты все 10 слотов 2..11", st.readOutSlots().length === 10 && st.nextOutSlot() === null);
+  st.bindOutSlot({ kind: "card", id: "e21", name: "e21" });
+  check("11-я привязка предупреждает и не добавляется",
+    toasts.length === 1 && String(toasts[0][2]).includes("Все 10") && st.readOutSlots().length === 10);
+  st.bindOutSlot({ kind: "card", id: "e2", name: "x2", i: 2 });
+  check("дубль при полном списке молчит (проверка до занятости)", toasts.length === 1);
+  st.bindOutSlot({ kind: "folder", path: "Лишняя" });
+  check("папка в полный список не проходит", st.readOutSlots().length === 10 && toasts.length === 2);
+});
+
+await run("slots: onConfigure восстанавливает привязки (named и позиция)", () => {
+  const sv = JSON.stringify([{ i: 4, kind: "card", id: "e1", name: "Кайзер" }]);
+
+  const n1 = makeNode();
+  proto.onNodeCreated.call(n1);
+  addSlotEnv(n1);
+proto.onConfigure.call(n1, {
+    widgets_values: ["📥 Запись", "e1", "Фото", "", sv],
+    widgets_values_named: { mode: "📥 Запись", selected: "e1", save_folder: "Фото", slots_out: sv },
+  });
+  n1._pl.applyOutSockets();
+  console.log("DEBUG rafQueue after n1 onConfigure:", rafQueue.length);
+  const s1 = n1._pl;
+  console.log("DEBUG n1 pre-check", JSON.stringify({ hide4: n1.outputs[4]?.hide, outputsLen: n1.outputs.length }));
+  check("named: сокет out_4 показан после rAF", n1.outputs[4].hide === false, String(n1.outputs[4]?.hide));
+  console.log("DEBUG hydration n1", JSON.stringify({ hide4: n1.outputs[4]?.hide, slotsOut: s1.slotsOut, wv: n1.widgets.find((w) => w.name === "slots_out").value }));
+
+  const n2 = makeNode();
+  proto.onNodeCreated.call(n2);
+  addSlotEnv(n2);
+  proto.onConfigure.call(n2, { widgets_values: ["📥 Запись", "e1", "Фото", "", sv], widgets_values_named: {} });
+  n2._pl.applyOutSockets();
+  check("позиционный фолбэк widgets_values[4]",
+    n2._pl.slotsOut.length === 1 && n2._pl.slotsOut[0].i === 4 && n2.outputs[4].hide === false, String(n2.outputs[4]?.hide));
+  console.log("DEBUG hydration n2", JSON.stringify({ hide4: n2.outputs[4]?.hide, slotsOut: n2._pl.slotsOut, wv: n2.widgets.find((w) => w.name === "slots_out").value }));
+
+  const n3 = makeNode();
+  proto.onNodeCreated.call(n3);
+  addSlotEnv(n3);
+  proto.onConfigure.call(n3, { widgets_values: ["📥 Запись", "", ""], widgets_values_named: {} });
+  n3._pl.applyOutSockets();
+  check("старый граф без slots_out: слотов нет, сокеты скрыты",
+    n3._pl.slotsOut.length === 0 && n3.outputs[4].hide === true && n3.outputs[9].hide === true, String(n3.outputs[4]?.hide));
+  console.log("DEBUG hydration n3", JSON.stringify({ hide4: n3.outputs[4]?.hide, hide9: n3.outputs[9]?.hide, slotsOut: n3._pl.slotsOut, wv: n3.widgets.find((w) => w.name === "slots_out").value }));
+});
+
+await run("slots: строка «🔌 Выходы» в дереве открывает режим слотов", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  addSlotEnv(node);
+  st.folders = ["Фото"];
+  st.entries = [];
+  st.renderTree(); st.render();
+  const outsRow = st.tree.children[2];
+  check("третья строка дерева — категория выходов",
+    outsRow && outsRow.children[0] && outsRow.children[0].textContent === "🔌 Выходы");
+  outsRow.onclick({});
+  check("клик переключил selFolder на __outs", st.selFolder === "__outs");
+  check("save_folder виджет получил __outs",
+    node.widgets.find((w) => w.name === "save_folder").value === "__outs");
+  st.bindOutSlot({ kind: "card", id: "zz", name: "zz" }); // записи нет в базе
+  st.render();
+  const rows = st.list.children.filter((c) => String(c.style.cssText).includes("#2e6b4f"));
+  check("слот виден в категории выходов (битая запись)", rows.length === 1 && ftext(rows[0]).includes("(запись удалена)"));
+  check("сокет out_2 после всего жив", node.outputs[2].hide === false);
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");
