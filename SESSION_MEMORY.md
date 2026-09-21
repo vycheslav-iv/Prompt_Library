@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (v1.42, 2026-09-21)
+# Память сессии — Prompt Library (v1.43 → v1.44, 2026-09-22)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,82 +7,82 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- **v1.42: legacy `.jpg`-призрак** (закрыт в начале сессии) — замена превью у записи с
-  legacy JPG оставляла `previews/{id}.jpg` сиротой навсегда (удаление карточки снимало
-  только `.png`). Решено `_drop_legacy_preview_file()` в `_save_preview_upload` +
-  `_save_thumbnail`; тест 19.5 (PIL, валидный PNG dataURL). Тесты 305/305.
-- **Полный повторный аудит проекта** после фикса: `check.py Prompt_Library --strict`
-  — провалов 0; живой аудит базы 8/8 (`changed: false`), сирот нет; живая проба кэша
-  зелёная; DOM-замер `--panel` — ширина стабильна по всей цепочке (наш root 976 =
-  const), панель не зажимает (hideInPanel v1.32 держится).
-- **Ложная находка снята**: категория «Пейзажи» «пустая» оказалась родительской — под
-  ней подпапка «Пейзажи/Аляска» (записи «Аляска EN», «Аляска»); «System Prompt» пустая,
-  но закреплена вручную. Пустая категория НЕ признак мусора: дерево ветвится подпапками.
-- **Прибор DOM-пробы** требует `websockets` (строка 655). В системном `python`
-  (F:\Python\Python314) его НЕТ (`ModuleNotFoundError`) — проба стабильно работает
-  только под `D:/ComfyUI_windows_portable/python_embeded/python.exe` (websockets 16.1.1).
-  Зафиксировано в SPEC §34.2 как урок прибора (не дефект ноды).
-- **Health ComfyUI**: внешний пак `comfyui-kjnodes` не грузится (`No module named
-  'triton'`) — сторонние узлы, к Prompt_Library отношения не имеет.
+- **v1.43: `category_out` сохраняет пробелы** — `_sanitize_folder_path` больше не
+  заменяет пробел на `_` (`"Мои Пейзажи"` → `"Мои Пейзажи/"`). Спецсимволы `&`, `!`,
+  служебные ветки `__*` по-прежнему чистятся/`""`. JS-экспорт не тронут.
+  Тесты 316/316, check.py зелёный, sync выполнен. **В работе (в этом коммите).**
+- **Дизайн мультивывода утверждён (§40 SPEC)**: НЕ полоса, а **категория
+  «📤 Выходы» в проводнике** (как «Избранное») + первый провод остаётся
+  стандартным. Дроп папки/карточки в категорию → слот выхода; удаление → отвязка
+  провода + скрытие сокета; папка-слот держит выделение пока подключена (свой
+  цвет `#2e6b4f`, не синий/не оранжевый), маркер 🔌 на карточке-выводе.
+  **Реализация НЕ начата — точка возврата этот коммит.**
+- Текущая v1.43 НЕ закоммичена (вместе с дизайн-спекой). HEAD = `bd15c6b` (v1.42).
 
 ## 2. Итоговое состояние кода
 
-- `prompt_library_node.py:555` — `_drop_legacy_preview_file()` (unlink `previews/{id}.jpg`,
-  missing_ok=True); вызовы: `_save_thumbnail` (~453) и `_save_preview_upload` (~518)
-- `prompt_library_node.py:74` — `_entry_workflow()` (сначала inline, потом файл)
-- `prompt_library_node.py:89` — `_workflow_path()` (id строго alfanum, иначе None)
-- `prompt_library_node.py:97` — `_save_workflow_file()` (tmp + `os.replace`)
-- `prompt_library_node.py:167` — `_trim_entries()` (убирает файл графа И файл превью)
-- `prompt_library_node.py:539` — `_remove_preview_file()`
-- `prompt_library_node.py:800` — `IS_CHANGED` (только `pickup`; `mode` НЕ проверяется)
-- `tests/_test_prompt_library.py:1102` — тест 19.5 (legacy `.jpg` не остаётся сиротой)
-- `tests/_probe_live_library.py` — живой аудит базы, v1.42, 8/8 зелёное
-- `tests/_probe_live_cache.py` — живая проба кэша, зелёная (в коде: комментарии «правка v1.41»
-  не трогать — после неудачного sed они уже возвращены как было)
-- `tests/_probe_live_dom.py` — живой замер DOM (запуск только под python_embeded)
+- `prompt_library_node.py` — выходы сейчас `RETURN_TYPES=("STRING","STRING")`
+  (`prompt_out`, `category_out`). План v1.44: `("STRING",) * 12` (первые два те же),
+  слоты 2–11 = новые, привязки в скрытом JSON-виджете `slots_out`
+  `[{i,kind:'card'|'folder',id/path,active_id,name}]`, Python достаёт текст по id
+  из базы, пусто/нет записи → `""`/`"(запись удалена)"`.
+- `web/js/prompt_library.js` — сокеты скрывать `node.outputs[i].hide = true`,
+  показывать занятые; имя провода = обрезанное название; перезапись `slots_out`
+  = смена cache-key = переисполнение ноды.
+- Важное в JS для ветки «Выходы»: `st.plDrop` (`:1440-1463`, подписка на дропы,
+  смотрит `curFolder`/`__fav`), `st.exportFolder` виртуальные ветки (`:2380-2394` —
+  как добавлять папки вне дерева категорий), валидация `save_folder` с `__fav/__root/__
+  all` (`:2795-2834`), `st.syncSaveFolder` (`:1042`), `markEntries`/`markFolders`/цвета
+  (`:688`), виджеты `selected/save_folder/pickup` (~`:2585`).
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- **`ModuleNotFoundError: websockets`** на системном `python` — DOM-проба падает в
-  `main()` строка 655. Решение: запускать под `python_embeded` ComfyUI (там websockets есть).
-- **«Пустая категория = мусор» — ложная находка**: «Пейзажи» ветвится подпапкой «Аляска».
-  Урок: перед выводом смотреть подпапки дерева, а не только записи текущего уровня.
-- **sed-замены по всему файлу опасны**: историческая строка «правка v1.41» в
-  `_probe_live_cache.py` была переписана на v1.42 — вернул как было. Точечные правки только.
-- **Консоль cp1251 глотает кириллицу** — печать проб ругалась эмодзи; пробы уже форсят
-  UTF-8 (`sys.stdout.reconfigure`).
-- **Аудит на мутирующей базе невалиден** — `_probe_live_library.py` берёт отпечаток базы
-  до/после и снимает находки, не воспроизведённые повторным чтением.
+- **`ModuleNotFoundError: websockets`** на системном `python` — живые DOM-пробы гонять
+  ТОЛЬКО под `D:/ComfyUI_windows_portable/python_embeded/python.exe` (SPEC §34.2).
+- **«Пустая категория = мусор» — ложная находка**: «Пейзажи» ветвится подпапкой
+  «Аляска». Перед выводом «мусор» смотреть подпапки дерева.
+- **python_embeded крашит консоль при деплое ws** — не трогать запуск probe-скриптов
+  поверх системного python.
+- Консоль cp1251 искажает кириллицу в выводе — вывод проверок читать внимательно.
 
 ## 4. Что важно не сломать при продолжении работы
 
-- НЕ возвращать проверку `mode` в `IS_CHANGED` (§33.3, §33.6) — ломает кэш ComfyUI.
-- Замена превью обязана переносить граф (`_entry_workflow`), иначе карточка теряет воркфлоу.
-- `_trim_entries` и удаление убирают и файл графа, и файл превью — сирот быть не должно.
-- DOM-пробу гонять ТОЛЬКО под `python_embeded`, системный python не подходит.
-- Проба кэша безопасна в режиме «📤 Выдача» с пустым `selected` (`save_on = False`).
-- Тесты лежат только в `tests/` и в рабочую копию не копируются (AGENTS.md §1.1).
-- После правок: `python sync.py Prompt_Library` → перезапуск ComfyUI → `node --check` для JS.
+- Слоты 0–1 (`prompt_out`, `category_out`) и вся логика `execute()`/`_sanitize_folder_path`
+  НЕ трогаются.
+- НЕ возвращать проверку `mode` в `IS_CHANGED` (§33.3).
+- Замена превью обязана переносить граф; `_trim_entries`/удаление убирают и граф, и превью.
+- Тесты только в `tests/`, в рабочую копию не копируются (AGENTS.md §1.1).
+- Скил comfyui-expandable-inputs — паттерн добавления/скрытия сокетов, но выходы
+  (в отличие от входов) требуют фиксированной длины `RETURN_TYPES` — только hide/show.
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-- Живьём глазами: удаление карточки с файловым графом убирает `workflows/{id}.json`.
-- Живьём: самолечение при дубле — подхват текста, который уже есть карточкой без графа.
-- Прогонять `_probe_live_cache.py` после любого изменения `IS_CHANGED` и виджетов.
-- Прогонять `_probe_live_library.py` перед/после массовых операций с базой (и после чистки).
-- Дальше по масштабированию базы: `_load_db()` читает весь JSON на каждую операцию
-  (при 500+ записях — SQLite; обсуждено, не делали).
+1. **Реализовать мультивывод (§40)** — после этого коммита как точки возврата:
+   - Python: `RETURN_TYPES=("STRING",)*12`, `RETURN_NAMES` (первые два те же),
+     парсинг `slots_out`, эмит текстов по слотам, `""` для пустых, `(запись удалена)`.
+   - JS: виртуальная ветка «📤 Выходы» в проводнике (рядом с «Избранное»), дроп
+     папки/карточки → слот, удаление → отвязка+скрытие, цвета/🔌, гидрация на
+     `onNodeCreated`/reopen (обе формы widgets_values), серверная валидация `__outs`.
+   - Тесты: Python-песочница (эммит слотов), JS-смоук (дроп → показ/имя; удаление;
+     цвета; маркер), аудит; SPEC v1.44 (хроника 36 уже есть) + память.
+   - Проверки: `node --check`, `python _process/check.py Prompt_Library --strict`,
+     sync.py, перезапуск ComfyUI (живой тест stretch/persist/reopen).
+2. Живьём: самолечение дубля — подхват текста, уже существующего карточкой без графа.
+3. Посмотреть кандидатов на скил после реализации (слоты выхода — паттерн для других нод);
+   спросить пользователя перед созданием.
+4. Масштабирование базы при 500+ записях — SQLite (обсуждено, не делали).
 
 ## 6. Связанные файлы
 
-- `prompt_library_node.py` — `_drop_legacy_preview_file` (555) + вызовы (~453, ~518)
-- `SPECIFICATION.md` — v1.42 (шапка, хроника 34, §34.2: интерпретатор DOM-пробы)
-- `tests/_test_prompt_library.py` — 305/305 (блоки 25–26 — граф и самоаудит; 19.5 — jpg-призрак)
-- `tests/_smoke_prompt_library.mjs` — 83 фазы; `tests/_audit_prompt_library.mjs` — аудит чист
-- `tests/_probe_live_cache.py` — живая проба кэша (запуск: `python tests/_probe_live_cache.py`)
-- `tests/_probe_live_library.py` — живой аудит данных базы (+фальсификаторы на копиях базы)
-- `tests/_probe_live_dom.py`, `tests/_probe_snippet.js` — живые пробы DOM (§34)
-- `check.json` — `python _process/check.py Prompt_Library`
-- `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library` — рабочая копия (синхронизирована)
-- `D:\ComfyUI_windows_portable\ComfyUI\user\prompt_library\` — живая база (`library.json`, `workflows/`, `previews/`)
-- `SESSION_MEMORY-history/` — снапшоты (2026-09-21.md, 2026-09-21-audit.md)
+- `prompt_library_node.py` — `_sanitize_folder_path` (`:186`, v1.43), `RETURN_TYPES`/`RETURN_NAMES`
+  (~`:805`), `execute` (`:1071` — `result`), `IS_CHANGED` (`:800`)
+- `web/js/prompt_library.js` — `plDrop` (`:1440-1463`), `exportFolder` (`:2374-2394`),
+  валидация `save_folder` (`:2795-2834`), `syncSaveFolder` (`:1042`), `markEntries`.
+- `SPECIFICATION.md` — v1.43 (шапка, хроника 35), **§40 дизайн мультивывода** (новый), §37.11
+- `tests/_test_prompt_library.py` — 316/316; `tests/_smoke_prompt_library.mjs`; `tests/_audit_*`
+- `tests/_probe_live_cache.py`, `tests/_probe_live_library.py`, `tests/_probe_live_dom.py`
+- `check.json` — `python _process/check.py Prompt_Library [--strict]`
+- `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library` — рабочая копия
+- Воркфлоу «Krea2_MY2» (в библиотеке ComfyUI): нода 1619 `OllamaGenerateV2` (system/prompt),
+  1618 System Prompt, 1919 Prompt, 1677 сабграф MASTER STYLE + 1676 DeggSwitch
+- `SESSION_MEMORY-history/2026-09-22-0144-v1.43.md` — снапшот этого файла

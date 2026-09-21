@@ -185,9 +185,10 @@ def _norm_folder(path):
 
 def _sanitize_folder_path(path):
     """Санитизирует путь папки для вывода по проводу.
-    Заменяет пробелы и нечитаемые символы на '_', исключает служебные ветки.
+    Сохраняет пробелы и нечитаемые символы заменяет на '_', исключает
+    служебные ветки. Повторы пробелов/подчёркиваний сжимаются до одного.
     Всегда заканчивается на '/' если не пустой.
-    Пример: 'Пейзажи/Аляска' → 'Пейзажи/Аляска/', 'Мои Пейзажи' → 'Мои_Пейзажи/'
+    Пример: 'Пейзажи/Аляска' → 'Пейзажи/Аляска/', 'Мои Пейзажи' → 'Мои Пейзажи/'
     """
     if not path or not isinstance(path, str):
         return ""
@@ -199,9 +200,10 @@ def _sanitize_folder_path(path):
         if not part.strip():
             continue
         s = part.strip()
-        s = "".join(c if (c.isalnum() or c in "-_" or ord(c) > 127) else "_" for c in s)
+        s = "".join(c if (c.isalnum() or c in " _-" or ord(c) > 127) else "_" for c in s)
         s = re.sub(r"_+", "_", s)
-        s = s.strip("_")
+        s = re.sub(r" +", " ", s)
+        s = s.strip(" _")
         if s:
             cleaned.append(s)
     result = "/".join(cleaned)
