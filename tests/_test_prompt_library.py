@@ -721,6 +721,7 @@ check("« Запись » без провода — нет подсказки", 
       str(res_w["ui"]["mode_notice"]))
 
 # Совместимость: старый граф держит провод prompt_out в разрыв перед CLIP
+# Провод считается по выходу 1 (prompt_1): выход 0 занят путём категории (§40)
 png_linked = {"workflow": {"nodes": [{"id": 5, "outputs": [{}, {"links": [11]}]}]}}
 res_wl = node2.execute(mode=node2.MODE_WRITE, selected="", save_folder="Режимы",
                        source="режим-запись-2", extra_pnginfo=png_linked, unique_id=5)
@@ -1560,8 +1561,9 @@ mod.MAX_ENTRIES = _orig_max26
 print("\n27. Мультивывод (§40): 12 выходов, slots_out")
 check("27: RETURN_TYPES — 12 STRING", mod.PromptLibrary.RETURN_TYPES == tuple(["STRING"] * 12),
       str(mod.PromptLibrary.RETURN_TYPES))
-check("27: RETURN_NAMES — category_out, prompt_out, out_2..out_11",
-      mod.PromptLibrary.RETURN_NAMES == ("category_out", "prompt_out", *[f"out_{i}" for i in range(2, 12)]),
+check("27: RETURN_NAMES — category_path, prompt_1, prompt_2..prompt_11",
+      mod.PromptLibrary.RETURN_NAMES == ("category_path", "prompt_1",
+                                        *[f"prompt_{i}" for i in range(2, 12)]),
       str(mod.PromptLibrary.RETURN_NAMES))
 
 node27 = mod.PromptLibrary()
@@ -1581,6 +1583,15 @@ check("27: пустой slots_out → слоты пусты", len(res27["result"
       and all(s == "" for s in res27["result"][2:]), str(len(res27["result"])))
 check("27: 0-1 выходы на месте", res27["result"][0] == "" and res27["result"][1] == "",
       str(res27["result"][:2]))
+
+# Порядок 0/1 (§40, v1.45.1): 0 — путь категории, 1 — основной текст.
+# Имена сокетов в UI («путь категории» / «промпт 1 (основной)») обязаны совпадать
+# с тем, что реально едет по проводу — на этом стоял дефект v1.44.
+res27o2 = node27.execute(mode=node27.MODE_ISSUE, selected=_e27a["id"], save_folder="Слоты/Под",
+                         extra_pnginfo=None, unique_id=1)
+check("27: выход 0 — путь категории, выход 1 — текст записи",
+      res27o2["result"][0] == "Слоты/Под/" and res27o2["result"][1] == "текст-карточки-1",
+      str(res27o2["result"][:2]))
 
 # Битый JSON не роняет ноду
 res27x = node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out="{{{",

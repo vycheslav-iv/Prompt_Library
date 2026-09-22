@@ -117,5 +117,46 @@ const locCount = Object.keys(outLocale || {}).length;
 if (outCount !== locCount) bad(`выходов ${outCount}, а в локали ${locCount}`);
 else ok(`выходы и локаль совпадают (${outCount})`);
 
+// --- E. мультивывод (§40): сокеты, порядок и имена выходов -------------------
+console.log("E. Мультивывод (§40)");
+// `o.hide` у слотов в этом фронтенде НЕ работает: NodeSlots.vue рисует все
+// nodeData.outputs, поля hide у слотов нет. Прежний код ставил o.hide = true и
+// на живой ноде были видны все 12 сокетов — возврат к этому приёму = регресс.
+if (/\.hide\s*=\s*(true|false)/.test(js)) {
+  bad("сокеты снова «прячутся» через o.hide — в этом фронтенде свойство не работает (§40)");
+} else ok("сокеты доп. выходов не «прячутся» через o.hide (свойство не поддерживается)");
+
+if (!/this\.removeOutput\(/.test(js) || !/this\.addOutput\(/.test(js)) {
+  bad("нет динамических addOutput/removeOutput — выходы не появятся по требованию (§40)");
+} else ok("выходы создаются/убираются динамически (addOutput/removeOutput)");
+
+// Возврат execute ↔ RETURN_NAMES ↔ имена в UI: на этом стоял баг v1.44 —
+// в локали сокет 0 звался «промпт», а ехала по нему дорога категории.
+// Порядок с v1.45.1: 0 — путь категории, 1 — основной текст (решение
+// пользователя), поэтому сверка зеркальная прежней.
+const tuple = py.match(/"result":\s*\(([^\n]*)\)/);
+if (!tuple) {
+  bad("не найден возврат result в execute (§40)");
+} else {
+  // Первый элемент — обязательно путь категории, а второй — НЕ он.
+  const parts = tuple[1].split(",").map((s) => s.trim());
+  if (!/_sanitize_folder_path\(folder\)/.test(parts[0] || "")) {
+    bad(`порядок выходов не совпадает с RETURN_NAMES (первым ждали путь): ${tuple[1].trim()}`);
+  } else if (/_sanitize_folder_path/.test(parts[1] || "")) {
+    bad(`путь категории отдаётся дважды/вторым — подсказка «промпт 1 (основной)» соврала бы: ${parts[1]}`);
+  } else ok("выход 0 — путь категории, выход 1 — текст промпта");
+}
+
+const outNames = Object.fromEntries(Object.entries(outLocale || {}).map(([k, v]) => [k, (v && v.name) || ""]));
+if (!/путь|категор/i.test(outNames[0] || "") || !/промпт/i.test(outNames[1] || "")) {
+  bad(`имена выходов 0/1 в локали не совпадают с порядком: «${outNames[0]}» / «${outNames[1]}»`);
+} else ok(`локаль выходов согласована с порядком («${outNames[0]}» / «${outNames[1]}»)`);
+
+// Номера доп. выходов в UI должны совпадать с их индексами (номер провода =
+// место в списке «🔌 Выходы») — иначе пользователь не поймёт, что куда идёт.
+const badNum = Object.entries(outNames).slice(2).filter(([k, v]) => !String(v).includes(String(k)));
+if (badNum.length) bad(`номер в имени доп. выхода ≠ индексу: ${JSON.stringify(badNum)}`);
+else ok("имена доп. выходов несут свой индекс («промпт N» ↔ выход N)");
+
 console.log(`\n=== ${fail ? "НАЙДЕНО ПРОБЛЕМ: " + fail : "аудит чист"}`);
 process.exit(fail ? 1 : 0);

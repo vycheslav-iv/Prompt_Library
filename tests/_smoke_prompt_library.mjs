@@ -65,8 +65,22 @@ function makeEl(tag = "div") {
     set: (v) => { _html = String(v == null ? "" : v); if (_html === "") el.children = []; },
     configurable: true,
   });
+  // textContent как в браузере: чтение — склейка текста ПОТОМКОВ, запись — свой
+  // текст (и сброс прежних детей). Раньше это было обычное свойство, поэтому
+  // заголовок карточки, собранный из пролётов (иконки + имя), читался как пустой
+  // — тест падал бы «на пустом месте», хотя в браузере текст виден.
+  let _text = "";
+  Object.defineProperty(el, "textContent", {
+    get: () => (el.children && el.children.length ? el.children.map(readTextStub).join("") : _text),
+    set: (v) => { _text = String(v == null ? "" : v); el.children = []; },
+    configurable: true,
+  });
   return el;
 }
+// Текст поддерева: у листа — его собственный textContent (геттер ниже).
+const readTextStub = (x) => (x.children && x.children.length
+  ? x.children.map(readTextStub).join("")
+  : String(x.textContent == null ? "" : x.textContent));
 
 // «Элемент ноды» для проверки applyNodeMinWidth (в реальности — `.lg-node[data-node-id]`)
 class HTMLElementStub {
@@ -80,7 +94,10 @@ const madeEls = [];
 
 const documentStub = {
   createElement: (t) => { const el = makeEl(t); madeEls.push(el); return el; },
-  createTextNode: () => makeEl("text"),
+  // Текстовый узел ОБЯЗАН нести текст: раньше заглушка теряла аргумент, и
+  // карточка с заголовком-текстовым-узлом выглядела «без названия» — тест
+  // доказывал бы то, чего нет в браузере (ftext/`firstTitle` читают текст).
+  createTextNode: (t) => { const el = makeEl("text"); el.textContent = String(t == null ? "" : t); return el; },
   createDocumentFragment: () => makeEl("fragment"),
   body: makeEl("body"), head: makeEl("head"), documentElement: makeEl("html"),
   addEventListener() {}, removeEventListener() {},
@@ -98,8 +115,21 @@ const jsonResponse = (data) => ({
   ok: true, status: 200, json: async () => data, text: async () => JSON.stringify(data),
   blob: async () => ({}), headers: { get: () => null },
 });
-const fetchStub = async (u) =>
-  String(u).includes("/prompt_library/list") ? jsonResponse({ entries: [], folders: [] }) : jsonResponse({});
+// Заготовка ответа /prompt_library/list для фаз со слотами (создаётся в mkSlotNode).
+// Нужна потому, что нода при создании сама тянет список (`reload()` в
+// onNodeCreated), и его ответ приходит ПОЗЖЕ, чем фаза выставила свои записи —
+// без общей ссылки «догоняющий» reload затирал бы тестовые entries данными
+// предыдущей фазы (именно это валило фазу папки-вывода).
+let listOverride = null;
+// Геттеры, а не снимок: ответ /list читается в момент РАЗБОРА, поэтому в нём
+// всегда актуальные массивы текущей фазы (иначе уже запущенный запрос приносил бы
+// данные той фазы, в которой он был отправлен).
+const listResponse = {
+  get entries() { return (listOverride && listOverride.entries) || []; },
+  get folders() { return (listOverride && listOverride.folders) || []; },
+};
+const fetchStub = async (u) => String(u).includes("/prompt_library/list")
+  ? jsonResponse(listResponse) : jsonResponse({});
 
 const rafQueue = [];
 const settingsListeners = {};
@@ -203,19 +233,21 @@ function makeNode() {
   const node = {
     id: 1, pos: [0, 0], size: [470, 700], flags: {}, bgcolor: null, widgets,
     inputs: [{ name: "source", type: "*", link: null }, { name: "image", type: "IMAGE", link: null }],
+    // Как node def после v1.44: 12 выходов, localized_name — из RU-локали
+    // (index-based, см. resolveNodeDefSlotText в litegraphService.ts).
     outputs: [
-      { name: "category_out", type: "STRING", links: [] },
-      { name: "prompt_out", type: "STRING", links: [] },
-      { name: "out_2", type: "STRING", links: [] },
-      { name: "out_3", type: "STRING", links: [] },
-      { name: "out_4", type: "STRING", links: [] },
-      { name: "out_5", type: "STRING", links: [] },
-      { name: "out_6", type: "STRING", links: [] },
-      { name: "out_7", type: "STRING", links: [] },
-      { name: "out_8", type: "STRING", links: [] },
-      { name: "out_9", type: "STRING", links: [] },
-      { name: "out_10", type: "STRING", links: [] },
-      { name: "out_11", type: "STRING", links: [] },
+      { name: "category_path", type: "STRING", localized_name: "путь категории", links: [] },
+      { name: "prompt_1", type: "STRING", localized_name: "промпт 1 (основной)", links: [] },
+      { name: "prompt_2", type: "STRING", localized_name: "промпт 2", links: [] },
+      { name: "prompt_3", type: "STRING", localized_name: "промпт 3", links: [] },
+      { name: "prompt_4", type: "STRING", localized_name: "промпт 4", links: [] },
+      { name: "prompt_5", type: "STRING", localized_name: "промпт 5", links: [] },
+      { name: "prompt_6", type: "STRING", localized_name: "промпт 6", links: [] },
+      { name: "prompt_7", type: "STRING", localized_name: "промпт 7", links: [] },
+      { name: "prompt_8", type: "STRING", localized_name: "промпт 8", links: [] },
+      { name: "prompt_9", type: "STRING", localized_name: "промпт 9", links: [] },
+      { name: "prompt_10", type: "STRING", localized_name: "промпт 10", links: [] },
+      { name: "prompt_11", type: "STRING", localized_name: "промпт 11", links: [] },
     ],
     graph: { setDirtyCanvas() {}, links: {}, getNodeById: () => null, _nodes: [] },
     addWidget(type, name, value, cb, opts) {
@@ -230,7 +262,21 @@ function makeNode() {
     removeInput(idx) { node.inputs.splice(idx, 1); },
     disconnectInput(i) { if (node.inputs[i]) node.inputs[i].link = null; },
     disconnectOutput(i) { if (node.outputs[i]) node.outputs[i].links = []; },
-    removeOutput() {}, setSize(s) { node.size = s; }, setDirtyCanvas() {},
+    // Как в LGraphNode: removeOutput отключает свой сокет и переезжает номера
+    // ссылок у следующих (link.origin_slot--), addOutput кладёт сокет в конец.
+    removeOutput(i) {
+      if (i < 0 || i >= node.outputs.length) return;
+      if (node.outputs[i]) node.outputs[i].links = [];
+      node.outputs.splice(i, 1);
+      for (const holder of node._testLinks || []) if (holder.slot > i) holder.slot--;
+    },
+    addOutput(name, type, opts) {
+      const o = Object.assign({ name, type, links: [] }, opts || {});
+      node.outputs.push(o);
+      return o;
+    },
+    connect() { return true; },
+    setSize(s) { node.size = s; }, setDirtyCanvas() {},
     getExtraMenuOptions: () => [], onResize: null,
     element: makeEl("div"), computeSize: () => [470, 700],
   };
@@ -256,7 +302,11 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.44-multi-output");
+  // Версию берём ИЗ ИСХОДНИКА, а не строкой в тесте: иначе каждая правка
+  // PL_JS_VERSION роняла смоук и приходилось править тест (проверка сама себя
+  // не проверяет — важно, что версия есть и нода её видит).
+  const jsVer = (src.match(/PL_JS_VERSION = "([^"]+)"/) || [])[1] || "";
+  check(`${tag}: версия JS видна`, !!jsVer && st.version === jsVer, `js=${jsVer} st=${st.version}`);
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -1820,7 +1870,7 @@ let bulkExportPickerCalled = false;
 const installFetchStub = (entries, fulls) => {
   sandbox.fetch = async (u) => {
     const url = String(u);
-    if (url.includes("/prompt_library/list")) return jsonResponse({ entries, folders: [] });
+    if (url.includes("/prompt_library/list")) return jsonResponse(listOverride ? listResponse : { entries, folders: [] });
     if (url.includes("/prompt_library/entry?id=")) {
       const id = decodeURIComponent(url.split("id=")[1] || "");
       return jsonResponse(fulls.get ? (fulls.get(id) || {}) : (fulls[id] || {}));
@@ -2145,10 +2195,13 @@ await run("v1.34: умная кнопка экспорта (метки → от�
   windowStub.showDirectoryPicker = origPicker;
 });
 
-// --- v1.44 (§40): мультивывод — привязки доп. выходов 2..11 ---------------
-// bindOutSlot/unbindOutSlot/applyOutSockets/nextOutSlot/plDrop→__outs,
-// папка-слот (active_id + маркер 🔌), рендер «🔌 Выходы», гидрация slots_out,
-// предупреждение о полном списке и дубли.
+// --- v1.45 (§40): мультивывод — выходы по требованию ----------------------
+// Сокеты доп. выходов создаются/убираются ФИЗИЧЕСКИ (addOutput/removeOutput):
+// `o.hide` в этом фронтенде не работает вовсе (NodeSlots.vue рисует все
+// nodeData.outputs — живой факт, см. SPEC §40.2). Номер выхода = место в списке
+// «🔌 Выходы». Проверяем: bindOutSlot/unbindOutSlot/reorderOutSlot/
+// applyOutSockets/plDrop→__outs, кнопку «Подключить выход», карточки с превью,
+// папку-вывод (active_id), гидрацию slots_out, лимит и дубли.
 const ftext = (el) => {
   const a = [];
   const walk = (x) => {
@@ -2162,193 +2215,362 @@ const mkSlotEntry = (id, folder = "", title = null) => ({ id, title: title || id
   created_at: "2026-09-18T01:00:00", last_used: null,
   has_preview: false, has_workflow: false, media: "image" });
 const addSlotEnv = (node) => {
-  for (let i = 2; i <= 11; i++) node.outputs.push({ name: `out_${i}`, type: "STRING", links: [] });
-  node.disconnectOutput = (i) => { if (node.outputs[i]) node.outputs[i].links = []; };
   node.addWidget("text", "slots_out", "", null, { hidden: true, hideInPanel: true, serialize: true });
   // Отключаем reload в тестах, чтобы не перезаписывать тестовые entries
   node._pl.reload = async () => {};
 };
-
-await run("slots: карточка → слот 2, сокет виден, имя обрезано, дубль игнор", () => {
+// Нода для фаз мультивывода + кадр rAF (сокеты правятся именно там, чтобы не
+// урезать outputs до configure при загрузке графа). entries/folders — общие
+// массивы с ответом /list: фаза НАПОЛНЯЕТ их (push), а не подменяет ссылку, иначе
+// «догоняющий» reload ноды отдал бы старые данные чужой фазы.
+const mkSlotNode = () => {
   const node = makeNode();
   proto.onNodeCreated.call(node);
   const st = node._pl;
+  st.reload = async () => {};
+  st.entries = [];
+  st.folders = [];
+  listOverride = { entries: st.entries, folders: st.folders };
+  flushRaf("slots:onNodeCreated");
+  return node;
+};
+const slotWidget = (node) => node.widgets.find((w) => w.name === "slots_out");
+
+await run("slots: свежая нода — только 2 выхода; привязка создаёт свой сокет", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
   addSlotEnv(node);
-  // Режим "Выдача" — только в нём доступна категория "Выходы"
-  const modeW = node.widgets.find((w) => w.name === "mode");
-  modeW.value = "📤 Выдача";
-  st.entries = [mkSlotEntry("e1", "", "abcdefghijklmnopqrstuvwxyz"), mkSlotEntry("e2")];
+  st.entries.push(mkSlotEntry("e1", "", "abcdefghijklmnopqrstuvwxyz"), mkSlotEntry("e2"));
   st.selFolder = "__all";
   st.renderTree(); st.render();
+  check("на свежей ноде видны только 2 штатных выхода (12 → 2)",
+    node.outputs.length === 2 && node.outputs[0].name === "category_path" && node.outputs[1].name === "prompt_1",
+    String(node.outputs.length));
   st.plDrop({ kind: "entry", ids: ["e1"], id: "e1" }, "__outs");
   const slots = st.readOutSlots();
-  check("слот занял индекс 2 (card e1)",
+  check("привязка заняла выход 2 (card e1)",
     slots.length === 1 && slots[0].i === 2 && slots[0].kind === "card" && slots[0].id === "e1");
-  check("сокет out_2 виден", node.outputs[2].hide === false);
-  check("неиспользуемые сокеты скрыты", node.outputs[3].hide === true && node.outputs[11].hide === true);
-  check("имя провода НЕ меняется (оставляем RETURN_NAMES), tooltip с подключением",
-    node.outputs[2].name === "out_2" && node.outputs[2].title && node.outputs[2].title.includes("abcdefghijklmnop"),
-    `name=${node.outputs[2].name}, title=${node.outputs[2].title}`);
-  check("привязка записана в виджет", (() => { const w = node.widgets.find((x) => x.name === "slots_out"); return typeof w.value === "string" && JSON.parse(w.value).length === 1; })());
+  check("появился ровно один доп. сокет (prompt_2)",
+    node.outputs.length === 3 && node.outputs[2].name === "prompt_2", `len=${node.outputs.length}, name=${node.outputs[2] && node.outputs[2].name}`);
+  check("RU-имя сокета из локали деф-а («промпт 2»)",
+    node.outputs[2].localized_name === "промпт 2", String(node.outputs[2].localized_name));
+  check("tooltip сокета показывает, что уходит в провод",
+    node.outputs[2].title && node.outputs[2].title.includes("abcdefghijklmnop"),
+    String(node.outputs[2].title));
+  check("привязка записана в виджет", (() => { const w = slotWidget(node); return typeof w.value === "string" && JSON.parse(w.value).length === 1; })());
   st.plDrop({ kind: "entry", ids: ["e1"], id: "e1" }, "__outs");
-  check("дубль той же карточки игнорируется", st.readOutSlots().length === 1);
+  check("дубль той же карточки игнорируется", st.readOutSlots().length === 1 && node.outputs.length === 3);
   st.plDrop({ kind: "entry", ids: ["e2"], id: "e2" }, "__outs");
-  check("следующая привязка → индекс 3 и сокет показан",
-    st.readOutSlots().length === 2 && st.readOutSlots()[1].i === 3 && node.outputs[3].hide === false);
+  check("следующая привязка → выход 3 (сокетов стало 4)",
+    st.readOutSlots().length === 2 && st.readOutSlots()[1].i === 3 && node.outputs.length === 4);
 });
 
-await run("slots: папка-слот — клик в дереве открывает карточки, выбор active_id", async () => {
-  const node = makeNode();
-  proto.onNodeCreated.call(node);
+await run("slots: папка-вывод — карточки с превью, клик не уводит из «Выходов»", async () => {
+  const node = mkSlotNode();
   const st = node._pl;
   addSlotEnv(node);
-  const modeW = node.widgets.find((w) => w.name === "mode");
-  modeW.value = "📤 Выдача";
-  st.entries = [mkSlotEntry("e10", "ПапкаA"), mkSlotEntry("e11", "ПапкаA")];
-  st.folders = ["ПапкаA"];
+  st.entries.push(mkSlotEntry("e10", "ПапкаA"), mkSlotEntry("e11", "ПапкаA"));
+  st.entries[1].has_preview = true;
+  st.folders.push("ПапкаA");
   st.selWidget = node.widgets.find((w) => w.name === "selected");
   st.selWidget.value = "e11"; // активное выделение лежит в этой папке
   st.renderTree(); st.render();
   st.plDrop({ kind: "folder", path: "ПапкаA" }, "__outs");
   const slot = st.readOutSlots()[0];
-  check("папка-слот: kind folder, active_id наследует выделение",
+  check("папка-вывод: kind folder, active_id наследует выделение",
     slot && slot.kind === "folder" && slot.path === "ПапкаA" && slot.active_id === "e11");
-  check("сокет out_2 виден", node.outputs[2].hide === false);
-  // Клик по папке-слоту в дереве → открыть её карточки в категории "Выходы"
-  const treeRows = st.tree.children;
-  const folderSlotRow = treeRows.find((r) => r.children[0] && r.children[0].textContent === "🔌📁 ПапкаA");
-  check("папка-слот видна в дереве (с иконкой 📁)", !!folderSlotRow);
+  check("сокет выхода 2 появился", node.outputs.length === 3);
+  // Строка папки-вывода в дереве несёт НОМЕР провода
+  const folderSlotRow = st.tree.children.find((r) => ftext(r).includes("ПапкаA") && ftext(r).includes("🔌2"));
+  check("папка-вывод видна в дереве с номером провода (📁 ПапкаA + 🔌2)", !!folderSlotRow,
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
   folderSlotRow.onclick({});
-  check("переключилось на __outs и открыта папка ПапкаA", st.selFolder === "__outs" && st.outsActiveFolder === "ПапкаA");
+  check("клик открыл папку внутри «Выходов»", st.selFolder === "__outs" && st.outsActiveFolder === "ПапкаA");
   st.render();
-  // В категории "Выходы" показаны карточки папки
-  const cards = st.list.children.filter((c) => c.draggable === false && c.children[0] && (c.children[0].textContent === "🔌" || c.children[0].textContent === "📄"));
-  check("показаны карточки папки ПапкаA", cards.length === 2, String(cards.length));
-  // Карточка e11 активна (🔌, зелёная)
-  const activeCard = cards.find((c) => c.children[0].textContent === "🔌");
-  check("активная карточка e11 подсвечена (🔌 + зелёный фон)", !!activeCard && String(activeCard.style.cssText).includes("background:#1c3525"));
-  // Клик по неактивной карточке e10 → становится активной
-  const nonActive = cards.find((c) => c.children[0].textContent === "📄");
+  // Карточки папки — с превью (img), как в обычном списке
+  const cards = st.list.children.filter((c) => c.children[0] && c.children[0].tagName === "IMG");
+  check("карточки папки показаны с превью (img)", cards.length === 2, String(cards.length));
+  const activeCard = cards.find((c) => String(c.style.cssText).includes("background:#1c3525"));
+  check("активный вывод e11 подсвечен зелёным", !!activeCard);
+  const nonActive = cards.find((c) => !String(c.style.cssText).includes("background:#1c3525"));
   check("есть неактивная карточка", !!nonActive);
   await nonActive.onclick({});
   check("клик переключил active_id на e10", st.outSlotOfFolder("ПапкаA").active_id === "e10");
-  console.log("DEBUG outsActiveFolder after click:", st.outsActiveFolder);
-  console.log("DEBUG slots:", st.readOutSlots());
+  check("selFolder не поменялся — из «Выходов» никуда не уходим", st.selFolder === "__outs", st.selFolder);
+  check("запись выбрана — панель промпта снизу открыта",
+    st.selWidget.value === "e10" && st.detail.style.display === "flex",
+    `sel=${st.selWidget.value}, detail=${st.detail.style.display}`);
   st.render();
-  console.log("DEBUG list children after render:", st.list.children.length, st.list.children.map(c => c.draggable === false && c.children[0] ? c.children[0].textContent : null));
-  const cards2 = st.list.children.filter((c) => c.draggable === false && c.children[0] && (c.children[0].textContent === "🔌" || c.children[0].textContent === "📄"));
-  console.log("DEBUG cards2:", cards2.map(c => ({icon: c.children[0]?.textContent, bg: c.style.cssText})));
-  const newActive = cards2.find((c) => c.children[0].textContent === "🔌");
-  console.log("DEBUG newActive:", newActive ? {icon: newActive.children[0]?.textContent, bg: newActive.style.cssText} : null);
-  check("теперь активна e10", !!newActive && String(newActive.style.cssText).includes("background:#1c3525"));
+  const newActive = st.list.children.filter((c) => c.children[0] && c.children[0].tagName === "IMG")
+    .find((c) => String(c.style.cssText).includes("background:#1c3525"));
+  check("после перерисовки активна e10 (а не пропала)", !!newActive,
+    `outs=${st.outsActiveFolder} kids=${st.list.children.map((c) => ftext(c)).join(" ; ")}`);
+  check("сокет выхода 2 — про папку-вывод и её активную карточку",
+    String(node.outputs[2].title).includes("ПапкаA") && String(node.outputs[2].title).includes("e10"),
+    String(node.outputs[2].title));
+
+  // v1.45.1 (п. 2–3 из отчёта пользователя): в виде «Список» карточки «Выходов»
+  // обязаны быть как обычные — превью из текущего вида (82px), ширина на всю
+  // строку. Раньше тут были жёсткие 40px («узкие карточки с мелкими превью»).
+  st.viewSel.value = "list";
+  st.render();
+  check("вид «Список» — список остаётся колонкой", st.list.style.flexDirection === "column",
+    st.list.style.flexDirection);
+  const listCard = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG");
+  check("в «Списке» превью вывода — 82px (не жёсткие 40px)",
+    !!listCard && String(listCard.children[0].style.cssText).includes("width:82px"),
+    listCard ? String(listCard.children[0].style.cssText) : "нет карточки");
+  check("в «Списке» карточка вывода тянется на всю строку (нет фикс. ширины)",
+    !!listCard && !String(listCard.style.cssText).includes("width:"),
+    listCard ? String(listCard.style.cssText) : "нет карточки");
+  // Шапка-подсказка живёт в flex-КОЛОНКЕ, где `flex:1 1 100%` означает «вся
+  // высота» — она растягивалась и выдавливала карточки в низ списка (скриншот).
+  const headEl = st.list.children.find((c) => ftext(c).includes("решает, что уходит"));
+  check("шапка папки-вывода не растягивается — карточки не падают вниз",
+    !!headEl && String(headEl.style.cssText).includes("flex:0 0 auto")
+      && !String(headEl.style.cssText).includes("flex:1 1 100%"),
+    headEl ? String(headEl.style.cssText) : "нет шапки");
+  check("шапка стоит в списке первой, карточки — после неё",
+    st.list.children[0] === headEl && st.list.children.indexOf(listCard) > 0);
+  st.viewSel.value = "large";
+  st.render();
 });
 
-await run("slots: отвязка отключает провод и прячет сокет", () => {
-  const node = makeNode();
-  proto.onNodeCreated.call(node);
+await run("slots: отвязка снимает свой сокет, чужие провода переезжают с привязкой", () => {
+  const node = mkSlotNode();
   const st = node._pl;
   addSlotEnv(node);
-  st.entries = [mkSlotEntry("e1")];
+  st.entries.push(mkSlotEntry("e1"), mkSlotEntry("e2"), mkSlotEntry("e3"));
   st.selFolder = "__all";
   st.bindOutSlot({ kind: "card", id: "e1", name: "e1" });
-  node.outputs[2].links = [7]; // к выходу подключён провод
-  st.unbindOutSlot(2);
-  check("провод отключён", node.outputs[2].links.length === 0);
-  check("сокет скрыт", node.outputs[2].hide === true);
-  check("привязка удалена", st.readOutSlots().length === 0);
-  check("виджет обновлён", JSON.parse(node.widgets.find((w) => w.name === "slots_out").value).length === 0);
+  st.bindOutSlot({ kind: "card", id: "e2", name: "e2" });
+  st.bindOutSlot({ kind: "card", id: "e3", name: "e3" });
+  check("три привязки — сокеты 2,3,4", node.outputs.length === 5, String(node.outputs.length));
+  node.outputs[2].links = [7]; // выход 2 → e1
+  node.outputs[4].links = [9]; // выход 4 → e3
+  st.unbindOutSlot(3);          // снимаем СРЕДНИЙ (e2)
+  const left = st.readOutSlots();
+  check("привязок осталось 2: e1 и e3", left.length === 2 && left[0].id === "e1" && left[1].id === "e3",
+    JSON.stringify(left.map((s) => s.id)));
+  check("сокетов стало 4 (свой сокет убран)", node.outputs.length === 4, String(node.outputs.length));
+  check("провод e1 остался на выходе 2", node.outputs[2].links.length === 1);
+  check("провод e3 переехал на выход 3 вместе со своей привязкой",
+    node.outputs[3].links.length === 1 && left[1].i === 3, String(node.outputs[3].links.length));
+  check("виджет обновлён", JSON.parse(slotWidget(node).value).length === 2);
 });
 
-await run("slots: рендер «🔌 Выходы» — строки слотов, битая привязка, отвязка ✖", () => {
-  const node = makeNode();
-  proto.onNodeCreated.call(node);
+await run("slots: перетаскивание строки в «Выходах» меняет номер провода", () => {
+  const node = mkSlotNode();
   const st = node._pl;
   addSlotEnv(node);
-  const modeW = node.widgets.find((w) => w.name === "mode");
-  modeW.value = "📤 Выдача";
-  st.entries = [mkSlotEntry("e1")];
+  st.entries.push(mkSlotEntry("e1"), mkSlotEntry("e2"));
+  st.bindOutSlot({ kind: "card", id: "e1", name: "Первый" });
+  st.bindOutSlot({ kind: "card", id: "e2", name: "Второй" });
+  check("порядок: e1→выход 2, e2→выход 3",
+    st.outSlotOfEntry("e1").i === 2 && st.outSlotOfEntry("e2").i === 3);
+  node.outputs[2].links = [7]; // провод висит на выходе 2
+  st.reorderOutSlot(1, 0);     // тянем вторую строку наверх
+  check("содержимое поехало за позицией: e2→2, e1→3",
+    st.outSlotOfEntry("e2").i === 2 && st.outSlotOfEntry("e1").i === 3);
+  check("сокетов столько же (перестановка, не добавление)", node.outputs.length === 4);
+  check("провод остался на своём сокете (ему и адресуют)", node.outputs[2].links.length === 1);
+  check("тултип выхода 2 теперь про e2 (Второй)",
+    String(node.outputs[2].title).includes("Второй"), String(node.outputs[2].title));
+  // Строка в дереве тоже таскается (атрибут draggable) и знает свой индекс
+  const rowOuts = st.tree.children.find((r) => ftext(r).includes("🔌2") && ftext(r).includes("Второй"));
+  check("строка вывода в дереве помечена draggable и показывает номер", !!rowOuts && rowOuts.draggable === true,
+    rowOuts ? String(rowOuts.draggable) : "нет строки");
+});
+
+await run("slots: кнопка «🔌 Подключить выход» берёт выделение или категорию", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const toasts = [];
+  st.toast = (...a) => toasts.push(a);
+  st.entries.push(mkSlotEntry("e1", "Фото"));
+  st.folders.push("Фото");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  const btn = st.listHead.children[0];
+  check("кнопка живёт в шапке списка", !!btn && btn.textContent === "🔌 Подключить выход", btn ? btn.textContent : "нет");
+  st.selFolder = "__all"; st.selWidget.value = "";
+  btn.onclick();
+  check("без выделения и категории — предупреждение, ничего не подключено",
+    toasts.length === 1 && st.readOutSlots().length === 0, String(toasts.length));
+  st.selFolder = "Фото";
+  btn.onclick();
+  check("текущая категория подключилась к выходу 2",
+    !!st.outSlotOfFolder("Фото") && st.outSlotOfFolder("Фото").i === 2);
+  st.selWidget.value = "e1";
+  btn.onclick();
+  check("выделенная карточка подключилась к выходу 3",
+    !!st.outSlotOfEntry("e1") && st.outSlotOfEntry("e1").i === 3);
+  btn.onclick();
+  check("повторное подключение того же — предупреждение, без дубля",
+    st.readOutSlots().length === 2 && toasts.length === 2, `slots=${st.readOutSlots().length}, toasts=${toasts.length}`);
+});
+
+await run("slots: рендер «🔌 Выходы» — карточка с превью, битая привязка, отвязка ✖", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("e1"));
+  st.entries[0].has_preview = true;
   st.selFolder = "__all";
   st.bindOutSlot({ kind: "card", id: "e1", name: "e1" });
   st.bindOutSlot({ kind: "card", id: "ghost", name: "ghost" }); // записи нет в базе
   st.selFolder = "__outs";
   st.render();
-  const rows = st.list.children.filter((c) => String(c.style.cssText).includes("#2e6b4f"));
-  check("отрисованы строки слотов", rows.length === 2, String(rows.length));
-  check("первый слот — карточка e1", rows.some((r) => ftext(r).includes("T e1") || ftext(r).includes("e1")), ftext(rows[0]));
-  const ghost = rows.find((r) => ftext(r).includes("(запись удалена)"));
-  check("битая привязка показана как удалённая", !!ghost);
+  const cardE1 = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG");
+  check("живая карточка вывода рисуется карточкой с превью (img), а не строкой", !!cardE1);
+  check("на карточке видно НОМЕР провода (🔌2)", !!cardE1 && ftext(cardE1).includes("🔌2"), cardE1 ? ftext(cardE1) : "");
+  // v1.45.1: 🔌N и метка типа (📷/🎬) — отдельные пролёты с воздухом и
+  // осветляющим фильтром. Раньше это была одна склеенная тёмная строка
+  // «🔌3📷», которая тонула на тёмной ноде (отчёт пользователя).
+  const tSpans = (cardE1 && cardE1.children[1] && cardE1.children[1].children[0]
+    && cardE1.children[1].children[0].children) || [];
+  check("иконки карточки — отдельные пролёты: номер выхода, тип медиа, имя",
+    tSpans.length === 3 && String(tSpans[0].textContent).startsWith("🔌2")
+      && String(tSpans[1].textContent).startsWith("📷")
+      && String(tSpans[2].textContent).includes("e1"),
+    JSON.stringify(tSpans.map((s) => String(s.textContent))));
+  check("иконки осветлены фильтром и разведены отбивкой (не слипаются)",
+    tSpans.length === 3 && tSpans.slice(0, 2).every((s) => String(s.style.cssText).includes("brightness")
+      && String(s.style.cssText).includes("margin-right")),
+    JSON.stringify(tSpans.map((s) => String(s.style.cssText))));
+  const ghost = st.list.children.find((c) => ftext(c).includes("ghost"));
+  check("битая привязка показана строкой вывода", !!ghost);
   check("мета битой привязки объясняет поведение",
     ghost && ftext(ghost).includes("записи нет"), ghost ? ftext(ghost) : "");
   const delB = ghost && ghost.children[2];
   check("кнопка ✖ найдена", delB && delB.textContent === "✖");
   delB.onclick({ stopPropagation() {} });
-  check("✖ отвязала слот", st.outSlotOfEntry("ghost") === null && st.readOutSlots().length === 1);
-  const rows2 = st.list.children.filter((c) => String(c.style.cssText).includes("#2e6b4f"));
-  check("список перерисован без снятого слота", rows2.length === 1 && st.outSlotOfEntry("e1") !== null);
+  check("✖ отвязала выход", st.outSlotOfEntry("ghost") === null && st.readOutSlots().length === 1);
+  check("сокет убран с ноды", node.outputs.length === 3, String(node.outputs.length));
+  const stillE1 = st.list.children.find((c) => ftext(c).includes("e1"));
+  check("список перерисован без снятого вывода", !!stillE1 && st.outSlotOfEntry("e1") !== null);
 });
 
 await run("slots: 10 занято — лишняя привязка предупреждает, дубль молчит", () => {
-  const node = makeNode();
-  proto.onNodeCreated.call(node);
+  const node = mkSlotNode();
   const st = node._pl;
   addSlotEnv(node);
   let toasts = [];
   st.toast = (...a) => { toasts.push(a); };
-  st.entries = [];
   st.selFolder = "__all";
-  for (let i = 2; i <= 11; i++) st.bindOutSlot({ kind: "card", id: `e${i}`, name: `x${i}`, i });
-  check("заняты все 10 слотов 2..11", st.readOutSlots().length === 10 && st.nextOutSlot() === null);
-  // Проверка режима: в режиме "Запись" bindOutSlot не должен вызываться через plDrop,
-  // но напрямую он работает — проверяем логику дублей/лимитов
+  for (let i = 2; i <= 11; i++) st.bindOutSlot({ kind: "card", id: `e${i}`, name: `x${i}` });
+  check("заняты все 10 выходов 2..11 (сокетов стало 12)",
+    st.readOutSlots().length === 10 && st.nextOutSlot() === null && node.outputs.length === 12,
+    `slots=${st.readOutSlots().length}, outs=${node.outputs.length}`);
   st.bindOutSlot({ kind: "card", id: "e21", name: "e21" });
   check("11-я привязка предупреждает и не добавляется",
     toasts.length === 1 && String(toasts[0][2]).includes("Все 10") && st.readOutSlots().length === 10);
-  st.bindOutSlot({ kind: "card", id: "e2", name: "x2", i: 2 });
+  st.bindOutSlot({ kind: "card", id: "e2", name: "x2" });
   check("дубль при полном списке молчит (проверка до занятости)", toasts.length === 1);
   st.bindOutSlot({ kind: "folder", path: "Лишняя" });
   check("папка в полный список не проходит", st.readOutSlots().length === 10 && toasts.length === 2);
 });
 
 await run("slots: onConfigure восстанавливает привязки (named и позиция)", () => {
-  const sv = JSON.stringify([{ i: 4, kind: "card", id: "e1", name: "Кайзер" }]);
+  const sv = JSON.stringify([{ i: 2, kind: "card", id: "e1", name: "Кайзер" }]);
 
-  const n1 = makeNode();
-  proto.onNodeCreated.call(n1);
+  const n1 = mkSlotNode();
   addSlotEnv(n1);
   proto.onConfigure.call(n1, {
     widgets_values: ["📥 Запись", "e1", "Фото", "", sv],
     widgets_values_named: { mode: "📥 Запись", selected: "e1", save_folder: "Фото", slots_out: sv },
   });
   n1._pl.applyOutSockets();
-  const s1 = n1._pl;
-  check("named: сокет out_4 показан после rAF", n1.outputs[4].hide === false, String(n1.outputs[4]?.hide));
+  check("named: привязка восстановлена, сокет 2 создан",
+    n1._pl.readOutSlots().length === 1 && n1.outputs.length === 3 && n1.outputs[2].name === "prompt_2",
+    `slots=${n1._pl.readOutSlots().length}, outs=${n1.outputs.length}`);
+  check("RU-имя восстановленного сокета — «промпт 2»",
+    n1.outputs[2].localized_name === "промпт 2", String(n1.outputs[2].localized_name));
+  check("тултип сокета — про Кайзера", String(n1.outputs[2].title).includes("Кайзер"), String(n1.outputs[2].title));
 
-  const n2 = makeNode();
-  proto.onNodeCreated.call(n2);
+  const n2 = mkSlotNode();
   addSlotEnv(n2);
   proto.onConfigure.call(n2, { widgets_values: ["📥 Запись", "e1", "Фото", "", sv], widgets_values_named: {} });
   n2._pl.applyOutSockets();
   check("позиционный фолбэк widgets_values[4]",
-    n2._pl.slotsOut.length === 1 && n2._pl.slotsOut[0].i === 4 && n2.outputs[4].hide === false, String(n2.outputs[4]?.hide));
+    n2._pl.slotsOut.length === 1 && n2.outputs.length === 3, String(n2.outputs.length));
 
-  const n3 = makeNode();
-  proto.onNodeCreated.call(n3);
+  const n3 = mkSlotNode();
   addSlotEnv(n3);
   proto.onConfigure.call(n3, { widgets_values: ["📥 Запись", "", ""], widgets_values_named: {} });
   n3._pl.applyOutSockets();
-check("старый граф без slots_out: слотов нет, сокеты скрыты",
-    n3._pl.slotsOut.length === 0 && n3.outputs[4].hide === true && n3.outputs[9].hide === true, String(n3.outputs[4]?.hide));
+  check("старый граф без slots_out: выходов только два, доп. сокетов нет",
+    n3._pl.slotsOut.length === 0 && n3.outputs.length === 2, String(n3.outputs.length));
+
+  // Главное про загрузку графа: сокеты НЕ урезаются синхронно в onNodeCreated
+  // (иначе фронтенд сопоставил бы outputs графа с урезанным списком —
+  // zip(this.outputs, data.outputs) — и потерял бы сокеты воркфлоу).
+  const n4 = makeNode();
+  proto.onNodeCreated.call(n4);
+  addSlotEnv(n4);
+  check("до rAF в ноде ещё все 12 выходов из def", n4.outputs.length === 12, String(n4.outputs.length));
+  flushRaf("slots:after-create");
+  check("после rAF — только два (привязок нет)", n4.outputs.length === 2, String(n4.outputs.length));
+
+  // Сокет с проводом не убираем, даже если привязки в нём нет.
+  const n5 = mkSlotNode();
+  addSlotEnv(n5);
+  n5.outputs.push({ name: "prompt_2", type: "STRING", links: [7] });
+  n5._pl.applyOutSockets();
+  check("сокет с проводом остался, а без провода — убран",
+    n5.outputs.length === 3 && n5.outputs[2].links.length === 1, String(n5.outputs.length));
+  check("про провод без привязки нода говорит вслух",
+    (n5._pl.outOrphan || []).includes(2), JSON.stringify(n5._pl.outOrphan));
+});
+
+await run("категории: смена папки не снимает выбранную запись (основной промпт жив)", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.folders.push("Фото", "Видео");
+  st.entries.push(mkSlotEntry("e1", "Фото"), mkSlotEntry("e2", "Видео"));
+  st.selFolder = "Фото";
+  st.renderTree(); st.render();
+  const card = st.list.children.find((c) => ftext(c).includes("e1"));
+  check("карточка папки найдена", !!card, st.list.children.map((c) => ftext(c)).join(" ; "));
+  await card.onclick({});
+  check("клик выбрал запись (панель промпта открыта)",
+    st.selWidget.value === "e1" && st.detailId === "e1" && st.detail.style.display === "flex",
+    `sel=${st.selWidget.value}, id=${st.detailId}, d=${st.detail.style.display}`);
+  // Переходим в ДРУГУЮ категорию: выбранная запись — источник основного текста
+  // на выходе prompt_1, поэтому просмотр другой папки не должен его гасить
+  // (отчёт пользователя: «выделение снимается и промпт не выводится»).
+  const otherRow = st.tree.children.find((r) => ftext(r).includes("Видео"));
+  check("строка другой категории найдена", !!otherRow,
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+  otherRow.onclick({});
+  check("папка переключилась на «Видео»", st.selFolder === "Видео", st.selFolder);
+  check("выбранная запись НЕ снята", st.selWidget.value === "e1", String(st.selWidget.value));
+  check("панель промпта осталась открытой",
+    st.detailId === "e1" && st.detail.style.display === "flex",
+    `id=${st.detailId}, d=${st.detail.style.display}`);
+});
+
+await run("кнопка «+ Категория» — жёлтая с чёрным текстом", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  check("кнопка доступна из состояния (как exportBtn)", !!st.newFolderBtn);
+  // Заглушка стилей не разбирает cssText на свойства (как браузер), поэтому
+  // проверяем саму строку: жёлтый фон + чёрный текст и НЕ прежний серый.
+  const css = String(st.newFolderBtn.style.cssText);
+  check("фон жёлтый, текст чёрный — читается на тёмной ноде",
+    css.includes("background:#e8c33a") && css.includes("color:#111")
+      && !css.includes("background:#2a2a2a"), css);
+  check("подпись кнопки не изменилась", st.newFolderBtn.textContent === "+ Категория",
+    String(st.newFolderBtn.textContent));
 });
 
 await run("slots: строка «🔌 Выходы» в дереве открывает режим слотов", () => {
-  const node = makeNode();
-  proto.onNodeCreated.call(node);
+  const node = mkSlotNode();
   const st = node._pl;
   addSlotEnv(node);
-  const modeW = node.widgets.find((w) => w.name === "mode");
-  modeW.value = "📤 Выдача";
-  st.folders = ["Фото"];
-  st.entries = [];
+  st.folders.push("Фото");
   st.renderTree(); st.render();
   const outsRow = st.tree.children[2];
   check("третья строка дерева — категория выходов",
@@ -2359,9 +2581,11 @@ await run("slots: строка «🔌 Выходы» в дереве откры�
     node.widgets.find((w) => w.name === "save_folder").value === "__outs");
   st.bindOutSlot({ kind: "card", id: "zz", name: "zz" }); // записи нет в базе
   st.render();
-  const rows = st.list.children.filter((c) => String(c.style.cssText).includes("#2e6b4f"));
-  check("слот виден в категории выходов (битая запись)", rows.length === 1 && ftext(rows[0]).includes("(запись удалена)"));
-  check("сокет out_2 после всего жив", node.outputs[2].hide === false);
+  const rows = st.list.children.filter((c) => ftext(c).includes("zz"));
+  check("вывод виден в категории выходов (битая запись)",
+    rows.length === 1 && ftext(rows[0]).includes("записи нет"),
+    st.list.children.map((c) => ftext(c)).join(" ; "));
+  check("сокет выхода 2 после всего жив", node.outputs.length === 3 && node.outputs[2].name === "prompt_2");
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);

@@ -23,6 +23,36 @@ function plBadge(e) {
     return e.media === "video" ? "🎬 " : e.media === "image" ? "📷 " : "";
 }
 
+// Эмодзи-иконки (🔌 / 📷 / 🎬) в Segoe UI Emoji сами по себе тёмные и на тёмной
+// ноде почти сливаются с фоном. Цвет глифа задаёт ШРИФТ — `color` на эмодзи не
+// действует, поэтому единственный честный способ — фильтр яркости.
+const PL_ICON_FILTER = "filter:brightness(1.65) saturate(1.1);";
+// Иконка отдельным пролётом: + воздух справа (margin), чтобы «штепсель + номер»
+// и «фотоаппарат» не слипались в одну тёмную кучу (отчёт пользователя).
+function plIcon(text, extra) {
+    const s = document.createElement("span");
+    s.textContent = text;
+    s.style.cssText = PL_ICON_FILTER + "flex-shrink:0;" + (extra || "");
+    return s;
+}
+// Название карточки: [🔌N] [📌] [📷/🎬] + имя. Текст иконок остаётся в DOM
+// (ftext в тестах и поиск по названию не ломаются), меняется только раскладка.
+function plCardTitle(e, outNum) {
+    const box = document.createElement("div");
+    box.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+    if (outNum) box.appendChild(plIcon(`🔌${outNum} `, "margin-right:4px;"));
+    if (e.pinned) box.appendChild(plIcon("📌 ", "margin-right:2px;"));
+    if (plBadge(e)) box.appendChild(plIcon(plBadge(e), "margin-right:4px;"));
+    const name = e.title || e.head || "(без названия)";
+    // Имя — обычным span'ом, а не текстовым узлом: так его видит и DOM, и
+    // тестовые заглушки (ftext/`firstTitle` читают текст по элементам).
+    const nm = document.createElement("span");
+    nm.textContent = name;
+    box.appendChild(nm);
+    box.title = name;
+    return box;
+}
+
 // --- Синхронизация Library-нод одной страницы -------------------------------
 // WS-сигнал (§26) ходит кругом через сервер и доходит до соседней ноды с
 // задержкой; пока он идёт, второй экземпляр ноды показывает устаревший список —
@@ -78,7 +108,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.44-multi-output";
+const PL_JS_VERSION = "1.45.2-icons-select";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -389,7 +419,9 @@ app.registerExtension({
             const newFolderBtn = document.createElement("button");
             newFolderBtn.textContent = "+ Категория";
             newFolderBtn.title = "Создать категорию (в текущей — подкатегорию)";
-            newFolderBtn.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;";
+            // Жёлтая кнопка с чёрным текстом (как просил пользователь): остальные
+            // кнопки шапки цветные, серая терялась, а на жёлтом чёрный читается.
+            newFolderBtn.style.cssText = "background:#e8c33a;color:#111;border:1px solid #c9a72f;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;font-weight:bold;";
             const exportBtn = document.createElement("button");
             exportBtn.textContent = "📤 Экспорт";
             exportBtn.title = "Экспорт на диск: при Ctrl/Shift-выделении — отмеченные записи и категории, иначе — текущая категория (с подкатегориями)";
@@ -420,7 +452,50 @@ app.registerExtension({
             // Заголовок списка: пустой распорник — верх первой карточки совпадает
             // с верхом дерева (treeHead). Bulk-бар живёт в нижней строке (hintRow).
             const listHead = document.createElement("div");
-            listHead.style.cssText = "height:22px;flex-shrink:0;";
+            listHead.style.cssText = "height:22px;flex-shrink:0;display:flex;align-items:center;";
+            // Подключение к доп. выходу без перетаскивания: выделите карточку (или
+            // откройте категорию) и нажмите кнопку — то же, что дропнуть в
+            // «🔌 Выходы» (v1.44 §40). Живёт в пустой шапке списка — там же по
+            // высоте, что шапка проводника, и ничего не сдвигает.
+            const bindOutBtn = document.createElement("button");
+            bindOutBtn.textContent = "🔌 Подключить выход";
+            bindOutBtn.title = "Подключить выделенную карточку (или текущую категорию) как доп. выход в категории «🔌 Выходы»";
+            bindOutBtn.style.cssText = "background:#2e6b4f;color:#e8fff0;border:1px solid #3f8a63;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;white-space:nowrap;flex-shrink:0;";
+            bindOutBtn.onclick = () => {
+                try {
+                    const selId = selWidget ? String(selWidget.value || "") : "";
+                    const ent = selId ? st.entries.find((x) => x.id === selId) : null;
+                    const before = st.readOutSlots().length;
+                    if (ent) {
+                        const already = st.outSlotOfEntry(ent.id);
+                        if (already) {
+                            st.toast("warn", "Prompt Library: выходы",
+                                `Эта карточка уже подключена к выходу «промпт ${already.i}».`);
+                            return;
+                        }
+                        st.bindOutSlot({ kind: "card", id: ent.id, name: ent.title || ent.head || ent.id });
+                        st.hintSticky = `Карточка «${(ent.title || ent.head || ent.id).slice(0, 40)}» подключена к выходу «промпт ${before + 2}» (категория «🔌 Выходы»).`;
+                        st.renderHint?.();
+                        return;
+                    }
+                    const f = st.selFolder;
+                    if (f && !f.startsWith("__")) {
+                        const already = st.outSlotOfFolder(f);
+                        if (already) {
+                            st.toast("warn", "Prompt Library: выходы",
+                                `Эта категория уже подключена к выходу «промпт ${already.i}».`);
+                            return;
+                        }
+                        st.bindOutSlot({ kind: "folder", path: f, active_id: "", name: f.split("/").pop() || f });
+                        st.hintSticky = `Категория «${f}» подключена к выходу «промпт ${before + 2}» — внутри неё выберите карточку вывода.`;
+                        st.renderHint?.();
+                        return;
+                    }
+                    st.toast("warn", "Prompt Library: выходы",
+                        "Сначала выберите карточку или категорию — «Всё»/«Избранное»/«Без категории» подключить нельзя.");
+                } catch (e) { /* silent */ }
+            };
+            listHead.appendChild(bindOutBtn);
             list.appendChild(listHead);
             // Контент списка (скроллируемый). Сжимается (min-height:0), см. tree.
             const listContent = document.createElement("div");
@@ -680,7 +755,7 @@ app.registerExtension({
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
                 pickupRow, pickupSel, inputTitle,
                 bulkCount, bulkDel, bulkClear,
-                progTrack, progFill, exportBtn,
+                progTrack, progFill, exportBtn, newFolderBtn,
                 dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel, bExport,
                 entries: [], folders: [], full: new Map(),
                 pinnedFolders: new Set(),
@@ -1065,57 +1140,131 @@ app.registerExtension({
             // Скрытый виджет slots_out несёт JSON [{i, kind, id|path, active_id, name}].
             // st.slotsOut — зеркало на время сессии; пишем в виджет при каждом
             // изменении (он персистится PNG-патчем и входит в cache-key ноды).
+            // Номер выхода = место в списке: привязка №0 живёт на выходе 2
+            // («промпт 2»), №1 — на выходе 3 и т.д. Список всегда НЕПРЕРЫВНЫЙ,
+            // иначе номера сокетов разъехались бы с индексами RETURN_TYPES
+            // (Python отдаёт значения строго по индексам 0..11).
+            const OUT_SLOT_MIN = 2;
+            const OUT_SLOTS_LIMIT = 10;   // выходы 2..11 при RETURN_TYPES = 12
             st.outSlotsWidget = () => this.widgets?.find((w) => w.name === "slots_out") || null;
             st.readOutSlots = () => {
+                let raw = st.slotsOut;
                 try {
                     const w = st.outSlotsWidget();
-                    if (!w) return st.slotsOut;
-                    if (Array.isArray(w.value)) return w.value;
-                    if (w.value === undefined || w.value === null || w.value === "") return [];
-                    const d = typeof w.value === "string" ? JSON.parse(w.value) : w.value;
-                    return Array.isArray(d) ? d : [];
-                } catch (e) { return st.slotsOut; }
+                    if (w && Array.isArray(w.value)) raw = w.value;
+                    else if (w && typeof w.value === "string" && w.value.trim()) raw = JSON.parse(w.value);
+                } catch (e) { raw = st.slotsOut; }
+                if (!Array.isArray(raw)) return [];
+                const arr = raw.filter((s) => s && (s.kind === "card"
+                    ? (typeof s.id === "string" && !!s.id)
+                    : (s.kind === "folder" && typeof s.path === "string" && !!s.path)));
+                arr.sort((a, b) => (Number(a.i) || 0) - (Number(b.i) || 0));
+                arr.forEach((s, idx) => { s.i = OUT_SLOT_MIN + idx; });
+                return arr;
             };
             st.writeOutSlots = (arr) => {
                 try {
-                    st.slotsOut = arr;
+                    const clean = (Array.isArray(arr) ? arr : []).slice(0, OUT_SLOTS_LIMIT);
+                    clean.forEach((s, idx) => { s.i = OUT_SLOT_MIN + idx; });
+                    st.slotsOut = clean;
                     const w = st.outSlotsWidget();
-                    if (w) w.value = JSON.stringify(arr);
+                    if (w) w.value = JSON.stringify(clean);
                 } catch (e) { /* silent */ }
             };
             // Индекс ближайшего свободного слота 2..11; null — все заняты.
             st.nextOutSlot = () => {
-                const used = new Set(st.readOutSlots().map((s) => s && s.i));
-                for (let i = 2; i <= 11; i++) if (!used.has(i)) return i;
-                return null;
+                const used = st.readOutSlots().length;
+                return used < OUT_SLOTS_LIMIT ? OUT_SLOT_MIN + used : null;
             };
             st.outSlotBy = (pred) => st.readOutSlots().find((s) => s && pred(s)) || null;
             st.outSlotOfEntry = (id) => st.outSlotBy((s) => s.kind === "card" && s.id === id);
             st.outSlotOfFolder = (path) => st.outSlotBy((s) => s.kind === "folder" && s.path === path);
-// Показ/скрытие сокета выхода. Сокеты 2..11 скрыты, пока слот не занят.
-// Имя провода НЕ меняем (оставляем из RETURN_NAMES), вместо этого
-// используем tooltip/label для отображения подключения.
+            // Что уходит в провод — для тултипа сокета и строк в «Выходах».
+            st.outSlotLabel = (s) => {
+                try {
+                    const t = s && (s.name || (s.kind === "folder" ? s.path : s.id));
+                    return String(t || "?").slice(0, 32);
+                } catch (e) { return "?"; }
+            };
+            // Для папки-вывода в тултипе сокета мало имени папки: важно, какая
+            // карточка сейчас из неё уходит.
+            st.outSlotTitle = (s) => {
+                const base = st.outSlotLabel(s);
+                try {
+                    if (s && s.kind === "folder" && s.active_id) {
+                        const e = st.entries.find((x) => x.id === s.active_id);
+                        if (e) return (base + " → " + (e.title || e.head || e.id)).slice(0, 64);
+                    }
+                } catch (err) { /* silent */ }
+                return base;
+            };
+            // Мета выходов из node def (имя + localized_name из локали): нужна,
+            // чтобы вернуть сокет на место, если привязку создали позже. Снимаем
+            // её ОДИН раз при создании ноды (в onConfigure outputs приходят из
+            // файла графа и описывают только занятые сокеты).
+            st.captureOutBase = () => {
+                try {
+                    st.baseOutMeta = (this.outputs || []).map((o) => ({
+                        name: (o && o.name) || "",
+                        type: (o && o.type) || "STRING",
+                        localized_name: o && o.localized_name,
+                    }));
+                } catch (e) { st.baseOutMeta = null; }
+            };
+            // Сокеты доп. выходов: занятые — есть на ноде, свободные — нет.
+            //
+            // ПОЧЕМУ НЕ o.hide (живой факт, проверено на фронтенде 1.52):
+            // поля `hide` у слотов в этом фронтенде НЕТ вовсе — NodeSlots.vue
+            // рисует все `nodeData.outputs` подряд, LGraphCanvas/LGraphNode
+            // про hide слотов не знают. Прежний код ставил `o.hide = true`, и на
+            // живой ноде все 12 сокетов были видны (скриншот пользователя).
+            // Рабочий путь — тот же, что у смены входов в Degg_Switch: лишние
+            // сокеты физически убрать (removeOutput), нужные добавить (addOutput).
             st.applyOutSockets = () => {
                 try {
                     const slots = st.readOutSlots();
-                    const byIndex = new Map(slots.filter((s) => s).map((s) => [s.i, s]));
-                    if (!this.outputs) return;
+                    let want = Math.min(2 + OUT_SLOTS_LIMIT, 2 + slots.length);
+                    const base = st.baseOutMeta || [];
+                    if (!this.outputs) this.outputs = [];
+                    // Провод важнее прятания: сокет с проводом не убираем, иначе в
+                    // графе осталась бы ссылка на несуществующий выход (старые
+                    // графы могли запускать провода с любых сокетов).
+                    for (let i = this.outputs.length - 1; i >= want; i--) {
+                        const o = this.outputs[i];
+                        if (o && ((o.links && o.links.length) || o.link != null)) { want = i + 1; break; }
+                    }
+                    // 1. Лишние сокеты — убираем с конца (removeOutput сам отключает
+                    //    висевшие на них провода и переезжает номера у следующих).
+                    while (this.outputs.length > want) this.removeOutput(this.outputs.length - 1);
+                    // 2. Недостающие — возвращаем с def-именами (RU-локаль даёт
+                    //    «промпт N» через localized_name, EN — prompt_N).
+                    while (this.outputs.length < want) {
+                        const b = base[this.outputs.length] || {};
+                        const opts = {};
+                        if (b.localized_name) opts.localized_name = b.localized_name;
+                        this.addOutput(b.name || ("prompt_" + this.outputs.length),
+                            b.type || "STRING", opts);
+                    }
+                    // 3. Имена/локали выравниваем по def: граф мог быть сохранён
+                    //    прошлой сборкой с чужими именами («выход 3»).
                     for (let i = 0; i < this.outputs.length; i++) {
-                        if (i < 2) continue;
+                        const o = this.outputs[i], b = base[i];
+                        if (!o || !b) continue;
+                        if (b.name && o.name !== b.name) o.name = b.name;
+                        if (b.localized_name) o.localized_name = b.localized_name;
+                    }
+                    // 4. Тултип занятого сокета — что именно уходит в этот провод;
+                    //    сокет с проводом без привязки — в отдельный список (st.outOrphan),
+                    //    о таком молчать нельзя: провод есть, а текста в нём нет.
+                    st.outOrphan = [];
+                    for (let i = 2; i < this.outputs.length; i++) {
                         const o = this.outputs[i];
                         if (!o) continue;
-                        const s = byIndex.get(i);
-                        if (s) {
-                            o.hide = false;
-                            // Не меняем o.name (оставляем RETURN_NAMES).
-                            // Добавляем tooltip с именем подключения.
-                            const label = s.name || (s.kind === "folder" ? s.path : s.id);
-                            o.title = `→ ${label.slice(0, 32)}`;
-                        } else {
-                            o.hide = true;
-                            o.title = "";
-                        }
+                        const s = slots[i - 2];
+                        o.title = s ? ("→ " + st.outSlotTitle(s)) : "";
+                        if (!s && ((o.links && o.links.length) || o.link != null)) st.outOrphan.push(i);
                     }
+                    if (st.outOrphan.length) st.renderHint?.();
                 } catch (e) { /* silent */ }
                 try { this.setDirtyCanvas?.(true, true); } catch (e) { /* silent */ }
             };
@@ -1125,15 +1274,16 @@ app.registerExtension({
             st.folderActOf = (eid) => st.outSlotBy((s) => s.kind === "folder" && s.path === st.selFolder && s.active_id === eid);
             st.bindOutSlot = (slot) => {
                 try {
-                    const arr = st.readOutSlots().filter((s) => s);
+                    const arr = st.readOutSlots();
                     const dup = arr.some((s) => (slot.kind === "card" ? s.id === slot.id : s.path === slot.path));
                     if (dup) return;
-                    const i = (slot.i === undefined || slot.i === null) ? st.nextOutSlot() : slot.i;
-                    if (i === null) {
-                        st.toast("warn", "Prompt Library: выходы", "Все 10 слотов заняты — отвяжите лишние в категории «🔌 Выходы».");
+                    if (arr.length >= OUT_SLOTS_LIMIT) {
+                        st.toast("warn", "Prompt Library: выходы", "Все 10 выходов заняты — отвяжите лишние в категории «🔌 Выходы».");
                         return;
                     }
-                    arr.push({ i, kind: slot.kind, id: slot.id, path: slot.path, active_id: slot.active_id, name: slot.name });
+                    // Привязка всегда встаёт в конец списка: номер выхода =
+                    // место в списке, дырок в нумерации быть не может.
+                    arr.push({ kind: slot.kind, id: slot.id, path: slot.path, active_id: slot.active_id, name: slot.name });
                     st.writeOutSlots(arr);
                     st.applyOutSockets();
                     renderTree(); render();
@@ -1141,12 +1291,61 @@ app.registerExtension({
             };
             st.unbindOutSlot = (i) => {
                 try {
-                    if (this.outputs && this.outputs[i] && this.outputs[i].links && this.outputs[i].links.length) this.disconnectOutput(i);
+                    const arr = st.readOutSlots();
+                    const idx = arr.findIndex((s) => s.i === i);
+                    if (idx < 0) return;
+                    // Убираем ИМЕННО этот сокет: removeOutput отключит его провод
+                    // и переедет номера у следующих — провод остаётся со своей
+                    // привязкой (в списке удалили строку — остальные сдвинулись
+                    // вместе с содержимым, чужие провода не страдают).
+                    try {
+                        if (this.outputs && i < this.outputs.length) this.removeOutput(i);
+                    } catch (e) { /* silent */ }
+                    arr.splice(idx, 1);
+                    st.writeOutSlots(arr);
+                    st.applyOutSockets();
+                    renderTree(); render();
                 } catch (e) { /* silent */ }
-                const arr = st.readOutSlots().filter((s) => s && s.i !== i);
-                st.writeOutSlots(arr);
-                st.applyOutSockets();
-                renderTree(); render();
+            };
+            // Перетаскивание строки в «Выходах» меняет НОМЕР провода: порядок
+            // списка = порядок сокетов, т.е. содержимое едет за позицией, а
+            // провода остаются на своих сокетах (им же и адресуют).
+            st.reorderOutSlot = (from, to) => {
+                try {
+                    const arr = st.readOutSlots();
+                    if (from === to || from < 0 || to < 0 || from >= arr.length || to >= arr.length) return;
+                    const [item] = arr.splice(from, 1);
+                    arr.splice(to, 0, item);
+                    st.writeOutSlots(arr);
+                    st.applyOutSockets();
+                    renderTree(); render();
+                } catch (e) { /* silent */ }
+            };
+            // Строка слота — дроп-зона для соседних строк (перестановка).
+            st.outSlotDrag = (row, idx) => {
+                try {
+                    row.draggable = true;
+                    row.ondragstart = (ev) => {
+                        ev.dataTransfer.setData("application/x-pl-slot", String(idx));
+                        ev.dataTransfer.effectAllowed = "move";
+                        ev.stopPropagation();
+                    };
+                    row.ondragover = (ev) => {
+                        ev.preventDefault();
+                        ev.dataTransfer.dropEffect = "move";
+                        row.style.outline = "1px dashed #4a9eff";
+                    };
+                    row.ondragleave = () => { row.style.outline = ""; };
+                    row.ondrop = (ev) => {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        row.style.outline = "";
+                        let from = NaN;
+                        try { from = parseInt(ev.dataTransfer.getData("application/x-pl-slot"), 10); } catch (e) { /* silent */ }
+                        if (Number.isNaN(from)) return;
+                        st.reorderOutSlot(from, idx);
+                    };
+                } catch (e) { /* silent */ }
             };
 
 
@@ -1619,6 +1818,16 @@ const reload = async () => {
                 name.textContent = (marked ? "☑ " : "") + label;
                 name.title = isFolder ? key : label;
                 row.appendChild(name);
+                // Категория, подключённая к доп. выходу, носит номер провода
+                // прямо в проводнике — видно, что куда уходит (§40).
+                const slotOfFolder = isFolder ? st.outSlotOfFolder(key) : null;
+                if (slotOfFolder) {
+                    const bn = document.createElement("span");
+                    bn.textContent = "🔌" + slotOfFolder.i;
+                    bn.title = `Категория подключена к выходу «промпт ${slotOfFolder.i}»`;
+                    bn.style.cssText = "color:#7fe0a8;font-size:10px;flex-shrink:0;padding:0 2px;";
+                    row.appendChild(bn);
+                }
                 // Папки можно таскать; любая строка — дроп-зона
                 row.draggable = isFolder;
                 if (isFolder) {
@@ -1719,11 +1928,13 @@ const reload = async () => {
                     st.outsActiveFolder = ""; // сброс активной папки при смене ветки
                     st.syncSaveFolder();
                     st.anchorFolder = key; // обычный клик ставит якорь для Shift-диапазона
-                    st.detailId = null;
-                    if (selWidget) selWidget.value = "";
-                    st.detail.style.display = "none";
-                    st.shrinkBack?.();
-                    st.hintMsg = "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
+                    // Выбранную запись (и панель промпта) НЕ снимаем: она — источник
+                    // основного текста на выходе prompt_1, и переход по категориям
+                    // ради просмотра не должен его гасить. Снимется только когда
+                    // пользователь выберет другую карточку (отчёт пользователя).
+                    st.hintMsg = st.detailId
+                        ? st.hintMsg
+                        : "Запустите Queue или нажмите «Сохранить промпт» — записи появятся здесь.";
                     st.hintSticky = null;
                     renderTree();
                     render();
@@ -1741,43 +1952,58 @@ const reload = async () => {
                 // v1.44 (§40): категория привязок доп. выходов (виртуальная ветка)
                 const outsRow = folderRow("__outs", "🔌 Выходы", 0, false);
                 st.tree.appendChild(outsRow);
-                // Подключённые выходы — как дети категории «Выходы» (перед "Без категории")
-                const slots = (st.readOutSlots() || []).filter((s) => s).sort((a, b) => a.i - b.i);
-                for (const slot of slots) {
+                // Подключённые выходы — как дети категории «Выходы» (перед "Без категории").
+                // Номер «промпт N» — это НОМЕР ПРОВОДА (он же место в списке):
+                // строка таскается вверх/вниз и этим меняет, какой выход отдаёт
+                // эту карточку/папку (§40).
+                const slots = st.readOutSlots();
+                for (let idx = 0; idx < slots.length; idx++) {
+                    const slot = slots[idx];
                     const isFolder = slot.kind === "folder";
-                    const label = isFolder
-                        ? `🔌📁 ${slot.path || "?"}`  // папка-слот: иконка провода + папка
-                        : `🔌 ${slot.name || slot.id || "?"}`; // карточка-слот
+                    const selIdTree = selWidget ? String(selWidget.value || "") : "";
+                    const isActive = isFolder
+                        ? st.outsActiveFolder === slot.path
+                        : selIdTree === slot.id;
                     const row = document.createElement("div");
-                    row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:#ccc;background:transparent;padding-left:${4 + 14}px;`;
-                    row.draggable = false;
+                    row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${isActive ? "#fff" : "#ccc"};background:${isActive ? "#2e6b4f" : "transparent"};${isActive ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + 14}px;`;
+                    const num = document.createElement("span");
+                    num.textContent = `🔌${slot.i}`;
+                    num.title = `Выход «промпт ${slot.i}»`;
+                    num.style.cssText = PL_ICON_FILTER + "color:#7fe0a8;flex-shrink:0;margin-right:3px;";
                     const name = document.createElement("span");
                     name.style.cssText = "flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                    name.textContent = label;
-                    name.title = isFolder ? `Папка-слот: ${slot.path}` : `Карточка-слот: ${slot.name || slot.id}`;
+                    name.textContent = (isFolder ? "📁 " : "") + st.outSlotLabel(slot);
+                    name.title = `Выход №${slot.i}: ` + (isFolder ? `папка-вывод «${slot.path}»` : "карточка-вывод")
+                        + " · перетащите строку, чтобы отдать этот текст другому выходу";
+                    row.appendChild(num);
                     row.appendChild(name);
-                    // Кнопка отключения
+                    // Кнопка отвязки
                     const del = document.createElement("button");
                     del.textContent = "✖";
-                    del.title = "Отключить выход (провод отключится, сокет скроется)";
+                    del.title = "Отвязать выход (провод отключится, сокет исчезнет)";
                     del.style.cssText = "background:none;border:none;cursor:pointer;font-size:11px;color:#e08a3c;padding:0 2px;";
                     del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
                     row.appendChild(del);
-                    // Клик по папке-слоту в дереве → открыть её карточки в категории «Выходы»
-                    if (isFolder) {
-                        row.onclick = () => {
-                            st.selFolder = "__outs";
-                            st.outsActiveFolder = slot.path; // запомнить активную папку
-                            st.syncSaveFolder();
-                            st.detailId = null;
-                            if (selWidget) selWidget.value = "";
-                            st.detail.style.display = "none";
-                            st.shrinkBack?.();
-                            st.hintMsg = "Выберите карточку для вывода из папки «" + slot.path + "»";
-                            st.hintSticky = null;
+                    st.outSlotDrag(row, idx);
+                    row.onclick = () => {
+                        st.selFolder = "__outs";
+                        st.outsActiveFolder = isFolder ? slot.path : "";
+                        st.syncSaveFolder();
+                        st.hintSticky = null;
+                        if (isFolder) {
+                            // Папка-вывод: открываем её карточки, но выбранную
+                            // запись и панель промпта не сбрасываем — по той же
+                            // причине, что и при смене категории (см. folderRow).
+                            if (!st.detailId) st.hintMsg = "Выберите карточку для вывода из папки «" + slot.path + "»";
                             renderTree(); render();
-                        };
-                    }
+                            return;
+                        }
+                        // Карточка-вывод: выбирается как обычная запись (слева —
+                        // превью, снизу — панель промпта), из «Выходов» не уходим.
+                        if (selWidget) selWidget.value = slot.id;
+                        st.anchorEntry = slot.id;
+                        st.fillDetail(slot.id).then(() => { renderTree(); render(); });
+                    };
                     st.tree.appendChild(row);
                     st.folderOrder.push("__outs_slot_" + slot.i);
                 }
@@ -1866,6 +2092,135 @@ const reload = async () => {
                 return arr;
             };
 
+            // Карточка вывода (категория «Выходы»): превью и название, как у
+            // обычной карточки — раньше здесь была голая текстовая строка без
+            // обложки. Клик = выбрать запись (подсветка + панель промпта снизу);
+            // внутри папки-вывода клик ещё и отдаёт её текст в провод (§40).
+            st.makeOutCard = (e, opts) => {
+                const o = opts || {};
+                const grid = !!o.grid, imgSize = o.imgSize || 163;
+                const slot = o.slot || o.fs || null;
+                const isActive = !!(o.fs && o.fs.active_id === e.id);
+                const isSel = !!(selWidget && selWidget.value === e.id);
+                const card = document.createElement("div");
+                card.draggable = false;
+                const border = isActive ? "#2e6b4f" : isSel ? "#4a9eff" : "#333";
+                const bg = isActive ? "#1c3525" : isSel ? "#1e2c44" : "#1e1e1e";
+                card.style.cssText = grid
+                    ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${border};background:${bg};flex-shrink:0;`
+                    : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${border};background:${bg};`;
+                // Размер превью — тот же, что у обычной карточки в этом виде
+                // (§8.1: 163/109/82). Раньше в «Списке» тут было жёстких 40px —
+                // строки в «Выходах» выглядели уже и мельче, чем в категориях.
+                const img = document.createElement("img");
+                img.style.cssText = `width:${imgSize}px;height:${imgSize}px;object-fit:cover;border-radius:3px;background:#222;flex-shrink:0;`;
+                img.loading = "lazy";
+                if (e.has_preview) {
+                    const stamp = st.previewStamp.get(e.id) || "";
+                    img.src = `/prompt_library/preview?id=${encodeURIComponent(e.id)}`
+                        + `&t=${encodeURIComponent(e.created_at || e.id)}` + (stamp ? `&r=${stamp}` : "");
+                } else img.style.display = "none";
+                const body = document.createElement("div");
+                body.style.cssText = grid ? "min-width:0;text-align:center;" : "flex:1;min-width:0;";
+                const t = plCardTitle(e, slot ? slot.i : 0);
+                const m = document.createElement("div");
+                m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                m.textContent = isActive ? "⚡ активный вывод папки-вывода" : (e.folder || "Без категории");
+                body.appendChild(t);
+                // В «Списке» строка несёт и начало текста — как у обычных карточек
+                if (!grid) {
+                    const h = document.createElement("div");
+                    h.style.cssText = "color:#bbb;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                    h.textContent = e.head || "";
+                    body.appendChild(h);
+                }
+                body.appendChild(m);
+                const del = document.createElement("button");
+                del.textContent = "✖";
+                del.title = "Отвязать выход (провод отключится, сокет исчезнет)";
+                del.style.cssText = "background:none;border:none;cursor:pointer;font-size:12px;color:#e08a3c;flex-shrink:0;padding:0 2px;";
+                del.onclick = (ev) => { ev.stopPropagation(); if (slot) st.unbindOutSlot(slot.i); };
+                card.appendChild(img);
+                card.appendChild(body);
+                card.appendChild(del);
+                card.onclick = async (ev) => {
+                    if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) return;
+                    if (st.markEntries.size || st.markFolders.size) st.clearMarks();
+                    // Папка-вывод: выбранная карточка сразу становится источником
+                    // текста для этого провода (перезапись active_id → cache-key).
+                    if (o.fs && o.fs.active_id !== e.id) {
+                        const arr = st.readOutSlots();
+                        const fs = arr.find((s) => s && s.kind === "folder" && s.path === o.fs.path);
+                        if (fs) {
+                            fs.active_id = e.id;
+                            st.writeOutSlots(arr);
+                            st.applyOutSockets();
+                            st.outsActiveFolder = fs.path;
+                        }
+                    }
+                    if (selWidget) selWidget.value = e.id;
+                    st.anchorEntry = e.id;
+                    await st.fillDetail(e.id);
+                    // НЕ трогаем selFolder: остаёмся в «Выходах», как в обычном режиме
+                    renderTree(); render();
+                    if (!st._vuePanes) st.syncNodeSize?.();
+                };
+                return card;
+            };
+            // Строка вывода в списке «Выходов»: папка-вывод или карточка, которой
+            // уже нет в базе. Тянется мышью — этим меняется НОМЕР провода.
+            st.slotOutRow = (slot, idx) => {
+                const row = document.createElement("div");
+                row.draggable = false;
+                const isSel = slot.kind === "folder" && st.outsActiveFolder === slot.path;
+                row.style.cssText = `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${isSel ? "#7fe0a8" : "#2e6b4f"};background:#14302a;flex-shrink:0;`;
+                const num = document.createElement("span");
+                num.textContent = `🔌${slot.i}`;
+                num.title = `Выход «промпт ${slot.i}» · строку можно перетаскивать мышью — от этого меняется номер выхода`;
+                num.style.cssText = PL_ICON_FILTER + "color:#7fe0a8;font-size:11px;flex-shrink:0;margin-right:3px;";
+                const body = document.createElement("div");
+                body.style.cssText = "flex:1;min-width:0;";
+                const t = document.createElement("div");
+                t.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                const m = document.createElement("div");
+                m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                if (slot.kind === "folder") {
+                    t.textContent = `📁 ${slot.path || "?"}`;
+                    const e = st.entries.find((x) => x.id === slot.active_id);
+                    m.textContent = "папка-вывод" + (e ? ` · вывод: ${e.title || e.head}` : " · вывод не выбран — кликните карточку внутри");
+                } else {
+                    t.textContent = slot.name || slot.id || "?";
+                    m.textContent = "записи нет — выход отдаст «(запись удалена)»";
+                }
+                const del = document.createElement("button");
+                del.textContent = "✖";
+                del.title = "Отвязать выход (провод отключится, сокет исчезнет)";
+                del.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;color:#e08a3c;flex-shrink:0;";
+                del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
+                body.appendChild(t); body.appendChild(m);
+                row.appendChild(num); row.appendChild(body); row.appendChild(del);
+                st.outSlotDrag(row, idx);
+                row.onclick = () => {
+                    st.selFolder = "__outs";
+                    st.hintSticky = null;
+                    st.syncSaveFolder();
+                    if (slot.kind === "folder") {
+                        st.outsActiveFolder = slot.path;
+                        renderTree(); render();
+                        return;
+                    }
+                    const e = st.entries.find((x) => x.id === slot.id);
+                    if (e) {
+                        if (selWidget) selWidget.value = e.id;
+                        st.anchorEntry = e.id;
+                        st.fillDetail(e.id).then(() => { renderTree(); render(); });
+                    } else {
+                        renderTree(); render();
+                    }
+                };
+                return row;
+            };
+
             const render = () => {
                 const mode = st.viewSel.value || "large";
                 const grid = mode !== "list";
@@ -1876,108 +2231,68 @@ const reload = async () => {
                 st.list.innerHTML = "";
                 const selVal = selWidget ? selWidget.value : "";
                 let shown = 0;
-                // v1.44 (§40): категория «Выходы» — слоты с кнопкой отвязки.
-                // Если выбран папка-слот (через дерево) — показываем его карточки.
+                // v1.44 (§40): категория «Выходы» — привязки доп. выходов.
+                // Клик по карточке здесь работает КАК В ОБЫЧНОМ РЕЖИМЕ: подсветка,
+                // превью слева, панель промпта снизу — и никакого перехода в
+                // категорию, где лежит запись (раньше выбрасывало в «Всё»).
                 if (st.selFolder === "__outs") {
-                    const slots = (st.readOutSlots() || []).filter((s) => s).sort((a, b) => a.i - b.i);
-                    // Проверяем, есть ли активный папка-слот (пользователь кликнул его в дереве)
-                    const activeFolderSlot = slots.find((s) => s.kind === "folder" && s.path === st.outsActiveFolder);
-if (activeFolderSlot) {
-                        // Показываем карточки папки для выбора активного вывода
-                        const folderEntries = st.entries.filter((e) => e.folder === activeFolderSlot.path);
-                        for (const e of folderEntries) {
-                            const card = document.createElement("div");
-                            card.draggable = false;
-                            const isActive = activeFolderSlot.active_id === e.id;
-                            const bg = isActive ? "#1c3525" : "#1e1e1e";
-                            const border = isActive ? "#2e6b4f" : "#333";
-                            card.style.cssText = `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${border};background:${bg};flex-shrink:0;`;
-                            const icon = document.createElement("span");
-                            icon.textContent = isActive ? "🔌" : "📄";
-                            icon.title = isActive ? "Активный вывод" : "Нажмите, чтобы сделать активным";
-                            const body = document.createElement("div");
-                            body.style.cssText = "flex:1;min-width:0;";
-                            const t = document.createElement("div");
-                            t.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                            t.textContent = e.title || e.head || e.id;
-                            const m = document.createElement("div");
-                            m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                            m.textContent = isActive ? "⚡ Активный вывод по проводу" : "Клик — выбрать для вывода";
-                            body.appendChild(t); body.appendChild(m);
-                            card.appendChild(icon); card.appendChild(body);
-                            card.onclick = async () => {
-                                // Устанавливаем active_id для этой папки
-                                const arr = st.readOutSlots();
-                                const fs = arr.find((s) => s && s.kind === "folder" && s.path === activeFolderSlot.path);
-                                if (fs && fs.active_id !== e.id) {
-                                    fs.active_id = e.id;
-                                    st.writeOutSlots(arr);
-                                    st.applyOutSockets();
-                                    st.outsActiveFolder = activeFolderSlot.path; // запомнить
-                                    // Перерисовываем только список "Выходы", остаёмся в __outs
-                                    st.render();
-                                }
-                                // Выбираем запись в проводнике и открываем детали (но остаёмся в __outs)
-                                if (selWidget) selWidget.value = e.id;
-                                st.anchorEntry = e.id;
-                                await st.fillDetail(e.id);
-                                // НЕ переключаем selFolder — остаёмся в категории "Выходы"
-                                renderTree(); render();
-                            };
-                            st.list.appendChild(card);
+                    const slots = st.readOutSlots();
+                    const fIdx = slots.findIndex((s) => s.kind === "folder" && s.path === st.outsActiveFolder);
+                    if (fIdx >= 0) {
+                        // Внутри папки-вывода: её карточки (с превью). Клик отдаёт
+                        // текст именно этой карточки в провод папки-вывода.
+                        const fs = slots[fIdx];
+                        // ВНИМАНИЕ: в «Списке» список — это flex-КОЛОНКА, поэтому
+                        // `flex:1 1 100%` означало бы «занять всю высоту» (100% от
+                        // высоты контейнера) — шапка растягивалась и выдавливала
+                        // карточки вниз (скриншот пользователя). Полная ширина —
+                        // только для сетки (там строка).
+                        const head = document.createElement("div");
+                        head.style.cssText = grid
+                            ? "flex:1 1 100%;color:#8aa;font-size:11px;"
+                            : "flex:0 0 auto;align-self:stretch;color:#8aa;font-size:11px;";
+                        // Штепсель — тот же осветлённый пролёт, что и на карточках
+                        // (в обычном тексте эмодзи на тёмном фоне тонет).
+                        head.appendChild(plIcon("🔌 ", "margin-right:2px;"));
+                        const htxt = document.createElement("span");
+                        htxt.textContent = `промпт ${fs.i} · папка «${fs.path}»: клик по карточке решает, что уходит в этот провод`;
+                        head.appendChild(htxt);
+                        st.list.appendChild(head);
+                        for (const e of st.entries.filter((x) => x.folder === fs.path)) {
+                            st.list.appendChild(st.makeOutCard(e, { grid, imgSize, fs }));
                             shown++;
                         }
                         if (!shown) {
                             const empty = document.createElement("div");
-                            empty.style.cssText = "color:#888;padding:8px;font-size:12px;";
+                            empty.style.cssText = grid
+                                ? "color:#888;padding:8px;font-size:12px;flex:1 1 100%;"
+                                : "color:#888;padding:8px;font-size:12px;";
                             empty.textContent = "В папке нет записей";
                             st.list.appendChild(empty);
                         }
-                    } else {
-                        // Обычный список слотов
-                        for (const slot of slots) {
-                            const row = document.createElement("div");
-                            row.draggable = false;
-                            row.style.cssText = `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid #2e6b4f;background:#14302a;flex-shrink:0;`;
-                            const icon = document.createElement("span");
-                            icon.textContent = "🔌";
-                            icon.title = `Слот out_${slot.i}`;
-                            const body = document.createElement("div");
-                            body.style.cssText = "flex:1;min-width:0;";
-                            const t = document.createElement("div");
-                            t.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                            const m = document.createElement("div");
-                            m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                            if (slot.kind === "card") {
-                                const e = st.entries.find((x) => x.id === slot.id);
-                                t.textContent = (e && (e.title || e.head)) || "(запись удалена)";
-                                m.textContent = e ? (e.folder || "Без категории") : "записи нет — слот отдаст «(запись удалена)»";
-                            } else {
-                                t.textContent = slot.path || "?";
-                                const e = st.entries.find((x) => x.id === slot.active_id);
-                                m.textContent = "папка" + (e ? ` · вывод: ${e.title || e.head}` : " · вывод: не выбран");
+                        st.renderHint(shown);
+                        return;
+                    }
+                    for (let idx = 0; idx < slots.length; idx++) {
+                        const slot = slots[idx];
+                        // Карточка-вывод с живой записью — обычная карточка
+                        // (превью + название) с номером провода.
+                        if (slot.kind === "card") {
+                            const e = st.entries.find((x) => x.id === slot.id);
+                            if (e) {
+                                st.list.appendChild(st.makeOutCard(e, { grid, imgSize, slot }));
+                                shown++;
+                                continue;
                             }
-                            const del = document.createElement("button");
-                            del.textContent = "✖";
-                            del.title = "Отвязать выход (провод отключится, сокет скроется)";
-                            del.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;color:#e08a3c;flex-shrink:0;";
-                            del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
-                            body.appendChild(t); body.appendChild(m);
-                            row.appendChild(icon); row.appendChild(body); row.appendChild(del);
-                            // Клик по строке слота → выбрать запись в проводнике + открыть детали
-                            row.onclick = () => {
-                                if (slot.kind === "card") {
-                                    if (selWidget) selWidget.value = slot.id;
-                                    st.anchorEntry = slot.id;
-                                    st.fillDetail(slot.id);
-                                    st.selFolder = "__all"; // переключаем на "Всё" чтобы показать запись
-                                    st.syncSaveFolder();
-                                    renderTree(); render();
-                                }
-                            };
-                            st.list.appendChild(row);
-                            shown++;
                         }
+                        st.list.appendChild(st.slotOutRow(slot, idx));
+                        shown++;
+                    }
+                    if (!shown) {
+                        const empty = document.createElement("div");
+                        empty.style.cssText = "color:#888;padding:8px;font-size:12px;";
+                        empty.textContent = "Выходов пока нет: выделите карточку или категорию и нажмите «🔌 Подключить выход» (или перетащите её сюда).";
+                        st.list.appendChild(empty);
                     }
                     st.renderHint(shown);
                     return;
@@ -1987,7 +2302,8 @@ if (activeFolderSlot) {
                     card.draggable = true;
                     // v1.44 (§40): карточка, привязанная к слоту (или активный
                     // вывод папки-слота), несёт маркер 🔌 и зелёную подсветку.
-                    const outMark = !!(st.outSlotOfEntry(e.id) || st.folderActOf(e.id));
+                    const outSlot = st.outSlotOfEntry(e.id) || st.folderActOf(e.id);
+                    const outMark = !!outSlot;
                     card.title = (e.has_workflow
                         ? "Тяни на канвас — открыть сохранённый воркфлоу"
                         : "Воркфлоу нет (ручная запись) — прогони Queue, и воркфлоу прикрепится")
@@ -2029,10 +2345,10 @@ if (activeFolderSlot) {
 
                     const body = document.createElement("div");
                     body.style.cssText = grid ? "min-width:0;text-align:center;" : "flex:1;min-width:0;";
-                    const title = document.createElement("div");
-                    title.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                    title.textContent = (outMark ? "🔌 " : "") + (e.pinned ? "📌 " : "") + plBadge(e) + (e.title || e.head || "(без названия)");
-                    title.title = e.title || e.head || "";
+                    // Иконки (🔌N / 📌 / 📷-🎬) — отдельными пролётами с воздухом и
+                    // осветляющим фильтром (см. plCardTitle): раньше они слипались в
+                    // тёмную кучу перед названием.
+                    const title = plCardTitle(e, outMark ? outSlot.i : 0);
                     body.appendChild(title);
                     if (!grid) {
                         const t = document.createElement("div");
@@ -2284,7 +2600,13 @@ if (activeFolderSlot) {
                 else if (st.detailId) st.hint.textContent = st.hintMsg;
                 else {
                     const base = shown ? `Записей в категории: ${shown}. ` : "Пусто. Запустите Queue или нажмите «Сохранить промпт». ";
-                    st.hint.textContent = base + "Клик — открыть · Ctrl/Shift+клик — пометить · пустое место/Esc — снять.";
+                    // Провод без привязки (наследие старых графов с «дырками» в
+                    // нумерации выходов) — говорим вслух, а не молчим: провод есть,
+                    // а текста в нём нет.
+                    const orphan = (st.outOrphan && st.outOrphan.length)
+                        ? `⚠ Выход «промпт ${st.outOrphan.join(", ")}» подключён проводом, но без привязки — подключите к нему карточку в «🔌 Выходах». `
+                        : "";
+                    st.hint.textContent = orphan + base + "Клик — открыть · Ctrl/Shift+клик — пометить · пустое место/Esc — снять.";
                 }
                 const nE = st.markEntries.size, nF = st.markFolders.size;
                 const on = (nE + nF) > 0;
@@ -3007,9 +3329,20 @@ if (activeFolderSlot) {
             // схлопываний: борьба с layout выглядит как колхоз (дёргание).
 
             reload();
-            requestAnimationFrame(() => { st.hookCanvasDrop?.(); st.enforceMinWidth?.(); st.applyNodeMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
-            // v1.44: скрыть доп. выходы сразу при создании ноды
-            st.applyOutSockets();
+            // v1.44 (§40): мета выходов снимается СРАЗУ (пока видны все 12 из
+            // node def) — с неё восстанавливаем имена/локали, когда привязку
+            // создают позже. А сами сокеты правим в rAF: если нода создаётся
+            // загрузкой графа, сейчас же придёт configure(), и урезать outputs
+            // ДО него нельзя — фронтенд сопоставляет выходы графа с текущими по
+            // индексам (`zip(this.outputs, data.outputs)`), лишняя урезка
+            // потеряла бы сокеты из сохранённого воркфлоу и порвала провода.
+            // rAF идёт ДО отрисовки кадра, так что вспышки «12 сокетов» не видно.
+            st.captureOutBase();
+            requestAnimationFrame(() => {
+                st.hookCanvasDrop?.(); st.enforceMinWidth?.(); st.applyNodeMinWidth?.();
+                try { st.applyOutSockets(); } catch (e) { /* silent */ }
+                this.graph?.setDirtyCanvas(true, true);
+            });
             return ret;
         };
 
@@ -3087,12 +3420,17 @@ if (activeFolderSlot) {
                     const named = info.widgets_values_named;
                     if (named && typeof named.slots_out === "string") sv = named.slots_out;
                     if (sv == null && Array.isArray(info.widgets_values) && typeof info.widgets_values[4] === "string") sv = info.widgets_values[4];
+                    // Всегда перезаписываем: старые привязки прошлого графа не
+                    // должны остаться, если в новом их нет (перезагрузка графа в
+                    // уже созданную ноду).
+                    let parsedSlots = [];
                     if (sv) {
                         try {
                             const arr = JSON.parse(sv);
-                            if (Array.isArray(arr)) st.slotsOut = arr;
+                            if (Array.isArray(arr)) parsedSlots = arr;
                         } catch (err) { /* silent */ }
                     }
+                    st.slotsOut = parsedSlots;
                     const sw = st.outSlotsWidget?.();
                     if (sw && sw.value !== sv) sw.value = sv || "";
                 }

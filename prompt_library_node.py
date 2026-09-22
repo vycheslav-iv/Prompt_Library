@@ -641,7 +641,7 @@ def _output_linked(extra_pnginfo, unique_id):
     ставили в разрыв перед CLIP и архивировали каждый прогон. Теперь «Запись»
     молчит, но если провод уже есть — ведём себя как раньше (и говорим об этом).
     Читаем только workflow JSON из extra_pnginfo, живые ссылки LiteGraph не трогаем.
-    prompt_out теперь на индексе 1 (после category_out на индексе 0).
+    Основной текст (prompt_1) — индекс 1: индекс 0 занят путём категории.
     """
     try:
         wf = (extra_pnginfo or {}).get("workflow") or {}
@@ -845,13 +845,17 @@ class PromptLibrary:
             },
         }
 
-    # v1.44 (§40, мультивывод): 12 STRING-выходов. Слоты 0-1 (prompt_out,
-    # category_out) — без изменений; 2-11 — доп. выходы из категории «Выходы»
-    # (создаются дропом в ней). Неиспользуемые слоты возвращают "".
+    # v1.45.1 (§40, мультивывод): 12 STRING-выходов. Индексы 0-1 — путь
+    # категории и основной текст (решение пользователя 2026-09-22: путь первым,
+    # основной промпт — вторым, он же и подписан «промпт 1 (основной)», чтобы
+    # не путался с доп. промптами 2..11). 2-11 — доп. выходы из категории
+    # «Выходы»: номер провода = индекс, сокет создаётся дропом/кнопкой в ней.
+    # Неиспользуемые слоты возвращают "".
     RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING",
                     "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("category_out", "prompt_out", "out_2", "out_3", "out_4", "out_5",
-                    "out_6", "out_7", "out_8", "out_9", "out_10", "out_11")
+    RETURN_NAMES = ("category_path", "prompt_1", "prompt_2", "prompt_3", "prompt_4",
+                    "prompt_5", "prompt_6", "prompt_7", "prompt_8", "prompt_9",
+                    "prompt_10", "prompt_11")
     FUNCTION = "execute"
     CATEGORY = "My_custom_nodes/Prompts"
     OUTPUT_NODE = True
@@ -1148,6 +1152,8 @@ class PromptLibrary:
                         # этому флагу не выдаёт ложное «нода не исполнялась (кэш)».
                         "pickup_blocked": [pickup_node] if pickup_blocked else [],
                         "mode_notice": [notice]},
+                # Порядок = порядок RETURN_NAMES: 0 — путь категории, 1 — основной
+                # текст (prompt_1), дальше доп. слоты 2..11.
                 "result": (_sanitize_folder_path(folder), out_text, *slot_texts)}
 
 
