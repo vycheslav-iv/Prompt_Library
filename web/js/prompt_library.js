@@ -78,7 +78,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.39-unique-export";
+const PL_JS_VERSION = "1.44-multi-output";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -704,6 +704,8 @@ app.registerExtension({
                 // v1.44 (§40): привязки доп. выходов. Зеркало скрытого виджета
                 // slots_out: [{i, kind:"card"|"folder", id|path, active_id?, name?}].
                 slotsOut: [],
+                // v1.44: какая папка-слот сейчас открыта в категории «Выходы»
+                outsActiveFolder: "",
             };
             this._pl = st;
             plLiveStates.add(st);
@@ -1540,6 +1542,14 @@ app.registerExtension({
                     // (привязку доп. выхода). Ближайший свободный индекс берёт
                     // bindOutSlot; дубль (та же карточка/папка) игнорируется.
                     if (target === "__outs") {
+                        // Запрет: категория «Выходы» только для режима «Выдача»
+                        const modeW = this.widgets?.find((w) => w.name === "mode");
+                        const modeVal = modeW ? String(modeW.value || "") : "";
+                        if (modeVal !== "📤 Выдача") {
+                            st.toast("warn", "Prompt Library: выходы",
+                                "Категория «🔌 Выходы» доступна только в режиме «📤 Выдача».");
+                            return;
+                        }
                         if (d.kind === "entry") {
                             for (const id of (d.ids || (d.id ? [d.id] : []))) {
                                 const e = st.entries.find((x) => x.id === id);
@@ -1710,6 +1720,7 @@ app.registerExtension({
                     // Обычный клик при наличии меток — снять весь выбор (как в проводнике)
                     if (st.markEntries.size || st.markFolders.size) st.clearMarks();
                     st.selFolder = key;
+                    st.outsActiveFolder = ""; // сброс активной папки при смене ветки
                     st.syncSaveFolder();
                     st.anchorFolder = key; // обычный клик ставит якорь для Shift-диапазона
                     st.detailId = null;
@@ -1732,8 +1743,49 @@ app.registerExtension({
                 st.tree.appendChild(folderRow("__all", "📚 Всё", 0, false));
                 st.tree.appendChild(folderRow("__fav", "★ Избранное", 0, false));
                 // v1.44 (§40): категория привязок доп. выходов (виртуальная ветка)
-                st.tree.appendChild(folderRow("__outs", "🔌 Выходы", 0, false));
+                const outsRow = folderRow("__outs", "🔌 Выходы", 0, false);
+                st.tree.appendChild(outsRow);
                 st.tree.appendChild(folderRow("__root", "📥 Без категории", 0, false));
+                // Подключённые выходы — как дети категории «Выходы»
+                const slots = (st.readOutSlots() || []).filter((s) => s).sort((a, b) => a.i - b.i);
+                for (const slot of slots) {
+                    const isFolder = slot.kind === "folder";
+                    const label = isFolder
+                        ? `🔌 ${slot.path || "?"}`  // папка-слот
+                        : `🔌 ${slot.name || slot.id || "?"}`; // карточка-слот
+                    const row = document.createElement("div");
+                    row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:#ccc;background:transparent;padding-left:${4 + 14}px;`;
+                    row.draggable = false;
+                    const name = document.createElement("span");
+                    name.style.cssText = "flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                    name.textContent = label;
+                    name.title = isFolder ? `Папка-слот: ${slot.path}` : `Карточка-слот: ${slot.name || slot.id}`;
+                    row.appendChild(name);
+                    // Кнопка отключения
+                    const del = document.createElement("button");
+                    del.textContent = "✖";
+                    del.title = "Отключить выход (провод отключится, сокет скроется)";
+                    del.style.cssText = "background:none;border:none;cursor:pointer;font-size:11px;color:#e08a3c;padding:0 2px;";
+                    del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
+                    row.appendChild(del);
+                    // Клик по папке-слоту в дереве → открыть её карточки в категории «Выходы»
+                    if (isFolder) {
+                        row.onclick = () => {
+                            st.selFolder = "__outs";
+                            st.outsActiveFolder = slot.path; // запомнить активную папку
+                            st.syncSaveFolder();
+                            st.detailId = null;
+                            if (selWidget) selWidget.value = "";
+                            st.detail.style.display = "none";
+                            st.shrinkBack?.();
+                            st.hintMsg = "Выберите карточку для вывода из папки «" + slot.path + "»";
+                            st.hintSticky = null;
+                            renderTree(); render();
+                        };
+                    }
+                    st.tree.appendChild(row);
+                    st.folderOrder.push("__outs_slot_" + slot.i);
+                }
                 const all = [...new Set([...st.folders, ...st.entries.map((e) => e.folder).filter(Boolean)])];
                 all.sort((a, b) => {
                     const aP = st.pinnedFolders.has(a);
@@ -1829,42 +1881,90 @@ app.registerExtension({
                 st.list.innerHTML = "";
                 const selVal = selWidget ? selWidget.value : "";
                 let shown = 0;
-                // v1.44 (§40): категория «Выходы» показывает не записи, а слоты
-                // (привязки доп. выходов) с кнопкой отвязки. Графика не нужна —
-                // строки: 🔌 + имя (карточка/папка) + индекс слота + «отвязать».
+                // v1.44 (§40): категория «Выходы» — слоты с кнопкой отвязки.
+                // Если выбран папка-слот (через дерево) — показываем его карточки.
                 if (st.selFolder === "__outs") {
                     const slots = (st.readOutSlots() || []).filter((s) => s).sort((a, b) => a.i - b.i);
-                    for (const slot of slots) {
-                        const row = document.createElement("div");
-                        row.draggable = false;
-                        row.style.cssText = `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid #2e6b4f;background:#14302a;flex-shrink:0;`;
-                        const icon = document.createElement("span");
-                        icon.textContent = "🔌";
-                        icon.title = `Слот out_${slot.i}`;
-                        const body = document.createElement("div");
-                        body.style.cssText = "flex:1;min-width:0;";
-                        const t = document.createElement("div");
-                        t.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                        const m = document.createElement("div");
-                        m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                        if (slot.kind === "card") {
-                            const e = st.entries.find((x) => x.id === slot.id);
-                            t.textContent = (e && (e.title || e.head)) || "(запись удалена)";
-                            m.textContent = e ? (e.folder || "Без категории") : "записи нет — слот отдаст «(запись удалена)»";
-                        } else {
-                            t.textContent = slot.path || "?";
-                            const e = st.entries.find((x) => x.id === slot.active_id);
-                            m.textContent = "папка" + (e ? ` · вывод: ${e.title || e.head}` : " · вывод: не выбран");
+                    // Проверяем, есть ли активный папка-слот (пользователь кликнул его в дереве)
+                    const activeFolderSlot = slots.find((s) => s.kind === "folder" && s.path === st.outsActiveFolder);
+                    if (activeFolderSlot) {
+                        // Показываем карточки папки для выбора активного вывода
+                        const folderEntries = st.entries.filter((e) => e.folder === activeFolderSlot.path);
+                        for (const e of folderEntries) {
+                            const card = document.createElement("div");
+                            card.draggable = false;
+                            const isActive = activeFolderSlot.active_id === e.id;
+                            const bg = isActive ? "#1c3525" : "#1e1e1e";
+                            const border = isActive ? "#2e6b4f" : "#333";
+                            card.style.cssText = `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${border};background:${bg};flex-shrink:0;`;
+                            const icon = document.createElement("span");
+                            icon.textContent = isActive ? "🔌" : "📄";
+                            icon.title = isActive ? "Активный вывод" : "Нажмите, чтобы сделать активным";
+                            const body = document.createElement("div");
+                            body.style.cssText = "flex:1;min-width:0;";
+                            const t = document.createElement("div");
+                            t.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                            t.textContent = e.title || e.head || e.id;
+                            const m = document.createElement("div");
+                            m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                            m.textContent = isActive ? "⚡ Активный вывод по проводу" : "Клик — выбрать для вывода";
+                            body.appendChild(t); body.appendChild(m);
+                            card.appendChild(icon); card.appendChild(body);
+                            card.onclick = () => {
+                                // Устанавливаем active_id для этой папки
+                                const arr = st.readOutSlots();
+                                const fs = arr.find((s) => s && s.kind === "folder" && s.path === activeFolderSlot.path);
+                                if (fs && fs.active_id !== e.id) {
+                                    fs.active_id = e.id;
+                                    st.writeOutSlots(arr);
+                                    st.applyOutSockets();
+                                    st.outsActiveFolder = activeFolderSlot.path; // запомнить
+                                    renderTree(); render();
+                                }
+                            };
+                            st.list.appendChild(card);
+                            shown++;
                         }
-                        const del = document.createElement("button");
-                        del.textContent = "✖";
-                        del.title = "Отвязать выход (провод отключится, сокет скроется)";
-                        del.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;color:#e08a3c;flex-shrink:0;";
-                        del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
-                        body.appendChild(t); body.appendChild(m);
-                        row.appendChild(icon); row.appendChild(body); row.appendChild(del);
-                        st.list.appendChild(row);
-                        shown++;
+                        if (!shown) {
+                            const empty = document.createElement("div");
+                            empty.style.cssText = "color:#888;padding:8px;font-size:12px;";
+                            empty.textContent = "В папке нет записей";
+                            st.list.appendChild(empty);
+                        }
+                    } else {
+                        // Обычный список слотов
+                        for (const slot of slots) {
+                            const row = document.createElement("div");
+                            row.draggable = false;
+                            row.style.cssText = `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid #2e6b4f;background:#14302a;flex-shrink:0;`;
+                            const icon = document.createElement("span");
+                            icon.textContent = "🔌";
+                            icon.title = `Слот out_${slot.i}`;
+                            const body = document.createElement("div");
+                            body.style.cssText = "flex:1;min-width:0;";
+                            const t = document.createElement("div");
+                            t.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                            const m = document.createElement("div");
+                            m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                            if (slot.kind === "card") {
+                                const e = st.entries.find((x) => x.id === slot.id);
+                                t.textContent = (e && (e.title || e.head)) || "(запись удалена)";
+                                m.textContent = e ? (e.folder || "Без категории") : "записи нет — слот отдаст «(запись удалена)»";
+                            } else {
+                                t.textContent = slot.path || "?";
+                                const e = st.entries.find((x) => x.id === slot.active_id);
+                                m.textContent = "папка" + (e ? ` · вывод: ${e.title || e.head}` : " · вывод: не выбран");
+                            }
+                            const del = document.createElement("button");
+                            del.textContent = "✖";
+                            del.title = "Отвязать выход (провод отключится, сокет скроется)";
+                            del.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;color:#e08a3c;flex-shrink:0;";
+                            del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
+                            body.appendChild(t); body.appendChild(m);
+                            row.appendChild(icon); row.appendChild(body); row.appendChild(del);
+                            st.list.appendChild(row);
+                            shown++;
+                        }
                     }
                     st.renderHint(shown);
                     return;

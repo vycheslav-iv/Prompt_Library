@@ -641,6 +641,7 @@ def _output_linked(extra_pnginfo, unique_id):
     ставили в разрыв перед CLIP и архивировали каждый прогон. Теперь «Запись»
     молчит, но если провод уже есть — ведём себя как раньше (и говорим об этом).
     Читаем только workflow JSON из extra_pnginfo, живые ссылки LiteGraph не трогаем.
+    prompt_out теперь на индексе 1 (после category_out на индексе 0).
     """
     try:
         wf = (extra_pnginfo or {}).get("workflow") or {}
@@ -648,13 +649,13 @@ def _output_linked(extra_pnginfo, unique_id):
             if str(nd.get("id")) != str(unique_id):
                 continue
             outs = nd.get("outputs") or []
-            if not outs:
+            if len(outs) < 2:
                 return False
-            first = outs[0] or {}
-            links = first.get("links")
+            prompt_out = outs[1] or {}
+            links = prompt_out.get("links")
             if isinstance(links, (list, tuple)):
                 return len(links) > 0
-            return first.get("link") is not None
+            return prompt_out.get("link") is not None
     except Exception:
         pass
     return False
@@ -849,7 +850,7 @@ class PromptLibrary:
     # (создаются дропом в ней). Неиспользуемые слоты возвращают "".
     RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING",
                     "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("prompt_out", "category_out", "out_2", "out_3", "out_4", "out_5",
+    RETURN_NAMES = ("category_out", "prompt_out", "out_2", "out_3", "out_4", "out_5",
                     "out_6", "out_7", "out_8", "out_9", "out_10", "out_11")
     FUNCTION = "execute"
     CATEGORY = "My_custom_nodes/Prompts"
@@ -1147,7 +1148,7 @@ class PromptLibrary:
                         # этому флагу не выдаёт ложное «нода не исполнялась (кэш)».
                         "pickup_blocked": [pickup_node] if pickup_blocked else [],
                         "mode_notice": [notice]},
-                "result": (out_text, _sanitize_folder_path(folder), *slot_texts)}
+                "result": (_sanitize_folder_path(folder), out_text, *slot_texts)}
 
 
 # --- HTTP-endpoints для JS ---------------------------------------------------

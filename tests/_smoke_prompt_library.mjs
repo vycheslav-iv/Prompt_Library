@@ -241,7 +241,7 @@ function checkCommon(tag, st) {
   // одинаково в обоих режимах: обрезка + отказ от собственных 400px
   check(`${tag}: root обрезает содержимое`, st.root.style.overflow === "hidden");
   check(`${tag}: root без собственного min-width`, st.root.style.minWidth === "0");
-  check(`${tag}: версия JS видна`, st.version === "1.39-unique-export");
+  check(`${tag}: версия JS видна`, st.version === "1.44-multi-output");
   // v1.25: строка подхвата — первая в root (это настройка, как виджет режима),
   // фиксированной высоты; селектор собирает узлы-источники из живого графа.
   check(`${tag}: строка подхвата первая в root`, st.root.children[0] === st.pickupRow);
@@ -2157,6 +2157,9 @@ await run("slots: карточка → слот 2, сокет виден, имя
   proto.onNodeCreated.call(node);
   const st = node._pl;
   addSlotEnv(node);
+  // Режим "Выдача" — только в нём доступна категория "Выходы"
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  modeW.value = "📤 Выдача";
   st.entries = [mkSlotEntry("e1", "", "abcdefghijklmnopqrstuvwxyz"), mkSlotEntry("e2")];
   st.selFolder = "__all";
   st.renderTree(); st.render();
@@ -2175,14 +2178,15 @@ await run("slots: карточка → слот 2, сокет виден, имя
     st.readOutSlots().length === 2 && st.readOutSlots()[1].i === 3 && node.outputs[3].hide === false);
 });
 
-await run("slots: папка-слот наследует выделение, клик в папке меняет active_id", async () => {
+await run("slots: папка-слот — клик в дереве открывает карточки, выбор active_id", async () => {
   const node = makeNode();
   proto.onNodeCreated.call(node);
   const st = node._pl;
   addSlotEnv(node);
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  modeW.value = "📤 Выдача";
   st.entries = [mkSlotEntry("e10", "ПапкаA"), mkSlotEntry("e11", "ПапкаA")];
   st.folders = ["ПапкаA"];
-  st.selFolder = "ПапкаA";
   st.selWidget = node.widgets.find((w) => w.name === "selected");
   st.selWidget.value = "e11"; // активное выделение лежит в этой папке
   st.renderTree(); st.render();
@@ -2191,16 +2195,28 @@ await run("slots: папка-слот наследует выделение, к�
   check("папка-слот: kind folder, active_id наследует выделение",
     slot && slot.kind === "folder" && slot.path === "ПапкаA" && slot.active_id === "e11");
   check("сокет out_2 виден", node.outputs[2].hide === false);
+  // Клик по папке-слоту в дереве → открыть её карточки в категории "Выходы"
+  const treeRows = st.tree.children;
+  const folderSlotRow = treeRows.find((r) => r.children[0] && r.children[0].textContent === "🔌 ПапкаA");
+  check("папка-слот видна в дереве", !!folderSlotRow);
+  folderSlotRow.onclick({});
+  check("переключилось на __outs и открыта папка ПапкаA", st.selFolder === "__outs" && st.outsActiveFolder === "ПапкаA");
   st.render();
-  const cards = st.list.children.filter((c) => c.draggable);
-  const greens = cards.filter((c) => String(c.style.cssText).includes("background:#1c3525"));
-  check("активная карточка папки-слота подсвечена зелёным", greens.length === 1, `greens=${greens.length}`);
-  const nonGreen = cards.find((c) => !String(c.style.cssText).includes("background:#1c3525"));
-  check("есть вторая (неактивная) карточка", !!nonGreen);
-  await nonGreen.onclick({});
-  check("клик в папке-слоте перезаписал active_id",
-    st.selWidget.value !== "e11" && st.outSlotOfFolder("ПапкаA").active_id === st.selWidget.value,
-    String(st.outSlotOfFolder("ПапкаA").active_id));
+  // В категории "Выходы" показаны карточки папки
+  const cards = st.list.children.filter((c) => c.draggable === false && c.children[0] && (c.children[0].textContent === "🔌" || c.children[0].textContent === "📄"));
+  check("показаны карточки папки ПапкаA", cards.length === 2, String(cards.length));
+  // Карточка e11 активна (🔌, зелёная)
+  const activeCard = cards.find((c) => c.children[0].textContent === "🔌");
+  check("активная карточка e11 подсвечена (🔌 + зелёный фон)", !!activeCard && String(activeCard.style.cssText).includes("background:#1c3525"));
+  // Клик по неактивной карточке e10 → становится активной
+  const nonActive = cards.find((c) => c.children[0].textContent === "📄");
+  check("есть неактивная карточка", !!nonActive);
+  await nonActive.onclick({});
+  check("клик переключил active_id на e10", st.outSlotOfFolder("ПапкаA").active_id === "e10");
+  st.render();
+  const cards2 = st.list.children.filter((c) => c.draggable === false && c.children[0] && (c.children[0].textContent === "🔌" || c.children[0].textContent === "📄"));
+  const newActive = cards2.find((c) => c.children[0].textContent === "🔌");
+  check("теперь активна e10", !!newActive && String(newActive.style.cssText).includes("background:#1c3525"));
 });
 
 await run("slots: отвязка отключает провод и прячет сокет", () => {
@@ -2224,6 +2240,8 @@ await run("slots: рендер «🔌 Выходы» — строки слото
   proto.onNodeCreated.call(node);
   const st = node._pl;
   addSlotEnv(node);
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  modeW.value = "📤 Выдача";
   st.entries = [mkSlotEntry("e1")];
   st.selFolder = "__all";
   st.bindOutSlot({ kind: "card", id: "e1", name: "e1" });
@@ -2256,6 +2274,8 @@ await run("slots: 10 занято — лишняя привязка предуп
   st.selFolder = "__all";
   for (let i = 2; i <= 11; i++) st.bindOutSlot({ kind: "card", id: `e${i}`, name: `x${i}`, i });
   check("заняты все 10 слотов 2..11", st.readOutSlots().length === 10 && st.nextOutSlot() === null);
+  // Проверка режима: в режиме "Запись" bindOutSlot не должен вызываться через plDrop,
+  // но напрямую он работает — проверяем логику дублей/лимитов
   st.bindOutSlot({ kind: "card", id: "e21", name: "e21" });
   check("11-я привязка предупреждает и не добавляется",
     toasts.length === 1 && String(toasts[0][2]).includes("Все 10") && st.readOutSlots().length === 10);
@@ -2271,16 +2291,13 @@ await run("slots: onConfigure восстанавливает привязки (n
   const n1 = makeNode();
   proto.onNodeCreated.call(n1);
   addSlotEnv(n1);
-proto.onConfigure.call(n1, {
+  proto.onConfigure.call(n1, {
     widgets_values: ["📥 Запись", "e1", "Фото", "", sv],
     widgets_values_named: { mode: "📥 Запись", selected: "e1", save_folder: "Фото", slots_out: sv },
   });
   n1._pl.applyOutSockets();
-  console.log("DEBUG rafQueue after n1 onConfigure:", rafQueue.length);
   const s1 = n1._pl;
-  console.log("DEBUG n1 pre-check", JSON.stringify({ hide4: n1.outputs[4]?.hide, outputsLen: n1.outputs.length }));
   check("named: сокет out_4 показан после rAF", n1.outputs[4].hide === false, String(n1.outputs[4]?.hide));
-  console.log("DEBUG hydration n1", JSON.stringify({ hide4: n1.outputs[4]?.hide, slotsOut: s1.slotsOut, wv: n1.widgets.find((w) => w.name === "slots_out").value }));
 
   const n2 = makeNode();
   proto.onNodeCreated.call(n2);
@@ -2289,16 +2306,14 @@ proto.onConfigure.call(n1, {
   n2._pl.applyOutSockets();
   check("позиционный фолбэк widgets_values[4]",
     n2._pl.slotsOut.length === 1 && n2._pl.slotsOut[0].i === 4 && n2.outputs[4].hide === false, String(n2.outputs[4]?.hide));
-  console.log("DEBUG hydration n2", JSON.stringify({ hide4: n2.outputs[4]?.hide, slotsOut: n2._pl.slotsOut, wv: n2.widgets.find((w) => w.name === "slots_out").value }));
 
   const n3 = makeNode();
   proto.onNodeCreated.call(n3);
   addSlotEnv(n3);
   proto.onConfigure.call(n3, { widgets_values: ["📥 Запись", "", ""], widgets_values_named: {} });
   n3._pl.applyOutSockets();
-  check("старый граф без slots_out: слотов нет, сокеты скрыты",
+check("старый граф без slots_out: слотов нет, сокеты скрыты",
     n3._pl.slotsOut.length === 0 && n3.outputs[4].hide === true && n3.outputs[9].hide === true, String(n3.outputs[4]?.hide));
-  console.log("DEBUG hydration n3", JSON.stringify({ hide4: n3.outputs[4]?.hide, hide9: n3.outputs[9]?.hide, slotsOut: n3._pl.slotsOut, wv: n3.widgets.find((w) => w.name === "slots_out").value }));
 });
 
 await run("slots: строка «🔌 Выходы» в дереве открывает режим слотов", () => {
@@ -2306,6 +2321,8 @@ await run("slots: строка «🔌 Выходы» в дереве откры�
   proto.onNodeCreated.call(node);
   const st = node._pl;
   addSlotEnv(node);
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  modeW.value = "📤 Выдача";
   st.folders = ["Фото"];
   st.entries = [];
   st.renderTree(); st.render();

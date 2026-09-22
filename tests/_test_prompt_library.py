@@ -194,7 +194,7 @@ res = node.execute(mode=node.MODE_WRITE, selected="", save_folder="Фото",
                    extra_pnginfo=pnginfo, unique_id=7)
 # v1.24: «Запись» — только сохранение, выход пуст (сквозной проход остался
 # только для старых графов с проводом — §16)
-check("«Запись»: выход пуст + ui на месте", res["result"][0] == "" and "ui" in res,
+check("«Запись»: выход пуст + ui на месте", res["result"][1] == "" and "ui" in res,
       str(res["result"]))
 check("входной текст обрезан", res["ui"]["text"] == ["Портрет девушки"])
 check("PNG-патч записал widgets_values позиционно (5 значений, v1.44)",
@@ -232,7 +232,7 @@ entries, _ = mod._load_db()
 target = next(e for e in entries if e["prompt"] == "Портрет девушки")
 res5 = node.execute(mode=node.MODE_ISSUE, selected=target["id"], save_folder="",
                     source="перезапишется", extra_pnginfo=pnginfo, unique_id=7)
-check("выдача возвращает промпт записи", res5["result"][0] == "Портрет девушки")
+check("выдача возвращает промпт записи", res5["result"][1] == "Портрет девушки")
 entries, _ = mod._load_db()
 check("last_used проставлен",
       bool(next(e for e in entries if e["id"] == target["id"]).get("last_used")))
@@ -242,10 +242,10 @@ node.execute(mode=node.MODE_ISSUE, selected=target["id"], save_folder="",
 check("в режиме выдачи новые записи не создаются", len(mod._load_db()[0]) == before)
 res6 = node.execute(mode=node.MODE_ISSUE, selected="нет-такого", save_folder="",
                     source="прозрачный проход", extra_pnginfo=pnginfo, unique_id=7)
-check("выдача с несуществующим id -> пропускает вход", res6["result"][0] == "прозрачный проход")
+check("выдача с несуществующим id -> пропускает вход", res6["result"][1] == "прозрачный проход")
 res7 = node.execute(mode="", selected="", save_folder="", source="s",
                     extra_pnginfo=pnginfo, unique_id=7, use_selected=True)
-check("use_selected (legacy) -> режим выдачи", res7["result"][0] == "s"
+check("use_selected (legacy) -> режим выдачи", res7["result"][1] == "s"
       and len(mod._load_db()[0]) == before)
 
 # --- 5. HTTP-роуты ---------------------------------------------------------------
@@ -373,7 +373,7 @@ check("INPUT_TYPES: source опционален, image IMAGE,VIDEO (двухцв
       and mod.PromptLibrary.INPUT_TYPES()["optional"]["image"][0] == "IMAGE,VIDEO")
 check("execute фильтрует не-строковый source", (
     node.execute(mode=node.MODE_ISSUE, selected="", save_folder="", source={"a": 1},
-                 extra_pnginfo=pnginfo, unique_id=7)["result"][0] == ""))
+                 extra_pnginfo=pnginfo, unique_id=7)["result"][1] == ""))
 check("OUTPUT_NODE = True (персистентность PNG)", mod.PromptLibrary.OUTPUT_NODE is True)
 
 # --- 7. авто-метка media ------------------------------------------------------
@@ -714,36 +714,36 @@ res_w = node2.execute(mode=node2.MODE_WRITE, selected="", save_folder="Режи�
                       source="режим-запись-1", extra_pnginfo=None, unique_id=1)
 e_w = _entry("режим-запись-1")
 check("« Запись » сохраняет входящий", e_w is not None)
-check("« Запись » выход пустой", res_w["result"][0] == "", str(res_w["result"]))
+check("« Запись » выход пустой", res_w["result"][1] == "", str(res_w["result"]))
 check("« Запись » saved_id — запись для обложки",
       res_w["ui"]["saved_id"] == [e_w["id"]], str(res_w["ui"]["saved_id"]))
 check("« Запись » без провода — нет подсказки", res_w["ui"]["mode_notice"] == [""],
       str(res_w["ui"]["mode_notice"]))
 
 # Совместимость: старый граф держит провод prompt_out в разрыв перед CLIP
-png_linked = {"workflow": {"nodes": [{"id": 5, "outputs": [{"links": [11]}]}]}}
+png_linked = {"workflow": {"nodes": [{"id": 5, "outputs": [{}, {"links": [11]}]}]}}
 res_wl = node2.execute(mode=node2.MODE_WRITE, selected="", save_folder="Режимы",
                        source="режим-запись-2", extra_pnginfo=png_linked, unique_id=5)
 check("« Запись » + провод: текст идёт сквозь (совместимость)",
-      res_wl["result"][0] == "режим-запись-2", str(res_wl["result"]))
+      res_wl["result"][1] == "режим-запись-2", str(res_wl["result"]))
 check("« Запись » + провод: подсказка в UI",
       "сквозь" in (res_wl["ui"]["mode_notice"][0] or ""), str(res_wl["ui"]["mode_notice"]))
 
 png_empty = {"workflow": {"nodes": [{"id": 5, "outputs": [{"links": []}]}]}}
 res_we = node2.execute(mode=node2.MODE_WRITE, selected="", save_folder="Режимы",
                        source="режим-запись-3", extra_pnginfo=png_empty, unique_id=5)
-check("« Запись » с пустым links: выход пуст", res_we["result"][0] == "", str(res_we["result"]))
+check("« Запись » с пустым links: выход пуст", res_we["result"][1] == "", str(res_we["result"]))
 png_other = {"workflow": {"nodes": [{"id": 5, "outputs": [{"links": [11]}]}, {"id": 9, "outputs": [{}]}]}}
 res_wo = node2.execute(mode=node2.MODE_WRITE, selected="", save_folder="Режимы",
                        source="режим-запись-4", extra_pnginfo=png_other, unique_id=6)
 check("_output_linked ищет именно свою ноду",
-      res_wo["result"][0] == "" and mod._output_linked(png_other, 9) is False)
+      res_wo["result"][1] == "" and mod._output_linked(png_other, 9) is False)
 
 # Выдача: только выдаёт, ничего не сохраняет
 res_i = node2.execute(mode=node2.MODE_ISSUE, selected=e_w["id"], save_folder="Режимы",
                        source="режим-выдача-входящий", extra_pnginfo=None, unique_id=1)
 check("« Выдача » выдаёт текст выбранной записи",
-      res_i["result"][0] == "режим-запись-1", str(res_i["result"]))
+      res_i["result"][1] == "режим-запись-1", str(res_i["result"]))
 check("« Выдача » ничего не сохраняет", _entry("режим-выдача-входящий") is None)
 check("« Выдача » saved_id пуст (обложка не нужна)", res_i["ui"]["saved_id"] == [],
       str(res_i["ui"]["saved_id"]))
@@ -753,7 +753,7 @@ res_b = node2.execute(mode=node2.MODE_BOTH, selected=e_w["id"], save_folder="Р�
                       source="режим-оба-1", extra_pnginfo=None, unique_id=1)
 e_b = _entry("режим-оба-1")
 check("« Выдача + запись » выдаёт выбранную запись",
-      res_b["result"][0] == "режим-запись-1", str(res_b["result"]))
+      res_b["result"][1] == "режим-запись-1", str(res_b["result"]))
 check("« Выдача + запись » сохраняет входящий", e_b is not None)
 check("« Выдача + запись » saved_id на новую запись",
       res_b["ui"]["saved_id"] == [e_b["id"]], str(res_b["ui"]["saved_id"]))
@@ -761,7 +761,7 @@ check("« Выдача + запись » папка из виджета", e_b["f
 res_b2 = node2.execute(mode=node2.MODE_BOTH, selected="", save_folder="Режимы",
                        source="режим-оба-2", extra_pnginfo=None, unique_id=1)
 check("« Выдача + запись » без выбора выдаёт входящий",
-      res_b2["result"][0] == "режим-оба-2", str(res_b2["result"]))
+      res_b2["result"][1] == "режим-оба-2", str(res_b2["result"]))
 check("« Выдача + запись » без выбора тоже сохраняет", _entry("режим-оба-2") is not None)
 # Дубль по тексту: saved_id пуст ТОЛЬКО если у записи уже есть превью
 _bcast_before = len(_broadcasts)
@@ -779,7 +779,7 @@ check("повторный прогон без новой записи — без
 res_old = node2.execute(mode="", selected="", save_folder="Режимы", source="режим-старый",
                         extra_pnginfo=None, unique_id=1)
 check("старый вызов без mode = «Запись»",
-      res_old["result"][0] == "" and _entry("режим-старый") is not None)
+      res_old["result"][1] == "" and _entry("режим-старый") is not None)
 
 # --- 17. attach_preview: обложка из файла прогона ----------------------------
 print("\n17. Автоподхват обложки: /attach_preview + _resolve_output_file")
@@ -904,7 +904,7 @@ check("выдача + подхват: подсказка объясняет, к�
 check("выдача + подхват: токенов в отложке нет",
       not any(v.get("node") == "1622" for v in mod._PICKUP.values()))
 check("выдача: выход по-прежнему выдаёт входящий текст",
-      res_block["result"][0] == "входящий не сохраняем", str(res_block["result"]))
+      res_block["result"][1] == "входящий не сохраняем", str(res_block["result"]))
 
 before_pick = len(mod._load_db()[0])
 wf_pick = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
@@ -919,7 +919,7 @@ check("подхват: в выдающем режиме подхват не за
       res_pick["ui"].get("pickup_blocked") == [], str(res_pick["ui"].get("pickup_blocked")))
 check("подхват: входящий текст НЕ сохранён", len(mod._load_db()[0]) == before_pick)
 check("подхват: выход выдающего режима по-прежнему сквозной",
-      res_pick["result"][0] == "входящий не сохраняем", str(res_pick["result"]))
+      res_pick["result"][1] == "входящий не сохраняем", str(res_pick["result"]))
 check("подхват: saved_id пуст (записи ещё нет)", res_pick["ui"]["saved_id"] == [])
 check("подхват: снапшот воркфлоу отложен под токеном",
       isinstance(mod._PICKUP.get(tok, {}).get("workflow"), dict))
@@ -1560,8 +1560,8 @@ mod.MAX_ENTRIES = _orig_max26
 print("\n27. Мультивывод (§40): 12 выходов, slots_out")
 check("27: RETURN_TYPES — 12 STRING", mod.PromptLibrary.RETURN_TYPES == tuple(["STRING"] * 12),
       str(mod.PromptLibrary.RETURN_TYPES))
-check("27: RETURN_NAMES — prompt_out, category_out, out_2..out_11",
-      mod.PromptLibrary.RETURN_NAMES == ("prompt_out", "category_out", *[f"out_{i}" for i in range(2, 12)]),
+check("27: RETURN_NAMES — category_out, prompt_out, out_2..out_11",
+      mod.PromptLibrary.RETURN_NAMES == ("category_out", "prompt_out", *[f"out_{i}" for i in range(2, 12)]),
       str(mod.PromptLibrary.RETURN_NAMES))
 
 node27 = mod.PromptLibrary()
@@ -1643,7 +1643,7 @@ check("27: PNG-патч несёт slots_out 5-м значением",
 res27x2 = node27.execute(mode=node27.MODE_ISSUE, selected=_e27a["id"], save_folder="",
                          slots_out=slots27, extra_pnginfo=None, unique_id=1)
 check("27: prompt_out (выбор) и слот (та же запись) не конфликтуют",
-      res27x2["result"][0] == "текст-карточки-1" and res27x2["result"][2] == "текст-карточки-1",
+      res27x2["result"][1] == "текст-карточки-1" and res27x2["result"][2] == "текст-карточки-1",
       str(res27x2["result"][:3]))
 
 
