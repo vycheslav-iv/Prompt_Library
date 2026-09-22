@@ -2336,6 +2336,101 @@ await run("slots: папка-вывод — карточки с превью, к
   st.render();
 });
 
+// v1.45.3 (два скриншота пользователя):
+// (1) иконка 📷 в заголовке карточки «сползла вниз» — пролёты иконок обязаны
+//     стоять по строке (inline-block + line-height:1 + vertical-align:middle):
+//     глиф Segoe UI Emoji сидел ниже базовой линии текста.
+// (2) папка-слот в видах «Крупные»/«Средние»: занимать ЯЧЕЙКУ карточки —
+//     ширина = карточка (imgSize + 12), высота — как у карточки БЕЗ превью
+//     (общая растяжка линии сетки, свой align-self не ставим). Изначально
+//     папка была огромной (по ширине контента), потом слишком маленькой
+//     (align-self:flex-start) — отчёт пользователя, финал — ровно ячейка.
+await run("v1.45.3: иконка по строке, папка-слот по размеру карточки в сетке", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selFolder = "__outs"; // мы В «Выходах»: list должен рисовать строки слотов
+  st.entries.push(mkSlotEntry("e1", "", "Аналитика"), mkSlotEntry("e10", "ПапкаA"));
+  st.folders.push("ПапкаA");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "e1";
+  st.renderTree(); st.render();
+  st.plDrop({ kind: "folder", path: "ПапкаA" }, "__outs");
+  st.plDrop({ kind: "entry", ids: ["e1"], id: "e1" }, "__outs");
+  st.render();
+  // (1) пролёты иконок в заголовке карточки выровнены по строке
+  const card = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG");
+  check("карточка вывода в «Выходах» есть", !!card);
+  const titleBox = card ? card.children[1].children[0] : null;
+  const icons = titleBox ? titleBox.children.filter((s) => /[🔌📌📷🎬]/.test(String(s.textContent || ""))) : [];
+  check("иконки заголовка — inline-block с line-height:1 и vertical-align:middle",
+    icons.length > 0 && icons.every((s) => {
+      const cs = String(s.style.cssText);
+      return cs.includes("display:inline-block") && cs.includes("line-height:1")
+        && cs.includes("vertical-align:middle");
+    }),
+    icons.map((s) => String(s.style.cssText)).join(" || ") || "нет иконок");
+  // v1.45.4 (третий скриншот пользователя): после вертикал-align инки внутри
+  // эмодзи-бокса всё равно сидят на разной высоте — живой canvas-скан дал
+  // 📷 3.4px, 🎬 1.4, 📌 1.8, 🔌 1.6 ниже текстового центра. Каждому глифу —
+  // свой translateY, чтобы чернила встали на центр текста.
+  // v1.45.5 (чётвёртый скрин): в плотном ряду «Списка» камера с полным подъёмом
+  // по глазу чуть выше — там съезжаем на -2.4px (dense-правило в plCardTitle.
+  // «Выходы» тут, как и в жизни, рисуются рядами «Списка» → камера -2.4).
+  // v1.45.6 (пятый скрин): пролёт «🔌N » несёт ЦИФРУ вывода — цифра это обычный
+  // текст, поднятый пролёт всплывает ею. Правило plIcon: подъём только у чистых
+  // эмодзи, «🔌N » без подъёма (число стоит на строке как имя).
+  const needLift = { "📷": "-3.4px", "🎬": "-1.4px", "📌": "-1.8px", "🔌": "-1.6px" };
+  check("иконки заголовка — точный подъём чернил по глифу (v1.45.4)",
+    icons.length > 0 && icons.every((s) => {
+      const g = String(s.textContent || "").match(/(📷|🎬|📌|🔌)/);
+      if (!g) return false;
+      const want = needLift[g[1]];
+      return want ? s.style.transform === "translateY(" + want + ")" : !s.style.transform;
+    }),
+    icons.map((s) => `${s.textContent}->${s.style.transform}`).join(" || ") || "нет иконок");
+  // Список (dense): камера чуть ниже (-2.4px), пролёт «🔌N » без подъёма —
+  // с подъёмом цифра (обычный текст) «всплывала» (v1.45.6). В сетке (крупных/
+  // средних) блок «эмодзи+цифра» поднят целиком на -1.6px (v1.45.7).
+  const vsel = st.viewSel;
+  vsel.value = "list";
+  st.render();
+  const card2 = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG");
+  const title2 = card2 ? card2.children[1].children[0] : null;
+  const icons2 = title2 ? title2.children.filter((s) => /[🔌📌📷🎬]/.test(String(s.textContent || ""))) : [];
+  check("Список: dense-подъём камеры -2.4px, 🔌N без подъёма (v1.45.5/v1.45.6)",
+    icons2.length > 0 && icons2.every((s) => {
+      const g = String(s.textContent || "").match(/(📷|🎬|📌|🔌)/);
+      if (!g) return false;
+      if (g[1] === "🔌") return !s.style.transform;
+      return s.style.transform === "translateY(" + (g[1] === "📷" ? "-2.4px" : needLift[g[1]]) + ")";
+    }),
+    icons2.map((s) => `${s.textContent}->${s.style.transform}`).join(" || ") || "нет иконок");
+  vsel.value = "large";
+  st.render();
+  // (2) папка-слот в «Крупных» — в ячейке карточки: ширина175px, высота
+  // общая растяжка линии сетки (как у карточки без превью): отдельного
+  // align-self у папки НЕТ — иначе она сжимается в маленький брусок.
+  const rowLg = st.list.children.find((c) => ftext(c).includes("папка-вывод"));
+  check("в «Крупных» папка-слот в ячейке карточки (175px, тянется как карточка без превью)",
+    !!rowLg && String(rowLg.style.cssText).includes("width:175px")
+      && String(rowLg.style.cssText).includes("flex-direction:column")
+      && !String(rowLg.style.cssText).includes("align-self:flex-start"),
+    rowLg ? String(rowLg.style.cssText) : "нет строки папки");
+  st.viewSel.value = "medium"; st.render();
+  const rowMd = st.list.children.find((c) => ftext(c).includes("папка-вывод"));
+  check("в «Средних» ширина папка-слота = 121px",
+    !!rowMd && String(rowMd.style.cssText).includes("width:121px"),
+    rowMd ? String(rowMd.style.cssText) : "нет строки папки");
+  // (2b) «Список» не пострадал: строка по-прежнему без фикс. ширины
+  st.viewSel.value = "list"; st.render();
+  const rowRow = st.list.children.find((c) => ftext(c).includes("папка-вывод"));
+  check("в «Списке» строка папки без фикс. ширины (на всю строку)",
+    !!rowRow && !String(rowRow.style.cssText).includes("width:"),
+    rowRow ? String(rowRow.style.cssText) : "нет строки папки");
+  st.viewSel.value = "large"; st.render();
+});
+
 await run("slots: отвязка снимает свой сокет, чужие провода переезжают с привязкой", () => {
   const node = mkSlotNode();
   const st = node._pl;

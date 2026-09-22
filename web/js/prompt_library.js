@@ -32,17 +32,46 @@ const PL_ICON_FILTER = "filter:brightness(1.65) saturate(1.1);";
 function plIcon(text, extra) {
     const s = document.createElement("span");
     s.textContent = text;
-    s.style.cssText = PL_ICON_FILTER + "flex-shrink:0;" + (extra || "");
+    // Центрирование пролёта по строке: глиф Segoe UI Emoji сидит ниже базовой
+    // линии текста — на карточке 📷 «сползал вниз» (отчёт пользователя, v1.45.3).
+    // inline-block + line-height:1 + vertical-align:middle встают посредине
+    // строки сами, без подгонки пикселей под метрики шрифта.
+    s.style.cssText = PL_ICON_FILTER + "flex-shrink:0;display:inline-block;line-height:1;vertical-align:middle;" + (extra || "");
+    // Подъём чернил: внутри эмодзи-бокса глифы сидят на разной высоте. Замер на
+    // живой странице (canvas-скан инка, v1.45.4): 📷 ниже текста на
+    // 3.4px, 🎬 на 1.4, 📌 на 1.8, 🔌 на 1.6. Компенсируем точным translateY.
+    const _LIFT = { "📷": -3.4, "🎬": -1.4, "📌": -1.8, "🔌": -1.6 };
+    // Подъём — только для ЧИСТЫХ эмодзи-пролётов. «🔌3 » несёт ещё цифру вывода:
+    // цифра — обычный текст и обязана стоять на строке как имя; поднятый пролёт
+    // «всплывает» цифрой (скрин пользователя, v1.45.6). Пролёт с латиницей/
+    // цифрами не трогаем — эмодзи в нём остаётся на естественном месте.
+    const _gl = /[A-Za-z0-9]/.test(text || "") ? 0
+        : (_LIFT[Object.keys(_LIFT).find((t) => text && text.includes(t)) || ""] || 0);
+    if (_gl) s.style.transform = "translateY(" + _gl + "px)";
     return s;
 }
 // Название карточки: [🔌N] [📌] [📷/🎬] + имя. Текст иконок остаётся в DOM
 // (ftext в тестах и поиск по названию не ломаются), меняется только раскладка.
-function plCardTitle(e, outNum) {
+// dense=true — плотный ряд «Списка» (превью слева, строка по центру): там камера
+// с полным подъёмом -3.4px по глазу читается приподнятой (скрин пользователя
+// v1.45.5), центр глифа сходится с текстом, но ряд плотный — снижаем подъём.
+function plCardTitle(e, outNum, dense) {
     const box = document.createElement("div");
     box.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-    if (outNum) box.appendChild(plIcon(`🔌${outNum} `, "margin-right:4px;"));
+    if (outNum) {
+        const plug = plIcon(`🔌${outNum} `, "margin-right:4px;");
+        // Блок «эмодзи+цифра» в сетке (крупные/средние) по инк-замеру сидел на
+        // 1.6px ниже текста — поднимаем целиком (скрин v1.45.7). В «Списке»
+        // (dense) подъём губит цифру: она обычный текст и «всплывает» (v1.45.6).
+        if (!dense && !plug.style.transform) plug.style.transform = "translateY(-1.6px)";
+        box.appendChild(plug);
+    }
     if (e.pinned) box.appendChild(plIcon("📌 ", "margin-right:2px;"));
-    if (plBadge(e)) box.appendChild(plIcon(plBadge(e), "margin-right:4px;"));
+    if (plBadge(e)) {
+        const ib = plIcon(plBadge(e), "margin-right:4px;");
+        if (dense && String(ib.textContent).trim() === "📷") ib.style.transform = "translateY(-2.4px)";
+        box.appendChild(ib);
+    }
     const name = e.title || e.head || "(без названия)";
     // Имя — обычным span'ом, а не текстовым узлом: так его видит и DOM, и
     // тестовые заглушки (ftext/`firstTitle` читают текст по элементам).
@@ -108,7 +137,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.45.2-icons-select";
+const PL_JS_VERSION = "1.45.7-grid-plug-lift";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -2122,7 +2151,7 @@ const reload = async () => {
                 } else img.style.display = "none";
                 const body = document.createElement("div");
                 body.style.cssText = grid ? "min-width:0;text-align:center;" : "flex:1;min-width:0;";
-                const t = plCardTitle(e, slot ? slot.i : 0);
+                const t = plCardTitle(e, slot ? slot.i : 0, !grid);
                 const m = document.createElement("div");
                 m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
                 m.textContent = isActive ? "⚡ активный вывод папки-вывода" : (e.folder || "Без категории");
@@ -2169,17 +2198,28 @@ const reload = async () => {
             };
             // Строка вывода в списке «Выходов»: папка-вывод или карточка, которой
             // уже нет в базе. Тянется мышью — этим меняется НОМЕР провода.
-            st.slotOutRow = (slot, idx) => {
+            // В сетке («Крупные»/«Средние») строка живёт в ЯЧЕЙКЕ карточки:
+            // ширина = imgSize + 12 (иначе — по ширине контента, «огромная»),
+            // высота — общая растяжка линии сетки, КАК у карточки без превью
+            // (свой align-self не ставим: flex-start делал папку слишком
+            // маленькой — отчёт пользователя, v1.45.3).
+            st.slotOutRow = (slot, idx, opts) => {
+                const o = opts || {};
+                const grid = !!o.grid, imgSize = o.imgSize || 163;
                 const row = document.createElement("div");
                 row.draggable = false;
                 const isSel = slot.kind === "folder" && st.outsActiveFolder === slot.path;
-                row.style.cssText = `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${isSel ? "#7fe0a8" : "#2e6b4f"};background:#14302a;flex-shrink:0;`;
+                const sel = isSel ? "#7fe0a8" : "#2e6b4f";
+                row.style.cssText = grid
+                    ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${sel};background:#14302a;flex-shrink:0;`
+                    : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${sel};background:#14302a;flex-shrink:0;`;
                 const num = document.createElement("span");
                 num.textContent = `🔌${slot.i}`;
                 num.title = `Выход «промпт ${slot.i}» · строку можно перетаскивать мышью — от этого меняется номер выхода`;
-                num.style.cssText = PL_ICON_FILTER + "color:#7fe0a8;font-size:11px;flex-shrink:0;margin-right:3px;";
+                num.style.cssText = PL_ICON_FILTER + "color:#7fe0a8;font-size:11px;flex-shrink:0;"
+                    + (grid ? "align-self:center;" : "margin-right:3px;");
                 const body = document.createElement("div");
-                body.style.cssText = "flex:1;min-width:0;";
+                body.style.cssText = grid ? "min-width:0;overflow:hidden;text-align:center;" : "flex:1;min-width:0;";
                 const t = document.createElement("div");
                 t.style.cssText = "color:#fff;font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
                 const m = document.createElement("div");
@@ -2195,7 +2235,8 @@ const reload = async () => {
                 const del = document.createElement("button");
                 del.textContent = "✖";
                 del.title = "Отвязать выход (провод отключится, сокет исчезнет)";
-                del.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;color:#e08a3c;flex-shrink:0;";
+                del.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;color:#e08a3c;flex-shrink:0;"
+                    + (grid ? "align-self:center;" : "");
                 del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
                 body.appendChild(t); body.appendChild(m);
                 row.appendChild(num); row.appendChild(body); row.appendChild(del);
@@ -2285,7 +2326,7 @@ const reload = async () => {
                                 continue;
                             }
                         }
-                        st.list.appendChild(st.slotOutRow(slot, idx));
+                        st.list.appendChild(st.slotOutRow(slot, idx, { grid, imgSize }));
                         shown++;
                     }
                     if (!shown) {
@@ -2348,7 +2389,7 @@ const reload = async () => {
                     // Иконки (🔌N / 📌 / 📷-🎬) — отдельными пролётами с воздухом и
                     // осветляющим фильтром (см. plCardTitle): раньше они слипались в
                     // тёмную кучу перед названием.
-                    const title = plCardTitle(e, outMark ? outSlot.i : 0);
+                    const title = plCardTitle(e, outMark ? outSlot.i : 0, !grid);
                     body.appendChild(title);
                     if (!grid) {
                         const t = document.createElement("div");
