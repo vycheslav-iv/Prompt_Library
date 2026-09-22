@@ -1092,8 +1092,9 @@ app.registerExtension({
             st.outSlotBy = (pred) => st.readOutSlots().find((s) => s && pred(s)) || null;
             st.outSlotOfEntry = (id) => st.outSlotBy((s) => s.kind === "card" && s.id === id);
             st.outSlotOfFolder = (path) => st.outSlotBy((s) => s.kind === "folder" && s.path === path);
-            // Показ/скрытие сокета выхода + имя провода. Сокеты 2..11 скрыты,
-            // пока слот не занят; имя — название привязки (обрезка).
+// Показ/скрытие сокета выхода. Сокеты 2..11 скрыты, пока слот не занят.
+// Имя провода НЕ меняем (оставляем из RETURN_NAMES), вместо этого
+// используем tooltip/label для отображения подключения.
             st.applyOutSockets = () => {
                 try {
                     const slots = st.readOutSlots();
@@ -1106,10 +1107,13 @@ app.registerExtension({
                         const s = byIndex.get(i);
                         if (s) {
                             o.hide = false;
-                            if (s.name) o.name = s.name.slice(0, 16);
-                            else o.name = `out_${i}`;
+                            // Не меняем o.name (оставляем RETURN_NAMES).
+                            // Добавляем tooltip с именем подключения.
+                            const label = s.name || (s.kind === "folder" ? s.path : s.id);
+                            o.title = `→ ${label.slice(0, 32)}`;
                         } else {
                             o.hide = true;
+                            o.title = "";
                         }
                     }
                 } catch (e) { /* silent */ }
@@ -1147,12 +1151,12 @@ app.registerExtension({
 
 
 
-            const reload = async () => {
-                try {
-                    const r = await fetch("/prompt_library/list");
-                    if (!r.ok) return;
-                    const data = await r.json();
-                    st.entries = (data.entries || []).map(plMap);
+const reload = async () => {
+    try {
+        const r = await fetch("/prompt_library/list");
+        if (!r.ok) return;
+        const data = await r.json();
+        st.entries = (data.entries || []).map(plMap);
                     st.folders = data.folders || [];
                     st.pinnedFolders = new Set(data.pinned_folders || []);
                     // Чистим протухшие метки (запись удалена в другой вкладке,
@@ -1742,7 +1746,7 @@ app.registerExtension({
                 for (const slot of slots) {
                     const isFolder = slot.kind === "folder";
                     const label = isFolder
-                        ? `🔌 ${slot.path || "?"}`  // папка-слот
+                        ? `🔌📁 ${slot.path || "?"}`  // папка-слот: иконка провода + папка
                         : `🔌 ${slot.name || slot.id || "?"}`; // карточка-слот
                     const row = document.createElement("div");
                     row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:#ccc;background:transparent;padding-left:${4 + 14}px;`;
@@ -1878,7 +1882,7 @@ app.registerExtension({
                     const slots = (st.readOutSlots() || []).filter((s) => s).sort((a, b) => a.i - b.i);
                     // Проверяем, есть ли активный папка-слот (пользователь кликнул его в дереве)
                     const activeFolderSlot = slots.find((s) => s.kind === "folder" && s.path === st.outsActiveFolder);
-                    if (activeFolderSlot) {
+if (activeFolderSlot) {
                         // Показываем карточки папки для выбора активного вывода
                         const folderEntries = st.entries.filter((e) => e.folder === activeFolderSlot.path);
                         for (const e of folderEntries) {
@@ -1901,7 +1905,7 @@ app.registerExtension({
                             m.textContent = isActive ? "⚡ Активный вывод по проводу" : "Клик — выбрать для вывода";
                             body.appendChild(t); body.appendChild(m);
                             card.appendChild(icon); card.appendChild(body);
-                            card.onclick = () => {
+                            card.onclick = async () => {
                                 // Устанавливаем active_id для этой папки
                                 const arr = st.readOutSlots();
                                 const fs = arr.find((s) => s && s.kind === "folder" && s.path === activeFolderSlot.path);
@@ -1910,8 +1914,15 @@ app.registerExtension({
                                     st.writeOutSlots(arr);
                                     st.applyOutSockets();
                                     st.outsActiveFolder = activeFolderSlot.path; // запомнить
-                                    renderTree(); render();
+                                    // Перерисовываем только список "Выходы", остаёмся в __outs
+                                    st.render();
                                 }
+                                // Выбираем запись в проводнике и открываем детали (но остаёмся в __outs)
+                                if (selWidget) selWidget.value = e.id;
+                                st.anchorEntry = e.id;
+                                await st.fillDetail(e.id);
+                                // НЕ переключаем selFolder — остаёмся в категории "Выходы"
+                                renderTree(); render();
                             };
                             st.list.appendChild(card);
                             shown++;
@@ -1953,6 +1964,17 @@ app.registerExtension({
                             del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
                             body.appendChild(t); body.appendChild(m);
                             row.appendChild(icon); row.appendChild(body); row.appendChild(del);
+                            // Клик по строке слота → выбрать запись в проводнике + открыть детали
+                            row.onclick = () => {
+                                if (slot.kind === "card") {
+                                    if (selWidget) selWidget.value = slot.id;
+                                    st.anchorEntry = slot.id;
+                                    st.fillDetail(slot.id);
+                                    st.selFolder = "__all"; // переключаем на "Всё" чтобы показать запись
+                                    st.syncSaveFolder();
+                                    renderTree(); render();
+                                }
+                            };
                             st.list.appendChild(row);
                             shown++;
                         }

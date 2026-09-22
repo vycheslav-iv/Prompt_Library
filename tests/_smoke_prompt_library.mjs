@@ -2165,6 +2165,8 @@ const addSlotEnv = (node) => {
   for (let i = 2; i <= 11; i++) node.outputs.push({ name: `out_${i}`, type: "STRING", links: [] });
   node.disconnectOutput = (i) => { if (node.outputs[i]) node.outputs[i].links = []; };
   node.addWidget("text", "slots_out", "", null, { hidden: true, hideInPanel: true, serialize: true });
+  // Отключаем reload в тестах, чтобы не перезаписывать тестовые entries
+  node._pl.reload = async () => {};
 };
 
 await run("slots: карточка → слот 2, сокет виден, имя обрезано, дубль игнор", () => {
@@ -2184,7 +2186,9 @@ await run("slots: карточка → слот 2, сокет виден, имя
     slots.length === 1 && slots[0].i === 2 && slots[0].kind === "card" && slots[0].id === "e1");
   check("сокет out_2 виден", node.outputs[2].hide === false);
   check("неиспользуемые сокеты скрыты", node.outputs[3].hide === true && node.outputs[11].hide === true);
-  check("имя провода обрезано до 16", node.outputs[2].name === "abcdefghijklmnop", node.outputs[2].name);
+  check("имя провода НЕ меняется (оставляем RETURN_NAMES), tooltip с подключением",
+    node.outputs[2].name === "out_2" && node.outputs[2].title && node.outputs[2].title.includes("abcdefghijklmnop"),
+    `name=${node.outputs[2].name}, title=${node.outputs[2].title}`);
   check("привязка записана в виджет", (() => { const w = node.widgets.find((x) => x.name === "slots_out"); return typeof w.value === "string" && JSON.parse(w.value).length === 1; })());
   st.plDrop({ kind: "entry", ids: ["e1"], id: "e1" }, "__outs");
   check("дубль той же карточки игнорируется", st.readOutSlots().length === 1);
@@ -2212,8 +2216,8 @@ await run("slots: папка-слот — клик в дереве открыв�
   check("сокет out_2 виден", node.outputs[2].hide === false);
   // Клик по папке-слоту в дереве → открыть её карточки в категории "Выходы"
   const treeRows = st.tree.children;
-  const folderSlotRow = treeRows.find((r) => r.children[0] && r.children[0].textContent === "🔌 ПапкаA");
-  check("папка-слот видна в дереве", !!folderSlotRow);
+  const folderSlotRow = treeRows.find((r) => r.children[0] && r.children[0].textContent === "🔌📁 ПапкаA");
+  check("папка-слот видна в дереве (с иконкой 📁)", !!folderSlotRow);
   folderSlotRow.onclick({});
   check("переключилось на __outs и открыта папка ПапкаA", st.selFolder === "__outs" && st.outsActiveFolder === "ПапкаA");
   st.render();
@@ -2228,9 +2232,14 @@ await run("slots: папка-слот — клик в дереве открыв�
   check("есть неактивная карточка", !!nonActive);
   await nonActive.onclick({});
   check("клик переключил active_id на e10", st.outSlotOfFolder("ПапкаA").active_id === "e10");
+  console.log("DEBUG outsActiveFolder after click:", st.outsActiveFolder);
+  console.log("DEBUG slots:", st.readOutSlots());
   st.render();
+  console.log("DEBUG list children after render:", st.list.children.length, st.list.children.map(c => c.draggable === false && c.children[0] ? c.children[0].textContent : null));
   const cards2 = st.list.children.filter((c) => c.draggable === false && c.children[0] && (c.children[0].textContent === "🔌" || c.children[0].textContent === "📄"));
+  console.log("DEBUG cards2:", cards2.map(c => ({icon: c.children[0]?.textContent, bg: c.style.cssText})));
   const newActive = cards2.find((c) => c.children[0].textContent === "🔌");
+  console.log("DEBUG newActive:", newActive ? {icon: newActive.children[0]?.textContent, bg: newActive.style.cssText} : null);
   check("теперь активна e10", !!newActive && String(newActive.style.cssText).includes("background:#1c3525"));
 });
 
