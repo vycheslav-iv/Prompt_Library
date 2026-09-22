@@ -137,7 +137,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.45.7-grid-plug-lift";
+const PL_JS_VERSION = "1.53-delete-cancel-pair";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -454,15 +454,62 @@ app.registerExtension({
             const exportBtn = document.createElement("button");
             exportBtn.textContent = "📤 Экспорт";
             exportBtn.title = "Экспорт на диск: при Ctrl/Shift-выделении — отмеченные записи и категории, иначе — текущая категория (с подкатегориями)";
-            exportBtn.style.cssText = "background:#2c4a73;color:#dfe8ff;border:1px solid #4a6a9a;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;";
+            // flex-shrink:0 (v1.53) — кнопки не сжимаются: дефицит ширины
+            // берёт на себя подпись ряда (см. exportCaption).
+            exportBtn.style.cssText = "flex-shrink:0;background:#2c4a73;color:#dfe8ff;border:1px solid #4a6a9a;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;";
             exportBtn.onclick = () => {
                 const smartMarked = (st.markEntries.size + st.markFolders.size) > 0;
                 if (smartMarked) return st.exportMarked?.();
                 return st.exportFolder?.(st.selFolder || "__all");
             };
+            // Галерея (v1.46, §41): html-экспорт с обложками и параметрами
+            // генерации. Та же умная логика выбора, что у .md-кнопки Экспорт.
+            // v1.48: подпись и значок — как у карточки («🌐 В HTML»), кнопка
+            // покинула шапку проводника вместе с «Экспорт» (см. exportRow).
+            const galleryBtn = document.createElement("button");
+            galleryBtn.textContent = "🌐 Экспорт в HTML";
+            galleryBtn.title = "Экспорт галереи в HTML (prompt_library.html + обложки): при Ctrl/Shift-выделении — отмеченные записи и категории, иначе — текущая категория (с подкатегориями)";
+            galleryBtn.style.cssText = "flex-shrink:0;background:#3a2c6a;color:#ece7ff;border:1px solid #6a5aa0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;";
+            galleryBtn.onclick = () => {
+                const smartMarked = (st.markEntries.size + st.markFolders.size) > 0;
+                if (smartMarked) return st.exportMarkedHtml?.();
+                return st.exportFolderHtml?.(st.selFolder || "__all");
+            };
+            // Импорт (v1.48): место зарезервировано под будущий функционал —
+            // кнопка видна, но выключена (галерея/библиотека обратно ещё не
+            // читается). Рядом с экспортом — туда же придёт рабочая версия.
+            const importBtn = document.createElement("button");
+            importBtn.textContent = "📥 Импорт";
+            importBtn.title = "Импорт библиотеки/галереи — функционал ещё не сделан (кнопка-место)";
+            importBtn.disabled = true;
+            importBtn.style.cssText = "flex-shrink:0;background:#222;color:#777;border:1px dashed #444;border-radius:4px;padding:2px 8px;cursor:not-allowed;font-size:11px;";
+            // Ряд экспорта/импорта (v1.48): отдельная строка под окном ручного
+            // ввода и над тулбаром — в шапке проводника остаётся только
+            // «+ Категория» (там кнопки не помещались и спорили с деревом).
+            // v1.52: здесь же справа живёт массовое удаление (`margin-left:auto`),
+            // потому что это ДЕЙСТВИЕ — ему место среди действий, а счётчик
+            // помеченного и «снять метки» — это СОСТОЯНИЕ и остаётся в нижней
+            // строке (hintRow). Высоту строки кнопка не меняет (ряд 22px +
+            // flex-shrink:0), поэтому BASE_H не тронут.
+            const exportRow = document.createElement("div");
+            exportRow.className = "pl-export-row";
+            exportRow.style.cssText = "display:flex;align-items:center;gap:6px;height:22px;flex-shrink:0;overflow:hidden;";
+            const exportCaption = document.createElement("span");
+            exportCaption.textContent = "Библиотека:";
+            // v1.53: ЕДИНСТВЕННЫЙ сжимаемый элемент ряда. Когда места мало
+            // (минимум ноды + активные метки с «🗑» и «✖»), дефицит забирает
+            // подпись (многоточие), а кнопки остаются целыми: у них
+            // `flex-shrink:0`. Наоборот (как было) сжимались именно кнопки,
+            // и подписи «📤 Экспорт» / «🌐 Экспорт в HTML» резались.
+            exportCaption.style.cssText = "flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#888;font-size:11px;";
+            exportRow.appendChild(exportCaption);
+            exportRow.appendChild(exportBtn);
+            exportRow.appendChild(galleryBtn);
+            exportRow.appendChild(importBtn);
+            // Массовое удаление добавляется ниже, в блоке bulk-элементов
+            // (v1.52): `exportRow` создан раньше, а кнопка — позже.
             const treeHeadBtns = document.createElement("div");
             treeHeadBtns.style.cssText = "display:flex;align-items:center;gap:4px;";
-            treeHeadBtns.appendChild(exportBtn);
             treeHeadBtns.appendChild(newFolderBtn);
             treeHead.appendChild(treeTitle);
             treeHead.appendChild(treeHeadBtns);
@@ -479,7 +526,8 @@ app.registerExtension({
             const list = document.createElement("div");
             list.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;flex-shrink:0;";
             // Заголовок списка: пустой распорник — верх первой карточки совпадает
-            // с верхом дерева (treeHead). Bulk-бар живёт в нижней строке (hintRow).
+            // с верхом дерева (treeHead). Счётчик меток живёт в нижней строке
+            // (hintRow), а массовое удаление — в ряду действий (exportRow, v1.52).
             const listHead = document.createElement("div");
             listHead.style.cssText = "height:22px;flex-shrink:0;display:flex;align-items:center;";
             // Подключение к доп. выходу без перетаскивания: выделите карточку (или
@@ -536,12 +584,12 @@ app.registerExtension({
             main.appendChild(treeBox);
 
             // Нижняя строка: ОДНА фиксированная (22px) — в ней либо подсказка,
-            // либо bulk-бар с метками. Кнопки массовых действий — внизу, как
-            // раньше, но рост строки исключён (height + flex-shrink:0), поэтому
-            // появление кнопок не отжимает место у списка/дерева. Счётчик
-            // сжимается с многоточием (flex:1 1 auto + min-width:0), кнопки
-            // (flex-shrink:0) остаются видны всегда — в listHead их выдавливало
-            // за правый край строки и резало overflow:hidden.
+            // либо СЧЁТЧИК помеченного. Оба массовых действия («🗑» и «✖») уехали
+            // в ряд действий — exportRow (v1.52–v1.53), здесь остался чистый
+            // СТАТУС. Рост строки исключён (height + flex-shrink:0), поэтому
+            // появление элементов не отжимает место у списка/дерева. Счётчик
+            // сжимается с многоточием (flex:1 1 auto + min-width:0) — в listHead
+            // его выдавливало за правый край строки и резало overflow:hidden.
             const hintRow = document.createElement("div");
             hintRow.style.cssText = "display:flex;align-items:center;gap:4px;height:22px;flex-shrink:0;overflow:hidden;white-space:nowrap;";
             const hint = document.createElement("div");
@@ -555,13 +603,23 @@ app.registerExtension({
             const bulkDel = document.createElement("button");
             bulkDel.textContent = "🗑 Удалить";
             bulkDel.title = "Удалить помеченные записи и категории";
-            bulkDel.style.cssText = "display:none;background:#5a2b2b;color:#ffd9d9;border:1px solid #a33;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
+            // margin-left:auto — уезжает к правому краю ряда действий (v1.52).
+            // В невидимом состоянии (display:none) на раскладку не влияет.
+            bulkDel.style.cssText = "display:none;margin-left:auto;background:#5a2b2b;color:#ffd9d9;border:1px solid #a33;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
             bulkDel.onclick = () => st.bulkDelete?.();
+            // v1.52: удаление живёт в РЯДУ ДЕЙСТВИЙ справа (а не в нижней строке);
+            // `margin-left:auto` прижимает его к правому краю, отбивая от экспортов.
+            // v1.53: «✖ снять метки» — рядом с ним: это одна группа массовых
+            // ДЕЙСТВИЙ над метками, висеть врозь (удаление сверху, отмена внизу)
+            // неудобно. `margin-left:auto` стоит на ПЕРВОМ элементе группы,
+            // поэтому пара едет вправо целиком и с обычным зазором внутри.
+            exportRow.appendChild(bulkDel);
             const bulkClear = document.createElement("button");
             bulkClear.textContent = "✖";
             bulkClear.title = "Снять все метки (Esc)";
             bulkClear.style.cssText = "display:none;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:0 8px;cursor:pointer;font-size:11px;flex-shrink:0;";
             bulkClear.onclick = () => st.clearMarks?.();
+            exportRow.appendChild(bulkClear);   // v1.53: вплотную к «🗑 Удалить»
             // Прогресс-бар массового экспорта: показывается именно во время
             // экспорта (иначе display:none), живёт в фиксированной строке 22px,
             // поэтому высоту ноды не двигает. Растягивается на всю свободную
@@ -575,8 +633,6 @@ app.registerExtension({
             hintRow.appendChild(hint);
             hintRow.appendChild(progTrack);
             hintRow.appendChild(bulkCount);
-            hintRow.appendChild(bulkDel);
-            hintRow.appendChild(bulkClear);
 
             // --- Подхват текста из другого узла (v1.25) ----------------------
             // Граф «карточка → LLM → финальный текст» одной нодой требует провода
@@ -757,6 +813,11 @@ app.registerExtension({
             const bExport = mkBtn("💾 Экспортировать", "Сохранить запись на диск: с обложкой — в подпапку <название>/, без обложки — файл .md в выбранную папку");
             bExport.onclick = () => { try { st.exportEntry?.(); } catch (e) { /* silent */ } };
             dBtns.appendChild(bExport);
+            // Галерея одной записи (v1.46, §41): html-карточка + обложка
+            // в выбранную папку (файл prompt_library.html + <title>.png рядом).
+            const bGallery = mkBtn("🌐 В HTML", "Сохранить запись как HTML-галерею: prompt_library.html + обложку <title>.png в выбранную папку");
+            bGallery.onclick = () => { try { st.exportEntryHtml?.(); } catch (e) { /* silent */ } };
+            dBtns.appendChild(bGallery);
 
             detail.appendChild(dTitle);
             detail.appendChild(dFolder);
@@ -775,6 +836,7 @@ app.registerExtension({
             root.appendChild(pickupRow);
             root.appendChild(inputToggle);
             root.appendChild(inputArea);
+            root.appendChild(exportRow);
             root.appendChild(toolbar);
             root.appendChild(main);
             root.appendChild(detail);
@@ -784,8 +846,11 @@ app.registerExtension({
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
                 pickupRow, pickupSel, inputTitle,
                 bulkCount, bulkDel, bulkClear,
-                progTrack, progFill, exportBtn, newFolderBtn,
-                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel, bExport,
+                progTrack, progFill, exportRow, exportCaption, exportBtn, galleryBtn, importBtn, newFolderBtn,
+                // Наружу — чтобы живая проба мерила ряд действий именно на том
+                // минимуме, которым живёт нода (без дублирования числа в тесте).
+                minW: MIN_W,
+                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel, bExport, bGallery,
                 entries: [], folders: [], full: new Map(),
                 pinnedFolders: new Set(),
                 // id записей, найденных серверным полнотекстовым поиском (v1.27);
@@ -3179,6 +3244,358 @@ const reload = async () => {
                 }
             };
 
+            // --- HTML-галерея (v1.46, §41) ------------------------------------------
+            // Экспорт «Галереей»: html-карточки с превью и параметрами генерации.
+            // .md-экспорт (§38/§39) НЕ заменяется — галерея идёт файлом
+            // prompt_library.html рядом с превью-картинками (относительные ссылки,
+            // как в Fooocus, а не base64 — тяжёлые вставки раздули бы файл).
+            // Параметры генерации — из /meta (чанк workflow в превью, §41).
+            st.escHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({
+                "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+            }[c]));
+            // Относительный путь превью для src/href: сегменты кодируются — в
+            // папках/именах бывает кириллица и пробелы.
+            st._htmlHref = (relPath) => String(relPath || "").split("/").filter(Boolean)
+                .map(encodeURIComponent).join("/");
+            // Параметры генерации → строки таблицы (порядок и отбор — намеренный).
+            st.metaRows = (meta = {}) => {
+                const rows = [];
+                // Селектор переключателя не разрешён (v1.49): нода не врёт, что
+                // знает активную ветку — модели/LoRA перечислены все.
+                if (meta.ambiguous) {
+                    rows.push(["Переключатель", "активную ветку определить не удалось — показаны все ветки"]);
+                }
+                if (meta.model) rows.push(["Модель", meta.model]);
+                if (meta.vae) rows.push(["VAE", meta.vae]);
+                if (Array.isArray(meta.loras) && meta.loras.length) {
+                    rows.push(["LoRA", meta.loras.map((l) => `${l.name}${l.strength != null ? ` (${l.strength})` : ""}`).join(", ")]);
+                }
+                const semp = [meta.sampler, meta.scheduler].filter(Boolean).join(" / ");
+                if (semp) rows.push(["Семплер", semp]);
+                if (meta.steps != null) rows.push(["Шаги", meta.steps]);
+                if (meta.cfg != null) rows.push(["CFG", meta.cfg]);
+                if (meta.denoise != null) rows.push(["Denoise", meta.denoise]);
+                if (meta.seed != null) rows.push(["Сид", meta.seed]);
+                if (meta.width && meta.height) rows.push(["Разрешение", `${meta.width}×${meta.height}`]);
+                return rows;
+            };
+            st._kvTableHtml = (rows) => rows && rows.length
+                ? `<table class="pl-kv">${rows.map(([k, v]) => `<tr><td class="k">${st.escHtml(k)}</td><td>${st.escHtml(v)}</td></tr>`).join("")}</table>`
+                : "";
+            // Одна html-карточка: превью (относительная ссылка, при ошибке загрузки —
+            // блок скрывается onerror'ом) + инфо + промпт в <details> + параметры +
+            // кнопка копирования (промпт в data-атрибуте encodeURIComponent — кавычки
+            // и переводы строк не ломают разметку).
+            st.entryToHtml = (full, meta, relImg) => {
+                const title = st.escHtml(full.title || "Без названия");
+                const href = st._htmlHref(relImg);
+                const img = relImg
+                    ? `<div class="pl-thumb"><a href="${href}" target="_blank" rel="noopener"><img src="${href}" alt="${title}" loading="lazy" onerror="this.parentNode.style.display='none';"></a></div>`
+                    : `<div class="pl-thumb"><div class="pl-noimg">без обложки</div></div>`;
+                const info = st._kvTableHtml([
+                    ["№", full.id || "—"],
+                    ["Категория", full.folder || "Без категории"],
+                    ["Создана", full.created_at || ""],
+                    ["Тип", full.media === "video" ? "🎬 видео" : full.media === "image" ? "📷 фото" : ""],
+                    ["В избранном", full.favorite ? "да" : "нет"],
+                ]);
+                const gen = st.metaRows(meta || {});
+                const genHtml = gen.length ? st._kvTableHtml(gen)
+                    : '<div class="pl-nodata">Параметры генерации не сохранились (запись без чанка workflow).</div>';
+                const promptEnc = encodeURIComponent(full.prompt || "");
+                return ['<div class="pl-card">', img, '<div class="pl-info">',
+                    `<div class="pl-title">${title}</div>`, info,
+                    `<details class="pl-prompt"><summary>Промпт</summary><pre>${st.escHtml(full.prompt || "")}</pre></details>`,
+                    `<details class="pl-gen"><summary>Параметры генерации</summary>${genHtml}</details>`,
+                    `<button class="pl-copy" data-prompt="${promptEnc}">📋 Копировать промпт</button>`,
+                    "</div></div>",
+                ].join("\n");
+            };
+            // Оболочка html-документа галереи: тёмная тема (как Fooocus), шапка со
+            // счётом и датой, карточки, встроенный скрипт копирования. `date` строй.
+            st.galleryShell = (count, cardsHtml, scopeLabel) => {
+                const date = new Date().toISOString().slice(0, 16).replace("T", " ");
+                const scope = st.escHtml(scopeLabel || "Вся библиотека");
+                return `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Галерея промптов — ${scope}</title>
+<style>
+:root{color-scheme:dark}
+body{background:#121212;color:#e6e6e6;font-family:system-ui,"Segoe UI",Roboto,sans-serif;margin:0}
+header{position:sticky;top:0;background:#181818;border-bottom:1px solid #2e2e2e;padding:14px 20px;z-index:5}
+h1{margin:0;font-size:22px}
+.pl-sub{color:#999;font-size:13px;margin-top:4px}
+main{display:flex;flex-direction:column;gap:14px;padding:16px 20px;max-width:1100px;margin:0 auto}
+.pl-card{display:flex;gap:14px;background:#1c1c1c;border:1px solid #2e2e2e;border-radius:8px;padding:12px}
+.pl-thumb{flex:0 0 220px}
+.pl-thumb img{width:220px;height:220px;object-fit:cover;border-radius:6px;background:#222;display:block}
+.pl-noimg{width:220px;height:220px;display:flex;align-items:center;justify-content:center;color:#666;font-size:13px;background:#1a1a1a;border:1px dashed #3a3a3a;border-radius:6px}
+.pl-info{flex:1;min-width:0}
+.pl-title{font-size:16px;font-weight:bold;margin-bottom:6px}
+.pl-kv{width:100%;border-collapse:collapse;font-size:13px}
+.pl-kv td{padding:2px 6px 2px 0;vertical-align:top}
+.pl-kv td.k{color:#999;white-space:nowrap;width:1%}
+details{margin-top:8px}
+summary{cursor:pointer;color:#9ad;font-size:13px}
+pre{background:#141414;border:1px solid #2e2e2e;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-word;font-size:13px}
+.pl-copy{background:#2c4a73;color:#dfe8ff;border:1px solid #4a6a9a;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;margin-top:8px}
+.pl-nodata{color:#888;font-size:13px;padding:6px 0}
+.pl-sec{font-size:15px;margin:18px 0 8px;padding-bottom:4px;border-bottom:1px solid #2e2e2e;display:flex;align-items:center;gap:8px}
+.pl-count{color:#888;font-size:12px;font-weight:normal}
+</style>
+</head>
+<body>
+<header><h1>Галерея промптов</h1><div class="pl-sub">${scope} · ${count} записей · ${date}</div></header>
+<main>
+${cardsHtml}
+</main>
+<script>
+function plCopy(b){var t=decodeURIComponent(b.getAttribute("data-prompt")||"");function done(){var o=b.textContent;b.textContent="Скопировано";setTimeout(function(){b.textContent=o;},1200);}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,function(){plFallback(t,done);});}else{plFallback(t,done);}}
+function plFallback(t,done){var ta=document.createElement("textarea");ta.value=t;ta.style.cssText="position:fixed;opacity:0;";document.body.appendChild(ta);ta.select();try{document.execCommand("copy");done();}catch(e){}document.body.removeChild(ta);}
+document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListener("click",function(){plCopy(b);});});
+</script>
+</body>
+</html>`;
+            };
+            // Разделы по категориям: одна категория в выборке → без заголовков,
+            // несколько → каждый раздел начинается со своего пути («📁 Фото/Портреты»)
+            // и счётчика; вложенные — с отступом по глубине. Правило: пользователь
+            // видит, где кончается одна категория и начинается другая (v1.47).
+            st.gallerySections = (items) => {
+                const groups = new Map();
+                for (const it of items) {
+                    const key = it.folder || "";
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key).push(it.html);
+                }
+                if (groups.size <= 1) return items.map((it) => it.html).join("\n");
+                const keys = [...groups.keys()].sort((a, b) => {
+                    if (!a) return -1;
+                    if (!b) return 1;
+                    return a.localeCompare(b, "ru");
+                });
+                const depthOf = (k) => (k ? k.split("/").length : 1);
+                const minDepth = Math.min(...keys.map(depthOf));
+                return keys.map((k) => {
+                    const label = k ? `📁 ${k}` : "📁 Без категории";
+                    const indent = Math.max(0, depthOf(k) - minDepth) * 14;
+                    const head = `<h2 class="pl-sec" style="margin-left:${indent}px">${st.escHtml(label)}`
+                        + `<span class="pl-count">${groups.get(k).length}</span></h2>`;
+                    return head + "\n" + groups.get(k).join("\n");
+                }).join("\n");
+            };
+            // Скачивание превью и запись рядом с html: имя как у .md (уникальное в
+            // папке), расширение по blob.type. null — обложки нет/не скачалась.
+            st.writeGalleryPreview = async (writeDir, full, used) => {
+                if (!full.preview) return null;
+                try {
+                    const r = await fetch(`/prompt_library/preview?id=${encodeURIComponent(full.id)}`);
+                    if (!r.ok) return null;
+                    const blob = await r.blob();
+                    const ext = String(blob.type || "").includes("jpeg") ? ".jpg" : ".png";
+                    const name = `${st.uniqueName(st.sanitizeFileName(full.title), used)}${ext}`;
+                    const imgFh = await writeDir.getFileHandle(name, { create: true });
+                    const imgWtr = await imgFh.createWritable();
+                    await imgWtr.write(blob);
+                    await imgWtr.close();
+                    return name;
+                } catch (e) { return null; }
+            };
+            // Параллельное получение метаданных (/meta — как loadFulls пулом).
+            st.loadMetas = async (ids, limit = 6) => {
+                const out = new Map();
+                let i = 0;
+                const worker = async () => {
+                    while (i < ids.length) {
+                        const id = ids[i++];
+                        try {
+                            const r = await fetch(`/prompt_library/meta?id=${encodeURIComponent(id)}`);
+                            if (r.ok) { const d = await r.json(); out.set(id, (d && d.meta) || {}); }
+                        } catch (e) { /* нет мета — карточка без параметров */ }
+                    }
+                };
+                await Promise.all(Array.from({ length: Math.min(limit, ids.length) }, () => worker()));
+                return out;
+            };
+            // Общий цикл галереи: зеркало категорий (relSub — путь внутри корня
+            // экспорта), превью рядом с html, карточки в prompt_library.html в корне.
+            st._galleryWrite = async (root, sel, scopeLabel, relSub, hintPrefix) => {
+                const fulls = await st.loadFulls(sel.map((e) => e.id));
+                const metas = await st.loadMetas(sel.map((e) => e.id));
+                const usedByDir = new Map();
+                const namesFor = (key) => {
+                    if (!usedByDir.has(key)) usedByDir.set(key, new Set());
+                    return usedByDir.get(key);
+                };
+                const cards = [];
+                let done = 0, failed = 0;
+                const badNames = [];
+                try {
+                    for (const e of sel) {
+                        const full = fulls.get(e.id);
+                        if (!full) {
+                            failed++;
+                            if (badNames.length < 5) badNames.push(e.title || e.id);
+                            st.setExportProgress(true, done + failed, sel.length);
+                            continue;
+                        }
+                        try {
+                            const sub = relSub(e);
+                            const writeDir = sub ? await st.ensureDirPath(root, sub) : root;
+                            const imgName = await st.writeGalleryPreview(writeDir, full, namesFor(sub || "."));
+                            const relImg = imgName ? (sub ? sub + "/" + imgName : imgName) : "";
+                            cards.push({ folder: full.folder || e.folder || "",
+                                html: st.entryToHtml(full, metas.get(e.id) || {}, relImg) });
+                            done++;
+                        } catch (err) {
+                            failed++;
+                            if (badNames.length < 5) badNames.push(e.title || e.id);
+                        }
+                        st.hintSticky = `${hintPrefix}: ${done + failed} из ${sel.length}…`;
+                        st.setExportProgress(true, done + failed, sel.length);
+                        st.renderHint?.();
+                    }
+                    const html = st.galleryShell(sel.length, st.gallerySections(cards), scopeLabel);
+                    const fh = await root.getFileHandle("prompt_library.html", { create: true });
+                    const wtr = await fh.createWritable();
+                    await wtr.write(html);
+                    await wtr.close();
+                } finally {
+                    st.setExportProgress(false);
+                    st.hintSticky = failed
+                        ? `Готово: ${done} из ${sel.length}${badNames.length ? `, не удались: ${badNames.join(", ")}` : ""}.`
+                        : `${hintPrefix}: ${done} записей → prompt_library.html.`;
+                    st.renderHint?.();
+                }
+                return { done, failed };
+            };
+            // Галерея по текущей категории / «Всё» / «Избранное» / «Без категории» —
+            // та же умная выборка и зеркало, что у .md-экспорта (§39).
+            st.exportFolderHtml = async (pathKey) => {
+                st.setExportProgress(true, 0, 1);
+                if (typeof window.showDirectoryPicker !== "function") {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Ваш браузер не поддерживает выбор папки — нужен Chrome или Edge.";
+                    st.renderHint?.();
+                    return;
+                }
+                let sel;
+                if (pathKey === "__all") sel = st.entries;
+                else if (pathKey === "__fav") sel = st.entries.filter((e) => e.favorite);
+                else if (pathKey === "__root") sel = st.entries.filter((e) => !e.folder);
+                else sel = st.entries.filter((e) => e.folder === pathKey || e.folder.startsWith(pathKey + "/"));
+                if (!sel.length) {
+                    st.setExportProgress(false);
+                    st.hintSticky = `В «${pathKey === "__all" ? "Всё" : pathKey === "__fav" ? "Избранное" : pathKey === "__root" ? "Без категории" : pathKey}» ничего для галереи.`;
+                    st.renderHint?.();
+                    return;
+                }
+                let dirHandle = null;
+                try {
+                    dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+                } catch (e) {
+                    st.setExportProgress(false);
+                    if (e && e.name === "AbortError") return;
+                    st.hintSticky = "Не удалось открыть выбор папки.";
+                    st.renderHint?.();
+                    return;
+                }
+                let root = dirHandle;
+                if (!pathKey.startsWith("__")) {
+                    const leaf = pathKey.split("/").pop();
+                    try {
+                        root = await dirHandle.getDirectoryHandle(st.sanitizeFileName(leaf), { create: true });
+                    } catch (e) { /* не создалась — пишем в выбранную директорию */ }
+                }
+                const scopeLabel = pathKey === "__all" ? "Вся библиотека"
+                    : pathKey === "__fav" ? "Избранное"
+                        : pathKey === "__root" ? "Без категории" : pathKey;
+                await st._galleryWrite(root, sel, scopeLabel,
+                    (e) => (pathKey.startsWith("__") ? e.folder : st.relFolder(e.folder, pathKey)),
+                    `Галерея «${scopeLabel}»`);
+            };
+            // Галерея отмеченного (bulk-бар): записи + содержимое помеченных папок.
+            st.exportMarkedHtml = async () => {
+                const ids = [...st.markEntries];
+                const paths = [...st.markFolders];
+                if (!ids.length && !paths.length) return;
+                st.setExportProgress(true, 0, 1);
+                if (typeof window.showDirectoryPicker !== "function") {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Ваш браузер не поддерживает выбор папки — нужен Chrome или Edge.";
+                    st.renderHint?.();
+                    return;
+                }
+                const pick = (e) => ids.includes(e.id)
+                    || paths.some((p) => e.folder === p || e.folder.startsWith(p + "/"));
+                const sel = st.entries.filter(pick);
+                if (!sel.length) {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Помеченного нечего экспортировать.";
+                    st.renderHint?.();
+                    return;
+                }
+                let dirHandle = null;
+                try {
+                    dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+                } catch (e) {
+                    st.setExportProgress(false);
+                    if (e && e.name === "AbortError") return;
+                    st.hintSticky = "Не удалось открыть выбор папки.";
+                    st.renderHint?.();
+                    return;
+                }
+                await st._galleryWrite(dirHandle, sel, "Отмеченное", (e) => e.folder, "Галерея отмеченного");
+            };
+            // Галерея одной записи: html + превью в выбранную папку (без зеркала —
+            // карточка одна, относительная ссылка плоская).
+            st.exportEntryHtml = async () => {
+                const full = st.full.get(st.detailId) || {};
+                if (!full || !full.id) {
+                    st.hintSticky = "Сначала выберите запись — галерею строить не из чего.";
+                    st.renderHint?.();
+                    return;
+                }
+                if (typeof window.showDirectoryPicker !== "function") {
+                    st.hintSticky = "Ваш браузер не поддерживает выбор папки — нужен Chrome или Edge.";
+                    st.renderHint?.();
+                    return;
+                }
+                let dirHandle = null;
+                try {
+                    dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+                } catch (e) {
+                    if (e && e.name === "AbortError") return;
+                    st.hintSticky = "Не удалось открыть выбор папки.";
+                    st.renderHint?.();
+                    return;
+                }
+                try {
+                    const used = new Set();
+                    const imgName = await st.writeGalleryPreview(dirHandle, full, used);
+                    let meta = {};
+                    try {
+                        const r = await fetch(`/prompt_library/meta?id=${encodeURIComponent(full.id)}`);
+                        if (r.ok) { const d = await r.json(); meta = (d && d.meta) || {}; }
+                    } catch (e) { /* без параметров */ }
+                    const html = st.galleryShell(1, st.entryToHtml(full, meta, imgName || ""), full.title || full.id);
+                    const fh = await dirHandle.getFileHandle("prompt_library.html", { create: true });
+                    const wtr = await fh.createWritable();
+                    await wtr.write(html);
+                    await wtr.close();
+                    st.hintSticky = imgName
+                        ? `Галерея сохранена: ${imgName} + prompt_library.html (выбранная папка).`
+                        : "Галерея сохранена: prompt_library.html (без обложки).";
+                } catch (err) {
+                    console.warn("[PromptLibrary] html gallery error:", err);
+                    st.hintSticky = "Ошибка сохранения галереи — файл мог быть занят или папка защищена.";
+                }
+                st.renderHint?.();
+            };
+
             // --- Сторож цикла: IMAGE подключён + выход куда-то идёт = кольцо в графе ---
             const checkCycle = () => {
                 try {
@@ -3336,7 +3753,8 @@ const reload = async () => {
             const DETAIL_H = 280;
             // +28 к BASE_H (v1.25): строка подхвата (22px + gap 6px) в root.
             // Пол — ТОЛЬКО здесь (computeLayoutSize), на панелях CSS-пола нет (§28).
-            const BASE_H = 624;
+            // +28 к BASE_H (v1.48): ряд экспорта/импорта (22px + gap 6px).
+            const BASE_H = 652;
             const INPUT_H = 202; // поле названия + textarea + кнопка сохранения + ряд прикрепления превью
             // Единый минимум для обоих режимов (single source of truth).
             st.minH = () => {

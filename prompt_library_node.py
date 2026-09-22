@@ -15,10 +15,12 @@
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 MAX_ENTRIES = 500
@@ -577,6 +579,877 @@ def _preview_path(entry_id):
         if f.exists():
             return f
     return None
+
+
+def _preview_workflow_chunk(path):
+    """Workflow-чанк (tEXt 'workflow') из PNG-превью записи.
+
+    Строка JSON → dict; чанка нет / битый / не-PNG → None. Так делается
+    чанк при сохранении (`_workflow_pnginfo`) — превью самодостаточно:
+    HTML-галерея читает параметры генерации прямо из него, без базы.
+    """
+    if path is None or path.suffix.lower() != ".png":
+        return None
+    try:
+        from PIL import Image
+        raw = Image.open(path).info.get("workflow")
+        if isinstance(raw, str):
+            wf = json.loads(raw)
+            return wf if isinstance(wf, dict) else None
+    except Exception:
+        pass
+    return None
+
+
+# Имя файла модели по расширению (имена папок/подпапок внутри models/ не важны).
+_MODEL_FILE_RE = re.compile(r"\.(safetensors|ckpt|gguf|sft|pt|pth|bin)$", re.I)
+
+# Папки ComfyUI → роль файла. Файлы прочих папок (vae_approx, upscale_models,
+# text_encoders, controlnet…) моделью генерации / LoRA не считаются вовсе.
+# Порядок важен: LoRA перекрывает одноимённый файл (setdefault ниже).
+_ROLE_FOLDERS = (
+    (("loras",), "lora"),
+    (("checkpoints", "unet", "diffusion_models", "diffusion_models_gguf"), "model"),
+    (("vae",), "vae"),
+)
+_ROLE_INDEX = {"stamp": 0.0, "map": {}}
+
+# Узлы-заметки и превью: в их тексте бывают имена файлов, но это НЕ использование
+# модели (MarkdownNote с таблицей LoRA давал ложные «использованные лоры»).
+_TEXT_NODE_RE = re.compile(r"(?i)(note|markdown)|^(preview|show|display)")
+
+
+def _file_role_index():
+    """{имя файла (lower): "lora"/"model"/"vae"} по спискам ComfyUI.
+
+    Роль файла берётся из РАСКЛАДКИ моделей на диске, а не из имени узла: в
+    живых графах модель лежит в `models/diffusion_models`, LoRA — в
+    `models/loras`, а узлы называются `SeedVR2LoadDiTModel` или UUID-сабграфом
+    — по типам узлов модель не найти (SPEC §41.2, v1.47).
+    Кэш на процесс, пересборка раз в 60 с (folder_paths сам кэширует списки)."""
+    now = time.time()
+    if _ROLE_INDEX["map"] and (now - _ROLE_INDEX["stamp"]) < 60:
+        return _ROLE_INDEX["map"]
+    out = {}
+    try:
+        import folder_paths  # type: ignore
+
+        for folders, role in _ROLE_FOLDERS:
+            for folder in folders:
+                try:
+                    names = folder_paths.get_filename_list(folder)
+                except Exception:
+                    continue
+                for rel in names or []:
+                    key = Path(str(rel).replace("\\", "/")).name.lower()
+                    if key:
+                        out.setdefault(key, role)
+    except Exception:
+        out = {}
+    _ROLE_INDEX["map"] = out
+    _ROLE_INDEX["stamp"] = now
+    return out
+
+
+def _file_role(name, hint="", role_of=None):
+    """Роль файла → ("lora"/"model"/"vae"/"other"/None, по_диску).
+
+    Сначала раскладка на диске (точная роль), иначе подсказки — имя узла,
+    заголовок и имя файла: `lora` → LoRA, слова про VAE/апскейл/CLIP/аппроксиматор
+    → `other` (не модель генерации), checkpoint/unet/dit/diffusion/model →
+    модель-фолбэк (второй сорт: показываем только если точной модели нет).
+    Неизвестное имя файла без подсказок → None (не выдумываем)."""
+    text = str(name or "")
+    base = Path(text.replace("\\", "/")).name.lower()
+    try:
+        role = (role_of or _file_role_index().get)(base)
+    except Exception:
+        role = None
+    if role:
+        return role, True
+    hint_l = f"{hint} {text}".lower()
+    if "lora" in hint_l:
+        return "lora", False
+    if any(w in hint_l for w in ("vae", "upscal", "clip", "controlnet",
+                                "text_encoder", "audio", "embedding", "preview")):
+        return "other", False
+    if any(w in hint_l for w in ("checkpoint", "unet", "dit", "diffusion", "model")):
+        return "model", False
+    return None, False
+
+
+def _iter_nodes(workflow):
+    """Узлы UI-графа, включая внутренности сабграфов.
+
+    Сабграф ComfyUI хранит в `definitions.subgraphs`: его ноды не видны в
+    `workflow["nodes"]`, а узел-экземпляр имеет тип-UUID. Обходим и то, и то
+    (вложенность ограничена, чтобы битый/огромный граф не подвесил разбор)."""
+    if not isinstance(workflow, dict):
+        return []
+    out = []
+    pending = [workflow.get("definitions")]
+    for nd in workflow.get("nodes") or []:
+        if isinstance(nd, dict):
+            out.append(nd)
+            pending.append(nd.get("definitions"))
+    seen = 0
+    while pending and seen < 5000:
+        defs = pending.pop(0)
+        seen += 1
+        if not isinstance(defs, dict):
+            continue
+        for sg in defs.get("subgraphs") or []:
+            if not isinstance(sg, dict):
+                continue
+            out.append(sg)
+            pending.append(sg.get("definitions"))
+            for nd in sg.get("nodes") or []:
+                if isinstance(nd, dict):
+                    out.append(nd)
+                    pending.append(nd.get("definitions"))
+    return out
+
+
+def _iter_widget_files(value, label, out, depth=0):
+    """Разобрать widgets_values узла → список кандидатов.
+
+    Кандидат — `{"name", "on", "strength"}`: имя файла модели (строка с
+    модельным расширением) или LoRA-слот (`Power Lora Loader (rgthree)` хранит
+    `{"on": bool, "lora": "…", "strength": N}`). Строки многострочного
+    текста пропускаем: имя модели в промпте — не загрузка модели."""
+    if depth > 6:
+        return
+    if isinstance(value, str):
+        s = value.strip()
+        if len(s) <= 300 and "\n" not in s and _MODEL_FILE_RE.search(s):
+            out.append({"name": s, "on": None, "strength": None})
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _iter_widget_files(v, label, out, depth + 1)
+    elif isinstance(value, dict):
+        lora = value.get("lora") if isinstance(value.get("lora"), str) else value.get("lora_name")
+        if isinstance(lora, str) and lora.strip():
+            out.append({"name": lora.strip(),
+                        "on": value.get("on", True),
+                        "strength": value.get("strength")})
+        for k, v in value.items():
+            if k in ("lora", "lora_name"):
+                continue
+            _iter_widget_files(v, f"{label}.{k}", out, depth + 1)
+
+
+def _uniq_names(names):
+    """Уникальные имена с сохранением порядка (регистр не учитываем)."""
+    seen, out = set(), []
+    for n in names:
+        key = str(n).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(n)
+    return out
+
+
+def _graph_of(container):
+    """(узлы, провода, сабграфы) одного уровня UI-графа.
+
+    Провода в UI-схеме ComfyUI — `[link_id, from_id, from_slot, to_id, to_slot,
+    type]`; попадаются и объектные записи — читаем обе формы."""
+    nodes = {}
+    for n in container.get("nodes") or []:
+        if isinstance(n, dict) and n.get("id") is not None:
+            nodes[n["id"]] = n
+    links = {}
+    for l in container.get("links") or []:
+        if isinstance(l, (list, tuple)) and len(l) >= 5:
+            links[l[0]] = {"from": l[1], "from_slot": l[2], "to": l[3], "to_slot": l[4]}
+        elif isinstance(l, dict) and l.get("id") is not None:
+            links[l["id"]] = {"from": l.get("origin_id"), "from_slot": l.get("origin_slot"),
+                              "to": l.get("target_id"), "to_slot": l.get("target_slot")}
+    defs = {}
+    for sg in (container.get("definitions") or {}).get("subgraphs") or []:
+        if isinstance(sg, dict) and sg.get("id"):
+            defs[sg["id"]] = sg
+    return nodes, links, defs
+
+
+_SAMPLER_RE = re.compile(r"(?i)sampler")
+_NOT_SAMPLER_RE = re.compile(r"(?i)(upscal|seedvr|preview|note|detail|facerestore)")
+
+# Типы входов, по которым идёт обход «что дошло до сэмплера». Без этого фильтра
+# обход заходил в посторонние ветки (апскейлеры, библиотеки LoRA, заглушки) и
+# тянул оттуда файлы как «использованные» (v1.49).
+_CHAIN_TYPES = {"MODEL", "CLIP", "CONDITIONING", "LATENT", "VAE", "GUIDER",
+                "SAMPLER", "SIGMAS", "NOISE", "CLIP_VISION"}
+
+
+def _chain_inputs(node):
+    """Входы узла, несущие модель/условие/латент (остальные — чужие ветки)."""
+    out = []
+    for i in node.get("inputs") or []:
+        if isinstance(i, dict) and (i.get("type") in _CHAIN_TYPES or not i.get("type")):
+            out.append(i.get("link"))
+    return out
+
+
+def _promoted_overrides(subgraph, instance):
+    """Значения promoted-входов: {(id_внутреннего_узла, слот | "@имя_входа"): значение}.
+
+    У экземпляра сабграфа виджеты идут в порядке `subgraph["inputs"]`
+    (slot k ↔ `widgets_values[k]`), а каждый promoted-вход связан ВНУТРЕННИМ
+    проводом с конкретным (узел, слот) определения. Значит значение, которое
+    реально увидит внутренний загрузчик, — из виджета ЭКЗЕМПЛЯРА, а не из его
+    собственного (живой пример: в слоте «unet_name_1» лежит
+    `jibMixKrea2_v40Habanero_3135300.safetensors`, а в самом UNETLoader
+    прописан `krea2_turbo_int8_convrot` — v1.49).
+
+    Ключ по ИМЕНИ входа (v1.50) — потому что «номер входа» не равен позиции в
+    `widgets_values`: у `LoraLoaderModelOnly` виджетов два (`lora_name`, 
+    `strength_model`), а вход с виджетом один — и позиционная подстановка
+    перекрывала имя LoRA её же силой (турбо-LoRA из сабграфа пропадала вовсе)."""
+    out = {}
+    if not isinstance(instance, dict):
+        return out
+    wv = instance.get("widgets_values")
+    named = instance.get("widgets_values_named")
+    inodes, ilinks, _ = _graph_of(subgraph)
+    for slot, spec in enumerate(subgraph.get("inputs") or []):
+        if not isinstance(spec, dict):
+            continue
+        value, found = None, False
+        if isinstance(named, dict) and spec.get("name") in named:
+            value, found = named[spec["name"]], True
+        elif isinstance(wv, list) and slot < len(wv):
+            value, found = wv[slot], True
+        if not found:
+            continue
+        for lid in spec.get("linkIds") or []:
+            link = ilinks.get(lid)
+            if not isinstance(link, dict) or link.get("to") is None:
+                continue
+            tgt = inodes.get(link.get("to"))
+            name = None
+            if isinstance(tgt, dict):
+                for i, inp in enumerate(tgt.get("inputs") or []):
+                    if i == link.get("to_slot") and isinstance(inp, dict):
+                        name = inp.get("name")
+            if name:
+                out[(link["to"], "@" + str(name))] = value
+            out[(link["to"], link.get("to_slot"))] = value
+    return out
+
+
+def _effective_widgets(node, overrides):
+    """`widgets_values` узла с учётом перекрытий сабграфа (v1.49 → v1.50).
+
+    Виджет-вход, подключённый к promoted-входу, получает значение ЭКЗЕМПЛЯРА —
+    именно оно уходит в генерацию, поэтому и показываем его.
+
+    Основной путь — по ИМЕНИ виджета (`widgets_values_named`, есть во всех
+    актуальных графах): тогда позиция виджета внутри `widgets_values` роли не
+    играет. Позиционная подстановка по номеру входа осталась фолбэком для
+    старых снимков без named-формы."""
+    wv = node.get("widgets_values")
+    if not overrides:
+        return wv
+    named = node.get("widgets_values_named")
+    if isinstance(named, dict) and named:
+        out = dict(named)
+        changed = False
+        for inp in node.get("inputs") or []:
+            if not isinstance(inp, dict) or not inp.get("widget"):
+                continue
+            widget = inp.get("widget") if isinstance(inp.get("widget"), dict) else {}
+            wname = widget.get("name") or inp.get("name")
+            key = (node.get("id"), "@" + str(wname))
+            if wname and key in overrides:
+                out[wname] = overrides[key]
+                changed = True
+        if changed:
+            # Порядок named-формы = порядок виджетов узла.
+            return list(out.values())
+        return wv
+    if not isinstance(wv, list):
+        return wv
+    out = list(wv)
+    widx = 0
+    for slot, inp in enumerate(node.get("inputs") or []):
+        if not isinstance(inp, dict) or not inp.get("widget"):
+            continue
+        key = (node.get("id"), slot)
+        if key in overrides and widx < len(out):
+            out[widx] = overrides[key]
+        widx += 1
+    return out
+
+
+# Узлы-константы: их значение и есть «положение переключателя».
+_VALUE_NODE_RE = re.compile(r"(?i)^(primitive|int|integer|float|number|bool|boolean|string|text|value)")
+_SELECTOR_NAMES = ("switch", "condition", "select", "state", "boolean", "enable", "use")
+_SWITCH_RE = re.compile(r"(?i)switch")
+_LORA_NODE_RE = re.compile(r"(?i)lora")
+
+
+def _shown_value(value):
+    """Значение виджета → bool/int/str, пустая строка и мусор → None."""
+    if isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value.strip() or None
+    return None
+
+
+def _const_value(nodes, overrides, nid):
+    """Значение узла-константы по id (с учётом перекрытий сабграфа) или None."""
+    nd = nodes.get(nid)
+    if not isinstance(nd, dict):
+        return None
+    if not _VALUE_NODE_RE.search(str(nd.get("type") or "")):
+        return None
+    wv = _effective_widgets(nd, overrides)
+    if isinstance(wv, list) and wv:
+        return _shown_value(wv[0])
+    return None
+
+
+def _truthy(value):
+    """BOOLEAN/INT-селектор → bool; None — не понять."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "on", "yes", "да", "вкл"):
+            return True
+        if v in ("false", "0", "off", "no", "нет", "выкл", ""):
+            return False
+    return None
+
+
+def _input_slot(node, target):
+    """Индекс входа узла (нужен для перекрытий сабграфа)."""
+    for i, inp in enumerate(node.get("inputs") or []):
+        if inp is target:
+            return i
+    return None
+
+
+def _selector_value(node, sel, nodes, links, overrides):
+    """Значение селектора переключателя: провод → узел-константа, иначе виджет."""
+    if not isinstance(sel, dict):
+        return None
+    lid = sel.get("link")
+    if lid is not None:
+        link = links.get(lid)
+        if not isinstance(link, dict):
+            return None
+        return _const_value(nodes, overrides, link.get("from"))
+    key = (node.get("id"), _input_slot(node, sel))
+    if key in overrides:
+        return _shown_value(overrides[key])
+    widget_inputs = [i for i in (node.get("inputs") or [])
+                     if isinstance(i, dict) and i.get("widget")]
+    if sel in widget_inputs:
+        wv = node.get("widgets_values")
+        widx = widget_inputs.index(sel)
+        if isinstance(wv, list) and widx < len(wv):
+            return _shown_value(wv[widx])
+    return None
+
+
+def _active_links(node, nodes, links, overrides):
+    """Активные входы узла → (список link_id, разрешено_ли).
+
+    Переключатели (v1.49): `ComfySwitchNode` (`on_true`/`on_false` + селектор) и
+    `DeggSwitch` (`select` = номер входа `input_N`). Не разрешился селектор —
+    возвращаются ОБА входа и False: в галерее появится честная пометка
+    «показаны все ветки». Не переключатель → (None, True): идём по всем входам,
+    как раньше."""
+    if not _SWITCH_RE.search(str(node.get("type") or "")):
+        return None, True
+    inputs = [i for i in (node.get("inputs") or []) if isinstance(i, dict)]
+    by_name = {str(i.get("name") or "").lower(): i for i in inputs}
+    on_true, on_false = by_name.get("on_true"), by_name.get("on_false")
+    if on_true is not None and on_false is not None:
+        sel = next((by_name[nm] for nm in _SELECTOR_NAMES if nm in by_name), None)
+        if sel is None:
+            sel = next((i for i in inputs if i is not on_true and i is not on_false), None)
+        truth = _truthy(_selector_value(node, sel, nodes, links, overrides)) if sel else None
+        if truth is None:
+            return [on_true.get("link"), on_false.get("link")], False
+        return [(on_true if truth else on_false).get("link")], True
+    if "select" in by_name and any(n.startswith("input_") for n in by_name):
+        num = _selector_value(node, by_name["select"], nodes, links, overrides)
+        chosen = None
+        try:
+            chosen = by_name.get(f"input_{int(num)}")
+        except Exception:
+            chosen = None
+        if chosen is None:
+            return [i.get("link") for i in inputs
+                    if str(i.get("name") or "").startswith("input_")], False
+        return [chosen.get("link")], True
+    return [i.get("link") for i in inputs], False
+
+
+def _is_switch_node(node):
+    """Узел — переключатель (по типу/имени входа `select`+`input_N`)."""
+    kind = str(node.get("type") or "")
+    if _SWITCH_RE.search(kind):
+        return True
+    names = {str(i.get("name") or "").lower()
+             for i in node.get("inputs") or [] if isinstance(i, dict)}
+    return "select" in names and any(n.startswith("input_") for n in names)
+
+
+def _lora_strength(node, wv_eff):
+    """Сила LoRA: из named-виджета, иначе из позиции `widgets_values[1]`."""
+    named = node.get("widgets_values_named")
+    if isinstance(named, dict):
+        for k in ("strength_model", "strength"):
+            v = named.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return v
+    if isinstance(wv_eff, list) and len(wv_eff) > 1:
+        v = wv_eff[1]
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return v
+    return None
+
+
+_DEGG_RES_ASPECT_RE = re.compile(r"^(\d+)\s*:\s*(\d+)")
+
+
+def _degg_res_set_output(node, out_slot):
+    """width/height узла `DeggResSet` (нода проекта Degg_Res_Set).
+
+    Зеркалит `DeggResSet.process` (deg_res_set.py): preset 1 — расчёт из
+    аспекта/мегапикселей/кратности, 2–4 — ручные w/h. Именно зеркало, а не
+    импорт: нода лежит отдельным плагином ComfyUI и по имени не импортируется.
+    ⚠ При правке формулы в deg_res_set.py поправить и здесь — иначе галерея
+    начнёт показывать устаревшее разрешение. Значения берём из
+    `widgets_values_named` (по ИМЕНИ), а не из позиций: фронтенд вставляет в
+    список группы-плейсхолдеры `__grp` и позиции съезжают."""
+    named = node.get("widgets_values_named")
+    if not isinstance(named, dict):
+        return None
+    if out_slot not in (0, 1):
+        return None
+    try:
+        select = int(named.get("select") or 1)
+    except (TypeError, ValueError):
+        return None
+    try:
+        if select == 1:
+            m = _DEGG_RES_ASPECT_RE.match(str(named.get("aspect_ratio") or ""))
+            megapixels = float(named.get("megapixels") or 0)
+            multiple = int(named.get("multiple") or 8)
+            if not m or megapixels <= 0 or multiple <= 0:
+                return None
+            ratio_w, ratio_h = int(m.group(1)), int(m.group(2))
+            total = megapixels * 1048576
+            w = int(math.sqrt(total * ratio_w / ratio_h))
+            h = int(math.sqrt(total * ratio_h / ratio_w))
+            return (max((w // multiple) * multiple, multiple),
+                    max((h // multiple) * multiple, multiple))[out_slot]
+        keys = {2: ("w1", "h1"), 3: ("w2", "h2")}.get(select, ("w3", "h3"))
+        value = named.get(keys[out_slot])
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _output_value(nodes, links, defs, overrides, nid, out_slot, depth=0):
+    """Значение, выходящее с выхода `out_slot` узла `nid`, или None.
+
+    Нужно для ПАРАМЕТРОВ генерации, заданных ПРОВОДОМ (v1.50): шаги/разрешение
+    часто приходят не из виджета сэмплера, а из константы, переключателя или
+    сабграфа — в самом `KSampler` при этом остаётся старый виджет. Живой пример:
+    сабграф «KREA 2 RAW MODEL» отдаёт `output_2` («Шаги») — 12 для RAW и 10 для
+    TURBO, а виджет сэмплера хранит 8; если верить виджету, в галерее врёт число
+    шагов. Понимает: сабграф (внутренний провод в выходной слот), узел-константу
+    (`Primitive*`/`Int`/…) и переключатель (`ComfySwitchNode`/`DeggSwitch`).
+    Непонятное (чужой узел/неразрешённый свитч) → None: параметр останется из
+    виджета, выдумывать не будем."""
+    if nid is None or depth > 30:
+        return None
+    nd = nodes.get(nid)
+    if not isinstance(nd, dict):
+        return None
+    kind = str(nd.get("type") or "")
+    sg = defs.get(kind)
+    if sg is not None:
+        inodes, ilinks, idefs = _graph_of(sg)
+        ioverrides = _promoted_overrides(sg, nd)
+        out_node = sg.get("outputNode")
+        out_id = out_node.get("id") if isinstance(out_node, dict) else None
+        if out_id is None:
+            return None
+        for _lid, link in ilinks.items():
+            if (isinstance(link, dict) and link.get("to") == out_id
+                    and link.get("to_slot") == out_slot):
+                return _output_value(inodes, ilinks, idefs, ioverrides,
+                                     link.get("from"), link.get("from_slot"), depth + 1)
+        return None
+    if kind == "DeggResSet":
+        return _degg_res_set_output(nd, out_slot)
+    if _is_switch_node(nd):
+        active, resolved = _active_links(nd, nodes, links, overrides)
+        if active and resolved and len(active) == 1 and active[0] is not None:
+            link = links.get(active[0])
+            if isinstance(link, dict):
+                return _output_value(nodes, links, defs, overrides,
+                                     link.get("from"), link.get("from_slot"), depth + 1)
+        return None
+    # Значение из виджета берём только у узлов-КОНСТАНТ (`Primitive*`/`Int`/…):
+    # у вычислителя (`ComfyMathExpression`), счётчика кадров и прочих «умных»
+    # узлов первый виджет ("a * b + 1") значением не является — не выдумываем.
+    if not _VALUE_NODE_RE.search(kind):
+        return None
+    wv = _effective_widgets(nd, overrides)
+    if isinstance(wv, list) and wv:
+        return _shown_value(wv[0])
+    return None
+
+
+# Имена входов сэмплера/латента → какие поля метаданных они задают (v1.50).
+_PARAM_INPUTS = {
+    "sampler": ("sampler", "sampler_name"),
+    "scheduler": ("scheduler", "scheduler_name"),
+    "steps": ("steps",),
+    "cfg": ("cfg",),
+    "denoise": ("denoise",),
+    "seed": ("seed", "noise_seed"),
+    "width": ("width",),
+    "height": ("height",),
+}
+
+
+def _wired_param(nodes, links, defs, node, key):
+    """Значение параметра `key`, пришедшее ПРОВОДОМ (иначе None)."""
+    want = {n.lower() for n in _PARAM_INPUTS.get(key, (key,))}
+    for inp in node.get("inputs") or []:
+        if not isinstance(inp, dict) or inp.get("link") is None:
+            continue
+        widget = inp.get("widget") if isinstance(inp.get("widget"), dict) else {}
+        names = {str(inp.get("name") or "").lower(), str(widget.get("name") or "").lower()}
+        if not (names & want):
+            continue
+        link = links.get(inp["link"])
+        if isinstance(link, dict):
+            value = _output_value(nodes, links, defs, {}, link.get("from"),
+                                  link.get("from_slot"))
+            if value is not None:
+                return value
+    return None
+
+
+def _param(nodes, links, defs, node, wv, key, pos=None):
+    """Значение параметра генерации: ПРОВОД важнее виджета (v1.50).
+
+    Если вход подключён проводом и источник понятен — берём его значение
+    (иначе виджет сэмплера хранит устаревшее число). Не поняли → виджет."""
+    value = _wired_param(nodes, links, defs, node, key)
+    if value is not None:
+        return value
+    if isinstance(wv, list) and pos is not None and pos < len(wv):
+        return wv[pos]
+    return None
+
+
+def _sampler_starts(nodes):
+    """id узлов-сэмплеров верхнего уровня (без апскейлеров/превью)."""
+    return [n.get("id") for n in nodes.values()
+            if _SAMPLER_RE.search(str(n.get("type") or ""))
+            and not _NOT_SAMPLER_RE.search(str(n.get("type") or ""))]
+
+
+def _active_chain(workflow, limit=800):
+    """Обход АКТИВНОЙ части графа вверх от сэмплеров.
+
+    Возвращает `(кандидаты, флаг_неразрешённого_свитча, узлы_верхнего_уровня)`.
+    Третий элемент — id ВЕРХНИХ узлов, реально пройденных обходом: по нему
+    `_gen_meta` решает, можно ли вообще дополнять ответ фолбэком «по всему
+    графу» (v1.51). Пустое множество = сэмплеров на верхнем уровне нет.
+
+    Отличие от простого обхода (v1.47): переключатели РАЗРЕШАЮТСЯ (`_active_links`),
+    а сабграф разворачивается не целиком, а со своего ВЫХОДНОГО узла — с учётом
+    перекрытий promoted-входов (`_promoted_overrides`). Поэтому в результат
+    попадают только те загрузчики модели/LoRA, что реально дошли до сэмплера:
+    в живом графе пользователя ветка с `krea2_turbo` и её LoRA — невидимы,
+    когда переключатель стоит на RAW-модели (v1.49).
+    Флаг «туманность» — был переключатель, значение которого не понять."""
+    nodes, links, defs = _graph_of(workflow)
+    starts = _sampler_starts(nodes)
+    if not starts:
+        return [], False, set()
+    cands, seen, unresolved = [], set(), [False]
+
+    def visit(scope, nodes, links, defs, overrides, nid, depth):
+        if nid is None or depth > 40 or len(cands) > limit:
+            return
+        key = (scope, nid)
+        if key in seen:
+            return
+        seen.add(key)
+        nd = nodes.get(nid)
+        if not isinstance(nd, dict):
+            return
+        kind = str(nd.get("type") or "")
+        sg = defs.get(kind)
+        if sg is not None:
+            inodes, ilinks, idefs = _graph_of(sg)
+            ioverrides = _promoted_overrides(sg, nd)
+            out_node = sg.get("outputNode")
+            out_id = out_node.get("id") if isinstance(out_node, dict) else None
+            out_links = [inp.get("link") for inp in
+                         ((out_node.get("inputs") if isinstance(out_node, dict) else None) or [])
+                         if isinstance(inp, dict)]
+            if not out_links and out_id is not None:
+                # В живых графах у выходного узла сабграфа нет своего `inputs`:
+                # его входы — это провода, ЦЕЛЬ которых и есть этот узел.
+                out_links = [lid for lid, link in ilinks.items()
+                             if isinstance(link, dict) and link.get("to") == out_id]
+            for lid in out_links:
+                if lid is None:
+                    continue
+                src = ilinks.get(lid)
+                if isinstance(src, dict) and src.get("from") is not None:
+                    visit(kind, inodes, ilinks, idefs, ioverrides, src["from"], depth + 1)
+            # внешние провода, входящие в promoted-входы экземпляра
+            for inp in nd.get("inputs") or []:
+                if not isinstance(inp, dict) or inp.get("link") is None:
+                    continue
+                src = links.get(inp["link"])
+                if isinstance(src, dict) and src.get("from") is not None:
+                    visit(scope, nodes, links, defs, overrides, src["from"], depth + 1)
+            return
+        if not _TEXT_NODE_RE.search(kind):
+            wv_eff = _effective_widgets(nd, overrides)
+            cand = []
+            _iter_widget_files(wv_eff, kind, cand)
+            # Штатный лоадер LoRA держит силу виджетом (`strength_model`) —
+            # без этого LoRA из сабграфа шла без силы (v1.49).
+            strength = _lora_strength(nd, wv_eff) if _LORA_NODE_RE.search(kind) else None
+            hint = f"{kind} {nd.get('title') or ''}"
+            for c in cand:
+                c["hint"] = hint
+                if (c.get("strength") is None and strength is not None
+                        and isinstance(strength, (int, float)) and not isinstance(strength, bool)):
+                    c["strength"] = strength
+                cands.append(c)
+        active, resolved = _active_links(nd, nodes, links, overrides)
+        allowed = _chain_inputs(nd)
+        if active is None:
+            active = allowed
+        else:
+            active = [lid for lid in active if lid in allowed]
+            if not resolved:
+                unresolved[0] = True
+        for lid in active:
+            if lid is None:
+                continue
+            src = links.get(lid)
+            if isinstance(src, dict) and src.get("from") is not None:
+                visit(scope, nodes, links, defs, overrides, src["from"], depth + 1)
+
+    for sid in starts:
+        visit("top", nodes, links, defs, {}, sid, 0)
+    visited_top = {nid for scope, nid in seen if scope == "top"}
+    return cands, unresolved[0], visited_top
+
+
+def _chain_meta(workflow, role_of=None):
+    """Модель / VAE / LoRA, реально дошедшие до СЭМПЛЕРА (v1.47 → v1.51).
+
+    Идём только по АКТИВНОЙ части графа: переключатели разрешаются, сабграфы
+    разворачиваются через выходной узел с перекрытиями promoted-входов.
+    Поэтому в «Модели» оказывается задействованная модель, а LoRA — только те,
+    что стоят на активной ветке.
+    Возвращает `(meta, флаг_неразрешённого_свитча, узлы_верхнего_уровня)`:
+    третий элемент нужен `_gen_meta`, чтобы понять, можно ли дополнять
+    параметры фолбэком (v1.51)."""
+    cands, unresolved, visited_top = _active_chain(workflow)
+    models, hint_models, vaes, loras = [], [], [], []
+    for c in cands:
+        role, exact = _file_role(c["name"], c.get("hint") or "", role_of=role_of)
+        base = Path(str(c["name"]).replace("\\", "/")).name
+        if role == "model":
+            (models if exact else hint_models).append(base)
+        elif role == "vae":
+            vaes.append(base)
+        elif role == "lora":
+            loras.append({"name": base, "on": c.get("on"), "strength": c.get("strength")})
+    meta = {}
+    ms = _uniq_names(models) or _uniq_names(hint_models)
+    if ms:
+        meta["model"] = ", ".join(ms[:4])
+    out_loras, seen = [], set()
+    for l in loras:
+        if l.get("on") is False:
+            continue
+        key = (str(l["name"]).lower(), l.get("strength"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out_loras.append({"name": l["name"], "strength": l.get("strength")})
+    if out_loras:
+        meta["loras"] = out_loras
+    if vaes:
+        meta["vae"] = _uniq_names(vaes)[0]
+    return meta, unresolved, visited_top
+
+
+def _generic_meta(workflow, role_of=None):
+    """Модель / LoRA / VAE из ЛЮБЫХ узлов графа (включая сабграфы).
+
+    Живой случай (граф пользователя): модель — в `models/diffusion_models`,
+    подключённая через сабграф (тип узла — UUID), LoRA — слоты
+    `Power Lora Loader (rgthree)`, штатного `CheckpointLoaderSimple` нет вовсе.
+    Поэтому роль файла берётся из раскладки моделей (см. `_file_role`), а не из
+    имени узла. Выключенные LoRA-слоты (`on: false`) не показываем — они
+    в генерации не участвовали; заметки/превью пропускаем (§41.2, v1.47)."""
+    disk_models, hint_models, loras, vaes = [], [], [], []
+    for nd in _iter_nodes(workflow):
+        kind = str(nd.get("type") or "")
+        if _TEXT_NODE_RE.search(kind):
+            continue
+        cand = []
+        _iter_widget_files(nd.get("widgets_values"), kind, cand)
+        hint = f"{kind} {nd.get('title') or ''}"
+        for c in cand:
+            role, exact = _file_role(c["name"], hint, role_of=role_of)
+            base = Path(str(c["name"]).replace("\\", "/")).name
+            if role == "lora":
+                loras.append({"name": base, "on": c.get("on"), "strength": c.get("strength")})
+            elif role == "model":
+                (disk_models if exact else hint_models).append(base)
+            elif role == "vae":
+                vaes.append(base)
+    meta = {}
+    models = _uniq_names(disk_models) or _uniq_names(hint_models)
+    if models:
+        meta["model"] = ", ".join(models[:4])
+    out_loras, seen = [], set()
+    for l in loras:
+        if l.get("on") is False:
+            continue
+        key = (str(l["name"]).lower(), l.get("strength"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out_loras.append({"name": l["name"], "strength": l.get("strength")})
+    if out_loras:
+        meta["loras"] = out_loras
+    if vaes:
+        meta["vae"] = _uniq_names(vaes)[0]
+    return meta
+
+
+def _gen_meta(workflow, role_of=None):
+    """Параметры генерации из UI-графа записи (метаданные для HTML-галереи).
+
+    Два прохода (v1.47 → v1.50):
+    1. Известные типы узлов — `KSampler`, `KSamplerAdvanced`, `EmptyLatentImage`/
+       `EmptySD3LatentImage`, штатные лоадеры. Каждый параметр: ПРОВОД важнее
+       виджета (v1.50 — иначе в галерею уходит устаревшее число из виджета,
+       когда шаги/размер заданы свитчем в сабграфе), непонятный источник —
+       фолбэк на виджет по позиции.
+    2. Общий проход `_generic_meta` — модель/VAE/LoRA из ЛЮБЫХ узлов и сабграфов,
+       заполняет только то, чего не дал первый (setdefault): в живых графах
+       штатных лоадеров нет вовсе (модель в сабграфе, LoRA в rgthree-лоадере).
+    Поля фиксированным порядком: модель → VAE → LoRA → сэмплер/шаги/cfg/denoise/сид
+    → разрешение. Ничего не нашлось → {}."""
+    meta = {}
+    if not isinstance(workflow, dict):
+        return meta
+    # Сначала главное: модель/VAE/LoRA по ЦЕПОЧКЕ к сэмплеру (что реально генерило),
+    # фолбэк «по всему графу» — только когда цепочки НЕТ вовсе.
+    chain, unresolved, chain_top = _chain_meta(workflow, role_of=role_of)
+    for key, value in chain.items():
+        meta.setdefault(key, value)
+    # ВАЖНО (v1.51): если цепочка вообще что-то нашла (модель/LoRA), она
+    # АВТОРИТЕТНА — фолбэк «по всему графу» не подмешивается. Он видит и
+    # ВЫКЛЮЧЕННЫЕ ветки: живой случай — переключились с RAW на TURBO, в активной
+    # ветке LoRA нет, а фолбэк подставлял turbo-LoRA из неактивной ветки
+    # сабграфа, и галерея врала. Пустой список LoRA — это тоже ответ: «лоры не было».
+    # Цепочка не нашла ничего → старое поведение (плоский граф без проводов).
+    chain_found = bool(chain.get("model") or chain.get("loras"))
+    if not chain_found:
+        for key, value in _generic_meta(workflow, role_of=role_of).items():
+            meta.setdefault(key, value)
+    if unresolved:
+        # Переключатель был, но его значение не понять: показаны обе ветки —
+        # галерея обязана об этом сказать, а не делать вид, что знает.
+        meta["ambiguous"] = True
+    explicit_loras = []
+    gnodes, glinks, gdefs = _graph_of(workflow)
+
+    def param(nd, wv, key, pos):
+        return _param(gnodes, glinks, gdefs, nd, wv, key, pos)
+
+    for nd in workflow.get("nodes", []) or []:
+        kind = nd.get("type")
+        wv = nd.get("widgets_values")
+        if kind is None or not isinstance(wv, list):
+            continue
+        # Цепочка нашла модель/LoRA → читаем ТОЛЬКО её узлы: лоадер в стороне
+        # (или на выключенной ветке сабграфа) к генерации не относится (v1.51).
+        if chain_found and nd.get("id") not in chain_top:
+            continue
+        try:
+            if kind == "CheckpointLoaderSimple":
+                meta.setdefault("model", str(wv[0]))
+            elif kind in ("UNETLoader", "DiffusionModelLoader", "CheckpointLoader"):
+                meta.setdefault("model", str(wv[0]))
+            elif kind == "KSampler":
+                # Позиции виджетов: seed, control, steps, cfg, sampler, scheduler, denoise.
+                # Подключённый вход важнее виджета (v1.50): у живых графов в виджете
+                # легко остаётся устаревшее число (шаги приходят из сабграфа).
+                meta.setdefault("sampler", str(param(nd, wv, "sampler", 4) or ""))
+                meta.setdefault("scheduler", str(param(nd, wv, "scheduler", 5) or ""))
+                meta.setdefault("steps", param(nd, wv, "steps", 2))
+                meta.setdefault("cfg", param(nd, wv, "cfg", 3))
+                meta.setdefault("denoise", param(nd, wv, "denoise", 6))
+                meta.setdefault("seed", param(nd, wv, "seed", 0))
+            elif kind == "KSamplerAdvanced":
+                meta.setdefault("sampler", str(param(nd, wv, "sampler", 5) or ""))
+                meta.setdefault("scheduler", str(param(nd, wv, "scheduler", 6) or ""))
+                meta.setdefault("steps", param(nd, wv, "steps", 3))
+                meta.setdefault("cfg", param(nd, wv, "cfg", 4))
+                meta.setdefault("denoise", param(nd, wv, "denoise", 7))
+                meta.setdefault("seed", param(nd, wv, "seed", 1))
+            elif kind in ("LoraLoader", "LoraLoaderModelOnly"):
+                lora = {"name": str(wv[0]) if wv else ""}
+                strength = _lora_strength(nd, wv)
+                if strength is not None:
+                    lora["strength"] = strength
+                explicit_loras.append(lora)
+            elif kind in ("EmptyLatentImage", "EmptySD3LatentImage"):
+                # Размер часто подключён проводом (живой случай: из `Degg Res Set`) —
+                # виджет при этом хранит устаревшее число (v1.50).
+                meta.setdefault("width", param(nd, wv, "width", 0))
+                meta.setdefault("height", param(nd, wv, "height", 1))
+            elif kind == "VAELoader":
+                meta.setdefault("vae", str(wv[0]) if wv else "")
+        except Exception:
+            continue
+    # LoRA из штатных лоадеров ДОПОЛНЯЮТ найденные по графу (не заменяют):
+    # у них есть сила, но их может не быть в rgthree-слотах и наоборот.
+    if explicit_loras:
+        merged = list(meta.get("loras") or [])
+        by_name = {str(l.get("name", "")).lower(): l for l in merged}
+        for l in explicit_loras:
+            key = str(l.get("name", "")).lower()
+            if key in by_name:
+                if by_name[key].get("strength") is None and l.get("strength") is not None:
+                    by_name[key]["strength"] = l["strength"]
+            else:
+                merged.append(l)
+                by_name[key] = l
+        meta["loras"] = merged
+    return meta
 
 
 def _remove_preview_file(victim):
@@ -1378,6 +2251,28 @@ try:
                 out["workflow"] = _entry_workflow(e)
                 return web.json_response(out)
         return web.json_response({"error": "not found"}, status=404)
+
+    @routes.get("/prompt_library/meta")
+    @_locked_get
+    async def _pl_meta(request):
+        """Метаданные для HTML-галереи (v1.46, §41): читаем workflow-чанк
+        прямо из превью-файла записи, без загрузки базы. Фолбэк — граф
+        из /entry (`_entry_workflow`): для записей без PNG-чанка (legacy jpg,
+        превью без workflow) галерея всё равно получит параметры.
+
+        Возвращает {"id", "meta": {...}} — поля параметров (§41.2) или
+        пустой dict, если распарсить нечего (тогда галерея говорит
+        «нет данных прогона»)."""
+        entry_id = request.query.get("id", "")
+        f = _preview_path(entry_id)
+        workflow = _preview_workflow_chunk(f)
+        if workflow is None:
+            entries, _ = _load_db()
+            for e in entries:
+                if e.get("id") == entry_id:
+                    workflow = _entry_workflow(e)
+                    break
+        return web.json_response({"id": entry_id, "meta": _gen_meta(workflow) if workflow else {}})
 
     @routes.get("/prompt_library/preview")
     async def _pl_preview(request):

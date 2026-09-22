@@ -396,8 +396,8 @@ for (const vue of [false, true]) {
   } else {
     check(`${tag}: main+detail прямые дети root`, st.detail.parentNode === st.root);
     check(`${tag}: scrollArea нет в root`, scrollAreaOf() === undefined);
-    check(`${tag}: 7 детей root (подхват + 6)`,
-      st.root.children.length === 7 && st.root.children[6] === st.hintRow,
+    check(`${tag}: 8 детей root (подхват + ряд экспорта + 6)`,
+      st.root.children.length === 8 && st.root.children[7] === st.hintRow,
       String(st.root.children.length));
     checkCanvasPanes(tag, st);
   }
@@ -413,7 +413,7 @@ await run("switch: canvas → Vue через LiteGraph.vueNodesMode", () => {
   // нода, созданная в canvas-режиме, после переключения флага должна сама
   // перейти в Vue-раскладку (шаг выше уже перевёл её в Vue — возвращаем назад)
   LG.vueNodesMode = false;
-  check("после возврата — canvas-раскладка", areaOf(stC) === undefined && stC.root.children.length === 7);
+  check("после возврата — canvas-раскладка", areaOf(stC) === undefined && stC.root.children.length === 8);
   LG.vueNodesMode = true; // именно это делает фронтенд в useVueFeatureFlags
   check("после флага — Vue-раскладка", areaOf(stC) !== undefined && stC.root.style.overflow === "hidden");
   check("пол переехал на scrollArea", areaOf(stC).style.minHeight === "480px");
@@ -425,7 +425,7 @@ await run("switch: Vue → canvas через LiteGraph.vueNodesMode", () => {
   nodeElStub.style.minWidth = ""; // сбрасываем, чтобы проверить повторное применение
   LG.vueNodesMode = false;
   check("вернулись в canvas-раскладку", areaOf(stC) === undefined);
-  check("7 детей root", stC.root.children.length === 7);
+  check("8 детей root", stC.root.children.length === 8);
   check("обрезка осталась (не зависит от режима)", stC.root.style.overflow === "hidden");
   checkCanvasPanes("после возврата", stC);
 });
@@ -507,15 +507,42 @@ await run("marks: диапазон + эксклюзив карточки/пап�
   check("эксклюзив: карточка с зажатым модификатором не метится, папки целы",
     st.markEntries.size === 0 && st.markFolders.size === 3);
   st.renderHint(3);
-  check("bulk-бар в нижней строке (hintRow)",
-    st.hintRow && st.hintRow.children.some((c) => c.textContent === "🗑 Удалить"));
-  check("метки: строка внизу фиксирована, счётчик сжимается, кнопки видны",
+  // v1.52–v1.53: внизу остался только СЧЁТЧИК (статус); оба массовых ДЕЙСТВИЯ
+  // («🗑 Удалить» и «✖ снять метки») уехали в ряд действий и стоят РЯДОМ справа.
+  check("в нижней строке остался только счётчик меток",
+    st.hintRow && st.hintRow.children.includes(st.bulkCount)
+      && !st.hintRow.children.includes(st.bulkDel)
+      && !st.hintRow.children.includes(st.bulkClear));
+  check("«🗑 Удалить» и «✖» — последние в ряду действий, РЯДОМ (пара)",
+    st.exportRow.children.includes(st.bulkDel)
+      && st.exportRow.children.includes(st.bulkClear)
+      && st.exportRow.children[st.exportRow.children.length - 2] === st.bulkDel
+      && st.exportRow.children[st.exportRow.children.length - 1] === st.bulkClear,
+    st.exportRow.children.map((c) => c.textContent).join(" | "));
+  check("пару прижимает вправо «🗑» (margin-left:auto), высоту не меняет (flex-shrink:0)",
+    String(st.bulkDel.style.cssText).includes("margin-left:auto")
+      && String(st.bulkDel.style.cssText).includes("flex-shrink:0")
+      && String(st.bulkClear.style.cssText).includes("flex-shrink:0")
+      && String(st.exportRow.style.cssText).includes("height:22px"));
+  // v1.53: место при нехватке ширины отдаёт ПОДПИСЬ ряда, а не кнопки (живой
+  // замер `_probe_live_dom.py --export-row`: на MIN_W сжимались именно кнопки).
+  // (читаем cssText строкой: стенд — заглушка DOM и шорткат `flex`
+  // в отдельные flexShrink/flexBasis не раскладывает)
+  check("подпись ряда сжимаема (эллипсис), кнопки экспорта — нет",
+    String(st.exportCaption.style.cssText).includes("text-overflow:ellipsis")
+      && String(st.exportCaption.style.cssText).includes("flex:0 1 auto")
+      && [st.exportBtn, st.galleryBtn, st.importBtn]
+        .every((b) => String(b.style.cssText).includes("flex-shrink:0")),
+    st.exportCaption.style.cssText);
+  check("метки: строка внизу фиксирована, счётчик сжимается, «✖» видна",
     String(st.hintRow.style.cssText).includes("height:22px")
     && String(st.hintRow.style.cssText).includes("flex-shrink:0")
     && String(st.bulkCount.style.cssText).includes("min-width:0")
     && String(st.bulkClear.style.cssText).includes("flex-shrink:0"));
-  check("метки: hint скрыт, кнопки показаны",
-    st.hint.style.display === "none" && st.bulkDel.style.display === "" && st.bulkCount.textContent === "Помечено — категорий: 3.");
+  check("метки: hint скрыт, кнопки показаны (удаление — в ряду сверху)",
+    st.hint.style.display === "none" && st.bulkDel.style.display === ""
+      && st.bulkClear.style.display === ""
+      && st.bulkCount.textContent === "Помечено — категорий: 3.");
   check("hint остался текстом в одну строку",
     String(st.hint.style.cssText).includes("nowrap") && typeof st.hint.textContent === "string");
   st.clearMarks();
@@ -685,7 +712,9 @@ await run("folder: префикс __ отклоняется на клиенте"
     const found = [];
     const walk = (el) => { if (!el?.children) return; for (const c of el.children) { found.push(c); walk(c); } };
     walk(st.root);
-    const btn = found.find((b) => b.textContent === "+ Категория");
+    // Именно КНОПКА, а не контейнер (v1.48: в шапке осталась она одна, и у
+    // её обёртки тот же textContent — поиск по тексту ловил div)
+    const btn = found.find((b) => typeof b.onclick === "function" && b.textContent === "+ Категория");
     check("кнопка «+ Категория» найдена", !!btn);
     await btn.onclick();
     check("запрос на сервер не ушёл", posts === 0, `posts=${posts}`);
@@ -1857,7 +1886,8 @@ await run("v1.33: sanitizeFileName режет недопустимые симв�
 });
 
 // --- v1.34: экспорт папок и отмеченного (§39) ----------------------
-// Одна умная кнопка «📤 Экспорт» в шапке проводника (рядом с «+ Категория»):
+// Одна умная кнопка «📤 Экспорт» в ряду экспорта/импорта (v1.48: переехала из
+// шапки проводника — там с v1.48 только «+ Категория»):
 //   — при активных метках (Ctrl/Shift) → exportMarked() (отмеченные записи + категории),
 //   — без меток → exportFolder(st.selFolder || "__all") (текущая категория, «Всё», «Избранное», «Без категории»).
 // Отдельных кнопок 📤 на строках дерева и в bulk-баре НЕТ (были — шум, переработано).
@@ -1952,10 +1982,11 @@ await run("v1.34: экспорт категории — зеркало иера�
       const kids = Array.isArray(row.children) ? row.children : [];
       return kids.some((c) => c.textContent === "📤");
     };
-    check("v1.34: у строк дерева НЕТ кнопки 📤 (одна кнопка в шапке)",
+    check("v1.34: у строк дерева НЕТ кнопки 📤 (одна кнопка на ноде)",
       !Array.from(st.tree.children).some(rowHasEx));
-    check("v1.34: в шапке проводника есть кнопка «📤 Экспорт»",
-      !!st.exportBtn && st.exportBtn.textContent === "📤 Экспорт");
+    check("v1.34/v1.48: есть кнопка «📤 Экспорт» — в ряду экспорта, а не в дереве",
+      !!st.exportBtn && st.exportBtn.textContent === "📤 Экспорт"
+        && st.exportRow.children.includes(st.exportBtn));
     // Прогресс-бар: перехватываем setExportProgress во время экспорта —
     // он скрыт ДО экспорта, показан с процентами ВО ВРЕМЯ и скрыт ПОСЛЕ.
     // Во время показа подсказка внизу скрыта (бар занимает всю строку) —
@@ -2094,7 +2125,7 @@ await run("v1.34: bulk-экспорт отмеченного (записи + к�
   }
 });
 
-// Умная кнопка «📤 Экспорт» в шапке проводника: при активных метках
+// Умная кнопка «📤 Экспорт» (v1.48 — в ряду экспорта/импорта): при активных метках
 // экспортирует отмеченное (exportMarked), без меток — текущую категорию
 // (exportFolder). Отдельной bulk-кнопки в нижней строке БОЛЬШЕ НЕТ.
 // --- v1.39: экспорт не теряет записи с одинаковыми названиями -----------------
@@ -2151,7 +2182,7 @@ await run("v1.34: умная кнопка экспорта (метки → от�
   const files = [];
   const origPicker = windowStub.showDirectoryPicker;
   windowStub.showDirectoryPicker = async () => makeDirHandle(files);
-  // Нет bulk-кнопки в нижней строке (одна кнопка — в шапке)
+  // Нет bulk-кнопки в нижней строке (одна кнопка — в ряду экспорта/импорта)
   check("v1.34: отдельной bulk-кнопки экспорта в нижней строке нет",
     !("bulkExport" in st) || st.bulkExport === undefined, String(st.bulkExport));
 
@@ -2694,19 +2725,50 @@ await run("slots: строка «🔌 Выходы» в дереве откры�
   check("сокет выхода 2 после всего жив", node.outputs.length === 3 && node.outputs[2].name === "prompt_2");
 });
 
-await run("v1.46: галерея — кнопки «📥 Галерея» (шапка) и «🌐 В HTML» (панель карточки)", () => {
+await run("v1.46: галерея — кнопки «🌐 Экспорт в HTML» (ряд) и «🌐 В HTML» (панель карточки)", () => {
   const node = makeNode();
   proto.onNodeCreated.call(node);
   const st = node._pl;
-  check("«📥 Галерея» доступна из состояния (как exportBtn)", !!st.galleryBtn);
-  check("подпись «📥 Галерея» не изменилась",
-    st.galleryBtn && st.galleryBtn.textContent === "📥 Галерея", String(st.galleryBtn && st.galleryBtn.textContent));
+  check("«🌐 Экспорт в HTML» доступна из состояния (как exportBtn)", !!st.galleryBtn);
+  check("подпись и значок — как у карточки (v1.48)",
+    st.galleryBtn && st.galleryBtn.textContent === "🌐 Экспорт в HTML", String(st.galleryBtn && st.galleryBtn.textContent));
   const cssG = String(st.galleryBtn && st.galleryBtn.style.cssText);
   check("галерея стилем отличается от Экспорт (фиолетовая, не синяя)",
     cssG.includes("background:#3a2c6a") && !cssG.includes("background:#2c4a73"), cssG);
   check("«🌐 В HTML» в панели карточки", !!st.bGallery && st.bGallery.textContent === "🌐 В HTML",
     String(st.bGallery && st.bGallery.textContent));
   // Фиолетовый цвет кнопки светится на фоне ноды — галерея не путается с Экспорт.
+});
+
+await run("v1.48: ряд экспорта/импорта — в шапке проводника только «+ Категория»", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  check("ряд экспорта есть в состоянии (exportRow)", !!st.exportRow);
+  // 6 = подпись «Библиотека:» + три кнопки + «🗑 Удалить» + «✖» (v1.53)
+  check("в ряду лежат «📤 Экспорт», «🌐 Экспорт в HTML», «📥 Импорт» и пара массовых действий",
+    st.exportRow.children.length === 6
+      && st.exportRow.children.includes(st.exportBtn)
+      && st.exportRow.children.includes(st.galleryBtn)
+      && st.exportRow.children.includes(st.importBtn)
+      && st.exportRow.children.includes(st.bulkDel)
+      && st.exportRow.children.includes(st.bulkClear),
+    String(st.exportRow.children.length));
+  check("ряд — отдельная строка под «➕ Добавить промпт» и над тулбаром",
+    st.root.children.indexOf(st.exportRow) > st.root.children.indexOf(st.inputTitle.parentNode)
+      && st.root.children.indexOf(st.exportRow)
+        < st.root.children.indexOf(st.root.children.find((c) => c.children.includes(st.search))),
+    String(st.root.children.indexOf(st.exportRow)));
+  check("ряд фиксированной высоты 22px (высота ноды считается константами)",
+    String(st.exportRow.style.cssText).includes("height:22px"), String(st.exportRow.style.cssText));
+  check("«📥 Импорт» — выключенная кнопка-место (функционал ещё не сделан)",
+    st.importBtn.disabled === true && st.importBtn.textContent === "📥 Импорт",
+    String(st.importBtn.textContent));
+  // Дерево больше не несёт кнопок экспорта: только «+ Категория»
+  const treeHead = st.tree.parentNode.children[0];
+  const headTexts = treeHead.children[1].children.map((b) => b.textContent);
+  check("в шапке проводника осталась только «+ Категория»",
+    headTexts.length === 1 && headTexts[0] === "+ Категория", headTexts.join(","));
 });
 
 await run("v1.46: галерея категории — зеркало обложек + prompt_library.html в корне", async () => {
@@ -2830,6 +2892,89 @@ await run("v1.46: галерея одной записи — html + обложк
     check("v1.46: в html — карточка сольной записи и её промпт",
       content.includes("Соло") && content.includes('data-prompt="%D1%81%D0%BE%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9%20%D0%BF%D1%80%D0%BE%D0%BC%D0%BF%D1%82"'),
       content.slice(0, 400));
+  } finally {
+    windowStub.showDirectoryPicker = origPicker;
+  }
+});
+
+await run("v1.47: галерея «Все» — разделы по категориям (и без них, если категория одна)", async () => {
+  const raw = [
+    { id: "C1", title: "Корневая", folder: "", preview: "", prompt: "текстC1" },
+    { id: "C2", title: "Фотокарточка", folder: "Фото", preview: "", prompt: "текстC2" },
+    { id: "C3", title: "Портрет", folder: "Фото/Портреты", preview: "", prompt: "текстC3" },
+    { id: "C4", title: "Видеофайл", folder: "Видео", preview: "", prompt: "текстC4" },
+  ];
+  installFetchStub(raw.map((e) => ({ id: e.id, title: e.title, folder: e.folder, head: "", favorite: false, pinned: false, has_preview: false, media: null })),
+    new Map(raw.map((e) => [e.id, e])), null);
+
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  await st.reload();
+
+  const files = [];
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => makeDirHandle(files);
+  try {
+    await st.exportFolderHtml("__all");
+    const html = files.find((f) => f.name === "prompt_library.html");
+    const content = String(html && html.content);
+    check("v1.47: в галерее есть разделы (pl-sec) по категориям",
+      (content.match(/class="pl-sec"/g) || []).length === 4, String((content.match(/pl-sec/g) || []).length));
+    check("v1.47: раздел каждой категории назван своим путём",
+      content.includes("📁 Фото") && content.includes("📁 Фото/Портреты")
+        && content.includes("📁 Видео") && content.includes("📁 Без категории"), content.slice(0, 500));
+    check("v1.47: вложенная категория с отступом, корневая — без",
+      content.includes('class="pl-sec" style="margin-left:0px">📁 Без категории')
+        && content.includes('class="pl-sec" style="margin-left:14px">📁 Фото/Портреты'),
+      content.slice(0, 500));
+    check("v1.47: у раздела — счётчик записей",
+      content.includes('<span class="pl-count">1</span>'), content.slice(0, 500));
+    // Карточки на месте внутри разделов (счёт 4 записи в шапке)
+    check("v1.47: все четыре карточки в галерее",
+      ["Корневая", "Фотокарточка", "Портрет", "Видеофайл"].every((t) => content.includes(t)), content.slice(0, 300));
+
+    // Одна категория в выборке — без заголовков разделов
+    const files2 = [];
+    windowStub.showDirectoryPicker = async () => makeDirHandle(files2);
+    await st.exportFolderHtml("Видео");
+    const html2 = files2.find((f) => f.name === "Видео/prompt_library.html");
+    check("v1.47: одна категория в выборке — без разделов",
+      !!html2 && !String(html2.content).includes('class="pl-sec"'),
+      files2.map((f) => f.name).join(","));
+  } finally {
+    windowStub.showDirectoryPicker = origPicker;
+  }
+});
+
+await run("v1.49: неразрешённый переключатель — честная пометка в параметрах", async () => {
+  const full = { id: "A1", title: "Свитч", folder: "Фото", preview: "", prompt: "текст A1" };
+  installFetchStub([{ id: "A1", title: "Свитч", folder: "Фото", head: "", favorite: false, pinned: false, has_preview: false, media: null }],
+    new Map([["A1", full]]),
+    new Map([["A1", { model: "a.safetensors, b.safetensors", ambiguous: true, steps: 8 }]]));
+
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  // Строки таблицы: первая — предупреждение о переключателе
+  const rows = st.metaRows({ model: "a.safetensors, b.safetensors", ambiguous: true, steps: 8 });
+  check("v1.49: при неразрешённом свитче первая строка — предупреждение",
+    rows.length && rows[0][0] === "Переключатель" && /все ветки/.test(rows[0][1]),
+    JSON.stringify(rows));
+  check("v1.49: без пометки предупреждения нет",
+    !st.metaRows({ model: "a.safetensors" }).some((r) => r[0] === "Переключатель"));
+
+  // Та же пометка должна доехать до html-галереи
+  const files = [];
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => makeDirHandle(files);
+  try {
+    await st.reload();
+    await st.exportFolderHtml("Фото");
+    const html = files.find((f) => f.name === "Фото/prompt_library.html");
+    check("v1.49: в галерее видно, что ветка переключателя не определена",
+      !!html && String(html.content).includes("показаны все ветки"),
+      files.map((f) => f.name).join(","));
   } finally {
     windowStub.showDirectoryPicker = origPicker;
   }

@@ -10,6 +10,7 @@
     python tests/_probe_live_dom.py                 # базовая цепочка
     python tests/_probe_live_dom.py --panel         # + открыть панель свойств
     python tests/_probe_live_dom.py --audit-writer --canvas   # кто пишет widget.width (§37.9)
+    python tests/_probe_live_dom.py --export-row     # ряд действий влезает на MIN_W? (v1.52)
     python tests/_probe_live_dom.py --url http://127.0.0.1:8188/
 
 ⚠️ Научено горьким опытом (§37.7): ловушка/аудит имеют смысл ТОЛЬКО когда нода
@@ -109,6 +110,64 @@ MEASURE_JS = r"""
     out.plRootRect = { w: px(rr.width), h: px(rr.height), x: px(rr.x), y: px(rr.y) };
   } else out.plRootRect = null;
   return out;
+})()
+"""
+
+
+# Ряд действий (`.pl-export-row`, v1.52): влезает ли он на МИНИМАЛЬНОЙ ширине
+# ноды. Кнопка «🗑 Удалить» появляется только с метками — для замера она
+# принудительно раскрывается (мутация обратима: браузер одноразовый).
+# Сжимаемые дети (flex-shrink:1)не вылезают за ряд, а ЗАЖИМАЮТСЯ — поэтому
+# обрезка видна не как переполнение, а как `scrollWidth > clientWidth`.
+EXPORT_ROW_JS = r"""
+(() => {
+  const px = (v) => Math.round(v * 100) / 100;
+  const node = window.__plProbeNode;
+  const nodeEl = node ? document.querySelector(`[data-node-id="${node.id}"]`) : null;
+  const root = nodeEl ? nodeEl.querySelector('.pl-root') : document.querySelector('.pl-root');
+  if (!root) return { error: 'нет .pl-root' };
+  const row = root.querySelector('.pl-export-row');
+  if (!row) return { error: 'нет .pl-export-row' };
+  const st = node && node._pl;
+  // как при активных метках: раскрываем ВСЮ группу массовых действий
+  if (st && st.bulkDel) st.bulkDel.style.display = '';
+  if (st && st.bulkClear) st.bulkClear.style.display = '';
+  const cs = getComputedStyle(row);
+  const gap = parseFloat(cs.columnGap || cs.gap || '0') || 0;
+  const kids = Array.from(row.children).map((c) => {
+    const kcs = getComputedStyle(c);
+    const r = c.getBoundingClientRect();
+    const cw = c.clientWidth || 0, sh = c.scrollWidth || 0;
+    return {
+      text: String(c.textContent || '').slice(0, 22),
+      hidden: kcs.display === 'none',
+      w: px(r.width), clientW: cw, scrollW: sh,
+      squeezed: !kcs.display || kcs.display !== 'none' ? sh > cw + 1 : false,
+      flexShrink: kcs.flexShrink, marginLeft: kcs.marginLeft,
+    };
+  });
+  const visible = kids.filter((k) => !k.hidden);
+  const needed = px(visible.reduce((s, k) => s + k.w, 0) + gap * Math.max(visible.length - 1, 0));
+  return {
+    nodeWidth: node ? px(node.size[0]) : null,
+    rowClientW: row.clientWidth, rowScrollW: row.scrollWidth, gap,
+    visibleCount: visible.length, needed,
+    free: px(row.clientWidth - needed),
+    squeezed: kids.filter((k) => k.squeezed).map((k) => k.text),
+    kids,
+  };
+})()
+"""
+
+# Сжать ноду до её же минимума (значение берём из st.minW — без дубля числа)
+SET_MIN_W_JS = r"""
+(() => {
+  const n = window.__plProbeNode;
+  if (!n) return 'no node';
+  const minW = (n._pl && n._pl.minW) || 470;
+  n.setSize([minW, n.size[1]]);
+  if (window.app && window.app.canvas) window.app.canvas.setDirty(true, true);
+  return 'minW=' + minW + ' size=' + JSON.stringify(n.size);
 })()
 """
 
@@ -645,6 +704,8 @@ async def main() -> int:
     ap.add_argument("--trap", action="store_true",
                     help="ловушка на widget.width: ставит accessor-trap и долбит UI "
                          "(панель ×3, зум, ресайз ноды) — кто запишет width, тот и писатель")
+    ap.add_argument("--export-row", action="store_true",
+                    help="замер ряда действий (.pl-export-row): влезает ли он на MIN_W ноды")
     ap.add_argument("--audit-writer", action="store_true",
                     help="аудит ПИСАТЕЛЯ widget.width (v1.31, §37.9): канвас-режим, "
                          "выделение ноды через canvas.selectNodes, ловушка со снятым "
@@ -772,6 +833,60 @@ async def main() -> int:
             wbase = await cdp.eval(MEASURE_WIDGET_JS)
             print("\n=== виджет до панели ===")
             print(json.dumps(wbase, ensure_ascii=False, indent=2))
+
+            if args.export_row:
+                print("\n=== Ряд действий: ширина и обрезка ===")
+                now = await cdp.eval(EXPORT_ROW_JS)
+                print(json.dumps(now, ensure_ascii=False, indent=2))
+                print("→ сжимаем до минимума ноды: " + str(await cdp.eval(SET_MIN_W_JS)))
+                await asyncio.sleep(1.0)
+                atmin = await cdp.eval(EXPORT_ROW_JS)
+                print(json.dumps(atmin, ensure_ascii=False, indent=2))
+                # СЖАТИЕ ВАЖНЕЕ ПЕРЕПОЛНЕНИЯ: у кнопок текст при зажиме не
+                # «вылезает» (UA-стиль кнопки клипит содержимое), поэтому
+                # `scrollWidth > clientWidth` молчит и замер ложно зелёный.
+                # Честный признак — УМЕНЬШЕНИЕ ширины ребёнка относительно его
+                # ширины при свободе места.
+                was = {k["text"]: k for k in (now.get("kids") or [])}
+                hard, soft = [], []      # сжались НЕсжимаемые / по замыслу сжимаемые
+                for k in (atmin.get("kids") or []):
+                    if k.get("hidden"):
+                        continue
+                    before = was.get(k["text"])
+                    if before is None or before["w"] - k["w"] <= 1:
+                        continue
+                    # Кто "жертвенный" решает flex-shrink: элемент с `0`
+                    # сжиматься не должен (дефект), с `!= 0` — сжимается по
+                    # замыслу и отдаёт место (например подпись ряда).
+                    bucket = hard if before.get("flexShrink") == "0" else soft
+                    bucket.append(f"{k['text']} {before['w']:.0f}→{k['w']:.0f}")
+
+                print("\n=== СВОДКА ряда действий ===")
+                for label, snap in (("как есть", now), ("на MIN_W", atmin)):
+                    if snap.get("error"):
+                        print(f"  {label}: {snap['error']}")
+                        continue
+                    print(f"  {label}: нода {snap['nodeWidth']}px, ряд {snap['rowClientW']}px, "
+                          f"нужно {snap['needed']}px, запас {snap['free']}px, "
+                          f"обрезано: {snap['squeezed'] or '—'}")
+                for k in (atmin.get("kids") or []):
+                    if not k.get("hidden"):
+                        print(f"    {k['text']:<22} w={k['w']:<7} client={k['clientW']:<5} "
+                              f"scroll={k['scrollW']:<5} shrink={k['flexShrink']:<3} "
+                              f"marginLeft={k['marginLeft']}")
+                if atmin.get("error"):
+                    print("→ ВЕРДИКТ: замер не сделан")
+                elif hard:
+                    print("→ ВЕРДИКТ: КРАСНОЕ — сжимаются элементы с flex-shrink:0 "
+                          f"({', '.join(hard)}) — подписи режутся. Укоротить подписи"
+                          " или сделать кнопки компактными.")
+                elif (atmin.get("free") or 0) < 0:
+                    print(f"→ ВЕРДИКТ: КРАСНОЕ — переполнение {atmin.get('free')}px")
+                else:
+                    tail = (f"; по замыслу отдала место подпись ряда — {', '.join(soft)}"
+                            f" (осталось {[k['w'] for k in atmin['kids'] if k['text'] == soft[0].split(' ')[0]][0]:.0f}px)"
+                            if soft else "")
+                    print(f"→ ВЕРДИКТ: зелёное — кнопки целы, запас {atmin.get('free')}px{tail}")
 
             if args.panel:
                 trigger = await cdp.eval(OPEN_PANEL_JS)

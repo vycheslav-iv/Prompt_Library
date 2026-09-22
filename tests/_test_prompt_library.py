@@ -1658,6 +1658,616 @@ check("27: prompt_out (выбор) и слот (та же запись) не к�
       str(res27x2["result"][:3]))
 
 
+# --- 41. HTML-галерея: метаданные генерации (v1.46, §41) ----------------------
+print("\n41. /meta + _gen_meta + _preview_workflow_chunk")
+# Узлы: модель, lora, сэмплер, латент, vae — как в реальном UI-графе
+_wf41 = {"nodes": [
+    {"id": 1, "type": "CheckpointLoaderSimple",
+     "widgets_values": ["dreamshaper_8.safetensors"]},
+    {"id": 2, "type": "LoraLoader",
+     "widgets_values": ["detail.safetensors", 0.8, 0.8]},
+    {"id": 3, "type": "KSampler",
+     "widgets_values": [1234, "fixed", 28, 7.5, "euler", "normal", 0.6]},
+    {"id": 4, "type": "EmptyLatentImage",
+     "widgets_values": [768, 512, 1]},
+    {"id": 5, "type": "VAELoader",
+     "widgets_values": ["vae-ft-mse.safetensors"]},
+], "links": []}
+
+meta41 = mod._gen_meta(_wf41)
+check("41: модель из CheckpointLoaderSimple", meta41.get("model") == "dreamshaper_8.safetensors",
+      str(meta41))
+check("41: сэмплер из KSampler (name/шаги/cfg/denoise/сид)",
+      meta41.get("sampler") == "euler" and meta41.get("steps") == 28
+      and meta41.get("cfg") == 7.5 and meta41.get("denoise") == 0.6
+      and meta41.get("seed") == 1234, str(meta41))
+check("41: scheduler из KSampler", meta41.get("scheduler") == "normal", str(meta41))
+check("41: разрешение из EmptyLatentImage", meta41.get("width") == 768
+      and meta41.get("height") == 512, str(meta41))
+check("41: vae из VAELoader", meta41.get("vae") == "vae-ft-mse.safetensors", str(meta41))
+check("41: lora c силой", meta41.get("loras") == [{"name": "detail.safetensors", "strength": 0.8}],
+      str(meta41.get("loras")))
+
+# KSamplerAdvanced: сид на индексе 1, denoise нет
+_wf41a = {"nodes": [
+    {"id": 1, "type": "CheckpointLoaderSimple", "widgets_values": ["m.safetensors"]},
+    {"id": 2, "type": "KSamplerAdvanced",
+     "widgets_values": ["enable", 42, "fixed", 20, 6.0, "dpmpp_2m", "karras", 0, 20, "disable"]},
+], "links": []}
+meta41a = mod._gen_meta(_wf41a)
+check("41: KSamplerAdvanced (сид 1, шаги 3, cfg 4, имя 5, расписание 6)",
+      meta41a.get("seed") == 42 and meta41a.get("steps") == 20
+      and meta41a.get("cfg") == 6.0 and meta41a.get("sampler") == "dpmpp_2m"
+      and meta41a.get("scheduler") == "karras", str(meta41a))
+
+# UNETLoader-модель (Flux и Ко) и LoraLoaderModelOnly (две силы)
+_wf41b = {"nodes": [
+    {"id": 1, "type": "UNETLoader", "widgets_values": ["flux1-dev.safetensors", "default"]},
+    {"id": 2, "type": "LoraLoaderModelOnly", "widgets_values": ["lora.safetensors", 1.0]},
+], "links": []}
+meta41b = mod._gen_meta(_wf41b)
+check("41: UNETLoader даёт модель", meta41b.get("model") == "flux1-dev.safetensors", str(meta41b))
+check("41: LoraLoaderModelOnly (одна сила)", meta41b.get("loras")[0]["strength"] == 1.0,
+      str(meta41b.get("loras")))
+
+# Пустой / битый граф: не падает, {} (галерея скажет «нет данных прогона»)
+check("41: пустой граф -> {}", mod._gen_meta(None) == {} and mod._gen_meta({"nodes": []}) == {}
+      and mod._gen_meta([1, 2]) == {})
+_wf41bad = {"nodes": [{"type": "KSampler", "widgets_values": "не-список"}]}
+check("41: widgets_values не-список не роняет", mod._gen_meta(_wf41bad) == {})
+_wf41bad2 = {"nodes": [{"type": "CheckpointLoaderSimple"}]}
+check("41: узел без widgets_values пропущен", mod._gen_meta(_wf41bad2) == {})
+
+# Чанк workflow из PNG: пишем настоящий файл через PngInfo
+_tmpwf_dir = TMP / "previews"
+_tmpwf_dir.mkdir(parents=True, exist_ok=True)
+_chunk_f = _tmpwf_dir / "chunk41.png"
+try:
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    _info = PngInfo()
+    _info.add_text("workflow", json.dumps({"nodes": [{"type": "KSampler",
+                                                      "widgets_values": [7, "x", 21, 6, "euler", "normal", 1.0]}]}))
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(_chunk_f, "PNG", pnginfo=_info)
+    _wf_from_chunk = mod._preview_workflow_chunk(_chunk_f)
+    check("41: _preview_workflow_chunk читает чанк из PNG",
+          isinstance(_wf_from_chunk, dict) and _wf_from_chunk["nodes"][0]["widgets_values"][2] == 21,
+          str(_wf_from_chunk))
+    check("41: _gen_meta из чанка даёт параметры",
+          mod._gen_meta(_wf_from_chunk).get("steps") == 21)
+except Exception as e:
+    check("41: _preview_workflow_chunk/PngInfo", False, f"{type(e).__name__}: {e}")
+
+# JPEG-чанк не несёт → None; отсутствующий файл → None
+check("41: чанк из не-PNG/jpg -> None", mod._preview_workflow_chunk(_chunk_f.with_suffix(".jpg")) is None)
+check("41: чанк из отсутствующего файла -> None",
+      mod._preview_workflow_chunk(_tmpwf_dir / "нету.png") is None)
+_chunk_junk = _tmpwf_dir / "junk41.png"
+Image.new("RGB", (4, 4)).save(_chunk_junk, "PNG")
+check("41: PNG без чанка workflow -> None", mod._preview_workflow_chunk(_chunk_junk) is None)
+
+# Роут /meta: (1) превью с чанком побеждает; (2) без превью/чанка — фолбэк
+# на граф из /entry (inline); (3) ничего нет -> {};  (4) битый превью -> фолбэк.
+_e41 = h("POST", "/prompt_library/add", Req({"prompt": "карточка для метаданных", "folder": "Мета"}))
+_e41id = _e41["json"]["id"]
+# (1) пишем превью с настоящим чанком
+_prev41 = mod._ensure_dirs() / "previews" / f"{_e41id}.png"
+Image.new("RGB", (6, 6), (1, 2, 3)).save(_prev41, "PNG", pnginfo=_info)
+checks_success = _prev41.exists()
+r41 = h("GET", "/prompt_library/meta", Req(query={"id": _e41id}))
+check("41: /meta читает параметры из чанка превью",
+      r41["json"]["meta"].get("steps") == 21 and r41["json"]["meta"].get("seed") == 7,
+      str(r41["json"]))
+check("41: /meta отдаёт тот же id", r41["json"]["id"] == _e41id, str(r41["json"]))
+# (2) запись без превью и с inline-графом
+_e41b = h("POST", "/prompt_library/add", Req({"prompt": "запись с inline-графом", "folder": "Мета"}))
+_e41bid = _e41b["json"]["id"]
+db41 = json.loads(lib_file.read_text(encoding="utf-8"))
+for e in db41["entries"]:
+    if e["id"] == _e41bid:
+        e["workflow"] = {"nodes": [{"type": "CheckpointLoaderSimple",
+                                    "widgets_values": ["inline-model.safetensors"]}]}
+lib_file.write_text(json.dumps(db41, ensure_ascii=False), encoding="utf-8")
+r41b = h("GET", "/prompt_library/meta", Req(query={"id": _e41bid}))
+check("41: /meta без превью -> фолбэк на inline-граф",
+      r41b["json"]["meta"].get("model") == "inline-model.safetensors", str(r41b["json"]))
+# (3) запись вообще без графа
+_e41c = h("POST", "/prompt_library/add", Req({"prompt": "без графа", "folder": "Мета"}))
+r41c = h("GET", "/prompt_library/meta", Req(query={"id": _e41c["json"]["id"]}))
+check("41: /meta без графа -> {}", r41c["json"]["meta"] == {}, str(r41c["json"]))
+
+r41ie = h("GET", "/prompt_library/meta", Req(query={"id": "нет-такого"}))
+check("41: /meta неизвестной записи -> {} (без ошибки)", r41ie["json"]["meta"] == {}, str(r41ie["json"]))
+
+
+# --- 41b. Модель/LoRA из ЧУЖИХ узлов и сабграфов (v1.47) ----------------------
+# Живой случай пользователя: штатных CheckpointLoaderSimple/LoraLoader в графе
+# НЕТ. Модель — в сабграфе со свитчем (узел с типом-UUID + definitions.subgraphs),
+# LoRA — слоты Power Lora Loader (rgthree), рядом стоит апскейлер SeedVR2 со
+# своей моделью. До v1.47 поля model/loras в таких графах были пустыми.
+print("\n41b. _file_role / _chain_meta / _generic_meta (модель и LoRA)")
+
+_ROLE_OF_41B = {
+    "merged.safetensors": "model",
+    "raw_int8.safetensors": "model",
+    "turbo_int8.safetensors": "model",
+    "on_lora.safetensors": "lora",
+    "off_lora.safetensors": "lora",
+    "hidden_lora.safetensors": "lora",
+    "r4b_lora.safetensors": "lora",
+    "vae_chain.safetensors": "vae",
+    "vae_offchain.safetensors": "vae",
+}
+_role41b = _ROLE_OF_41B.get
+
+
+# Сабграф (definitions.subgraphs): внутри — два UNETLoader'а (свитч моделей).
+_SUB47_ID = "8dcc0000-subgraph-model-switch"
+# Внутри — как в ЖИВОМ графе пользователя: два UNETLoader'а, ComfySwitchNode
+# (`on_true`/`on_false` + селектор от PrimitiveBoolean), LoRA только на ветке RAW,
+# а имена моделей и положение селектора подняты в promoted-входы ЭКЗЕМПЛЯРА.
+_sub47 = {"id": _SUB47_ID, "name": "MODEL SWITCH", "nodes": [
+    {"id": 11, "type": "UNETLoader",
+     "inputs": [{"name": "unet_name", "widget": {"name": "unet_name"}}],
+     "widgets_values": ["raw_int8.safetensors", "default"],
+     "outputs": [{"name": "MODEL", "links": [3011]}]},
+    {"id": 12, "type": "UNETLoader",
+     "inputs": [{"name": "unet_name", "widget": {"name": "unet_name"}, "link": 3001}],
+     "widgets_values": ["turbo_int8.safetensors", "default"],
+     "outputs": [{"name": "MODEL", "links": [3012]}]},
+    {"id": 14, "type": "LoraLoaderModelOnly",
+     "inputs": [{"name": "model", "type": "MODEL", "link": 3011}],
+     "widgets_values": ["r4b_lora.safetensors", 0.6],
+     "outputs": [{"name": "MODEL", "links": [3013]}]},
+    {"id": 16, "type": "PrimitiveBoolean",
+     "inputs": [{"name": "value", "widget": {"name": "value"}, "link": 3003}],
+     "widgets_values": [True], "outputs": [{"name": "BOOLEAN", "links": [3014]}]},
+    {"id": 15, "type": "ComfySwitchNode",
+     "inputs": [{"name": "on_false", "type": "MODEL", "link": 3012},
+                 {"name": "on_true", "type": "MODEL", "link": 3013},
+                 {"name": "switch", "type": "BOOLEAN", "widget": {"name": "switch"}, "link": 3014}],
+     "widgets_values": [False], "outputs": [{"name": "output", "type": "MODEL", "links": [3015]}]},
+    {"id": 13, "type": "VAELoader", "widgets_values": ["vae_chain.safetensors"],
+     "outputs": [{"name": "VAE", "links": [3016]}]},
+], "outputNode": {"id": -20, "inputs": [{"name": "MODEL", "link": 3015},
+                                              {"name": "VAE", "link": 3016}]},
+   "inputs": [{"name": "unet_name_1", "linkIds": [3001]},
+              {"name": "value_2", "linkIds": [3003]}],
+   "links": [[3001, -10, 0, 12, 0, "COMBO"],
+             [3003, -10, 1, 16, 0, "BOOLEAN"],
+             [3011, 11, 0, 14, 0, "MODEL"],
+             [3012, 12, 0, 15, 0, "MODEL"],
+             [3013, 14, 0, 15, 1, "MODEL"],
+             [3014, 16, 0, 15, 2, "BOOLEAN"],
+             [3015, 15, 0, -20, 0, "MODEL"],
+             [3016, 13, 0, -20, 1, "VAE"]]}
+
+
+_wf47 = {
+    "nodes": [
+        {"id": 1, "type": "KSampler", "inputs": [{"name": "model", "type": "MODEL", "link": 100}],
+         "widgets_values": [7, "fixed", 8, 1, "euler", "beta", 1]},
+        {"id": 2, "type": "Power Lora Loader (rgthree)",
+         "inputs": [{"name": "model", "type": "MODEL", "link": 101}],
+         "widgets_values": [
+             {}, {"type": "PowerLoraLoaderHeaderWidget"},
+             {"on": False, "lora": "off_lora.safetensors", "strength": 1},
+             {"on": True, "lora": "on_lora.safetensors", "strength": 0.75},
+         ]},
+        # Экземпляр сабграфа: widgets_values идут по его promoted-входам
+        # [имя модели для ветки TURBO, переключатель RAW]
+        {"id": 3, "type": _SUB47_ID, "widgets_values": ["merged.safetensors", False],
+         "outputs": [{"name": "MODEL", "links": [101]}]},
+        # Апскейлер стоит в стороне от цепочки — его модель к генерации не относится
+        {"id": 4, "type": "SeedVR2LoadDiTModel", "widgets_values": ["upscaler_7b.safetensors"]},
+        # Заметка с именем файла — не использование модели
+        {"id": 5, "type": "MarkdownNote", "widgets_values": ["Таблица LoRA: hidden_lora.safetensors"]},
+        {"id": 6, "type": "VAELoader", "widgets_values": ["vae_offchain.safetensors"]},
+    ],
+    "links": [[100, 2, 0, 1, 0, "MODEL"], [101, 3, 0, 2, 0, "MODEL"]],
+    "definitions": {"subgraphs": [_sub47]},
+}
+_meta47 = mod._gen_meta(_wf47, role_of=_role41b)
+check("41b: модель — ТОЛЬКО активная ветка (имя перекрыто promoted-входом)",
+      _meta47.get("model") == "merged.safetensors", str(_meta47.get("model")))
+check("41b: модели неактивной ветки не попадают в галерею (raw/turbo)",
+      "raw_int8.safetensors" not in json.dumps(_meta47, ensure_ascii=False)
+      and "turbo_int8.safetensors" not in json.dumps(_meta47, ensure_ascii=False), str(_meta47))
+check("41b: LoRA неактивной ветки НЕ показывается, включённый слот — да",
+      _meta47.get("loras") == [{"name": "on_lora.safetensors", "strength": 0.75}],
+      str(_meta47.get("loras")))
+check("41b: апскейлер вне цепочки моделью НЕ считается",
+      "upscaler_7b.safetensors" not in ( _meta47.get("model") or ""), str(_meta47.get("model")))
+check("41b: заметка MarkdownNote не источник моделей и LoRA",
+      "hidden_lora.safetensors" not in json.dumps(_meta47, ensure_ascii=False), str(_meta47))
+check("41b: VAE — из цепочки (в сабграфе), а не первый попавшийся в графе",
+      _meta47.get("vae") == "vae_chain.safetensors", str(_meta47.get("vae")))
+check("41b: позиционные параметры KSampler на месте (сид/шаги/cfg)",
+      _meta47.get("steps") == 8 and _meta47.get("cfg") == 1 and _meta47.get("seed") == 7,
+      str(_meta47))
+check("41b: разрешённый переключатель — без пометки «туманность»",
+      not _meta47.get("ambiguous"), str(_meta47))
+
+# Тот же граф, но переключатель поднят в положение RAW: активна ветка с LoRA
+_wf47t = json.loads(json.dumps(_wf47))
+for _n in _wf47t["nodes"]:
+    if _n["type"] == _SUB47_ID:
+        _n["widgets_values"] = ["merged.safetensors", True]
+_meta47t = mod._gen_meta(_wf47t, role_of=_role41b)
+check("41b: переключатель на RAW -> модель ветки RAW и её LoRA",
+      _meta47t.get("model") == "raw_int8.safetensors"
+      and sorted(l["name"] for l in _meta47t.get("loras", []))
+      == ["on_lora.safetensors", "r4b_lora.safetensors"], str(_meta47t))
+check("41b: сила LoRA берётся из позиционного виджета (0.6)",
+      any(l.get("strength") == 0.6 for l in _meta47t.get("loras", [])), str(_meta47t.get("loras")))
+
+# Селектор, значение которого не понять → обе ветки + пометка (не врём)
+_wf47u = json.loads(json.dumps(_wf47))
+for _n in _wf47u["nodes"]:
+    if _n["type"] == _SUB47_ID:
+        _n["widgets_values"] = ["merged.safetensors", "???"]
+_meta47u = mod._gen_meta(_wf47u, role_of=_role41b)
+check("41b: неразрешённый селектор -> обе модели и пометка ambiguous",
+      _meta47u.get("ambiguous") is True
+      and "merged.safetensors" in str(_meta47u.get("model"))
+      and "raw_int8.safetensors" in str(_meta47u.get("model")), str(_meta47u))
+
+# DeggSwitch: активен вход с номером из виджета `select`
+_wf47d2 = {"nodes": [
+    {"id": 1, "type": "KSampler", "inputs": [{"name": "model", "type": "MODEL", "link": 401}],
+     "widgets_values": [1, "fixed", 4, 1, "euler", "normal", 1]},
+    {"id": 2, "type": "DeggSwitch",
+     "inputs": [{"name": "input_1", "type": "MODEL", "link": 402},
+                 {"name": "input_2", "type": "MODEL", "link": 403},
+                 {"name": "select", "type": "INT", "widget": {"name": "select"}}],
+     "widgets_values": [2], "outputs": [{"name": "output", "links": [401]}]},
+    {"id": 3, "type": "UNETLoader", "widgets_values": ["first_model.safetensors", "x"],
+     "outputs": [{"name": "MODEL", "links": [402]}]},
+    {"id": 4, "type": "UNETLoader", "widgets_values": ["second_model.safetensors", "x"],
+     "outputs": [{"name": "MODEL", "links": [403]}]},
+], "links": [[401, 2, 0, 1, 0, "MODEL"], [402, 3, 0, 2, 0, "MODEL"], [403, 4, 0, 2, 1, "MODEL"]]}
+_meta47d2 = mod._gen_meta(_wf47d2, role_of={"first_model.safetensors": "model",
+                                             "second_model.safetensors": "model"}.get)
+check("41b: DeggSwitch select=2 -> модель только второго входа",
+      _meta47d2.get("model") == "second_model.safetensors"
+      and not _meta47d2.get("ambiguous"), str(_meta47d2))
+
+# Без сэмплера цепочки нет — включается поиск по всему графу (фолбэк)
+_wf47b = {"nodes": [
+    {"id": 1, "type": "UNETLoader", "widgets_values": ["lonely.safetensors", "default"]},
+    {"id": 2, "type": "Power Lora Loader (rgthree)",
+     "widgets_values": [{"on": True, "lora": "solo_lora.safetensors", "strength": 1}]},
+], "links": []}
+_meta47b = mod._gen_meta(_wf47b, role_of=_role41b)
+check("41b: без сэмплера модель берётся по всему графу (фолбэк)",
+      _meta47b.get("model") == "lonely.safetensors", str(_meta47b))
+check("41b: без сэмплера LoRA тоже находится",
+      [l["name"] for l in _meta47b.get("loras", [])] == ["solo_lora.safetensors"], str(_meta47b))
+
+# Роли файлов: раскладка на диске важнее подсказок, иначе — по подсказкам типа узла
+check("41b: _file_role — роль по диску важнее имени узла",
+      mod._file_role("x.safetensors", "SeedVR2LoadDiTModel", role_of={"x.safetensors": "vae"}.get)
+      == ("vae", True))
+check("41b: _file_role — lora по имени узла",
+      mod._file_role("y.safetensors", "Power Lora Loader (rgthree)", role_of=lambda b: None)
+      == ("lora", False))
+check("41b: _file_role — DiT-лоадер как модель-фолбэк",
+      mod._file_role("z.safetensors", "SeedVR2LoadDiTModel", role_of=lambda b: None)
+      == ("model", False))
+check("41b: _file_role — апскейлер/VAE-аппроксиматор это НЕ модель",
+      mod._file_role("up.pth", "UpscaleModelLoader", role_of=lambda b: None) == ("other", False)
+      and mod._file_role("t.safetensors", "ModelPreviewOverrideKJ", role_of=lambda b: None)
+      == ("other", False))
+check("41b: _file_role — непонятное имя без подсказок не выдумываем",
+      mod._file_role("q.safetensors", "SomeUnknownNode", role_of=lambda b: None) == (None, False))
+
+# Многострочный текст (промпт со списком моделей) кандидатом не считается
+_wf47c = {"nodes": [{"id": 1, "type": "PrimitiveStringMultiline",
+                     "widgets_values": ["модель a.safetensors\n и ещё b.safetensors"]}],
+          "links": []}
+check("41b: имя файла внутри многострочного текста не кандидат",
+      mod._gen_meta(_wf47c, role_of=_role41b) == {}, str(mod._gen_meta(_wf47c, role_of=_role41b)))
+
+# Кольцо в проводах не подвешивает разбор (защита seen)
+_wf47d = {"nodes": [
+    {"id": 1, "type": "KSampler", "inputs": [{"name": "model", "type": "MODEL", "link": 1}],
+     "widgets_values": [1, "fixed", 1, 1, "euler", "normal", 1]},
+    {"id": 2, "type": "ComfySwitchNode",
+     "inputs": [{"name": "model", "type": "MODEL", "link": 2}],
+     "widgets_values": [False]},
+], "links": [[1, 2, 0, 1, 0, "MODEL"], [2, 1, 0, 2, 0, "MODEL"]]}
+_meta47d = mod._gen_meta(_wf47d, role_of=_role41b)
+check("41b: кольцо в проводах не подвешивает (модель не выдумана)",
+      "model" not in _meta47d and "loras" not in _meta47d and _meta47d.get("steps") == 1,
+      str(_meta47d))
+
+# Сабграф с моделью, которой нет на диске: точная модель из цепочки не подменяется
+_wf47e = {"nodes": [
+    {"id": 1, "type": "KSampler", "inputs": [{"name": "model", "type": "MODEL", "link": 1}],
+     "widgets_values": [1, "fixed", 1, 1, "euler", "normal", 1]},
+    {"id": 2, "type": "b7aa0000-sub-unknown", "outputs": [{"name": "MODEL", "links": [1]}]},
+], "links": [[1, 2, 0, 1, 0, "MODEL"]],
+    "definitions": {"subgraphs": [
+        {"id": "b7aa0000-sub-unknown", "nodes": [
+            {"id": 21, "type": "UNETLoader", "widgets_values": ["known_model.safetensors", "x"]},
+            {"id": 22, "type": "SeedVR2LoadDiTModel", "widgets_values": ["unknown_upscaler.safetensors"]},
+        ]}]}}
+_meta47e = mod._gen_meta(_wf47e, role_of={"known_model.safetensors": "model"}.get)
+check("41b: точная модель из цепочки не подменяется ненайденной",
+      _meta47e.get("model") == "known_model.safetensors", str(_meta47e))
+
+
+
+# --- 41c. Параметры, заданные ПРОВОДОМ, и LoRA после не-виджет-входа (v1.50) ---
+# Два живых бага пользователя (запись 8931bb73c1, сабграф «KREA 2 RAW MODEL»):
+#  1) Turbo-LoRA внутри сабграфа пропадала: у `LoraLoaderModelOnly` виджетов ДВА
+#     (`lora_name`, `strength_model`), а вход с виджетом ОДИН — позиционная
+#     подстановка перекрывала имя LoRA её же силой;`
+#  2) шаги шли из УСТАРЕВШЕГО виджета `KSampler` (8), а реально приходят проводом
+#     из сабграфа (`output_2` — 12 для RAW / 10 для TURBO), т.е. показывались
+#     неправильные данные. Фикстура повторяет живой граф 1:1.
+print("\n41c. Провода параметров и LoRA после не-виджет-входа (v1.50)")
+
+_R41C = {
+    "merged.safetensors": "model",
+    "raw_int8.safetensors": "model",
+    "on_lora.safetensors": "lora",
+    "turbo_lora.safetensors": "lora",
+    "vae_chain.safetensors": "vae",
+}
+_role41c = _R41C.get
+
+_SUB50_ID = "bcf8cc67-live-krea-raw"
+_sub50 = {
+    "id": _SUB50_ID, "name": "KREA 2 RAW MODEL",
+    "nodes": [
+        {"id": 1143, "type": "UNETLoader",
+         "inputs": [{"name": "unet_name", "type": "COMBO",
+                     "widget": {"name": "unet_name"}, "link": 2835}],
+         "widgets_values": ["raw_int8.safetensors", "default"],
+         "outputs": [{"name": "MODEL", "type": "MODEL", "links": [2113]}]},
+        # ВАЖНО: первым идёт вход без виджета — именно на нём ломался старый код
+        {"id": 1145, "type": "LoraLoaderModelOnly",
+         "inputs": [{"name": "model", "type": "MODEL", "link": 2113},
+                     {"name": "strength_model", "type": "FLOAT",
+                      "widget": {"name": "strength_model"}, "link": 2837}],
+         "widgets_values": ["turbo_lora.safetensors", 0.6],
+         "widgets_values_named": {"lora_name": "turbo_lora.safetensors",
+                                  "strength_model": 0.6},
+         "outputs": [{"name": "MODEL", "type": "MODEL", "links": [2114]}]},
+        {"id": 1519, "type": "UNETLoader",
+         "inputs": [{"name": "unet_name", "type": "COMBO",
+                     "widget": {"name": "unet_name"}, "link": 2858}],
+         "widgets_values": ["turbo_int8.safetensors", "default"],
+         "outputs": [{"name": "MODEL", "type": "MODEL", "links": [2853]}]},
+        {"id": 1144, "type": "ComfySwitchNode",
+         "inputs": [{"name": "on_false", "type": "MODEL", "link": 2853},
+                     {"name": "on_true", "type": "MODEL", "link": 2114},
+                     {"name": "switch", "type": "BOOLEAN", "link": 2116}],
+         "widgets_values": [False],
+         "outputs": [{"name": "output", "type": "MODEL", "links": [2124]}]},
+        {"id": 1151, "type": "PrimitiveBoolean", "title": "RAW Model",
+         "inputs": [{"name": "value", "type": "BOOLEAN",
+                     "widget": {"name": "value"}, "link": 2839}],
+         "widgets_values": [True],
+         "outputs": [{"name": "BOOLEAN", "type": "BOOLEAN", "links": [2116, 2117]}]},
+        {"id": 1147, "type": "PrimitiveInt", "title": "Шаги RAW",
+         "inputs": [{"name": "value", "type": "INT",
+                     "widget": {"name": "value"}, "link": 2836}],
+         "widgets_values": [12, "fixed"],
+         "widgets_values_named": {"value": 12, "fixed": "fixed"},
+         "outputs": [{"name": "INT", "type": "INT", "links": [2119]}]},
+        {"id": 1149, "type": "PrimitiveInt", "title": "Шаги TURBO",
+         "inputs": [{"name": "value", "type": "INT",
+                     "widget": {"name": "value"}, "link": 2838}],
+         "widgets_values": [10, "fixed"],
+         "widgets_values_named": {"value": 10, "fixed": "fixed"},
+         "outputs": [{"name": "INT", "type": "INT", "links": [2120]}]},
+        {"id": 1150, "type": "ComfySwitchNode", "title": "Шаги",
+         "inputs": [{"name": "on_false", "type": "INT", "link": 2120},
+                     {"name": "on_true", "type": "INT", "link": 2119},
+                     {"name": "switch", "type": "BOOLEAN", "link": 2117}],
+         "widgets_values": [False],
+         "outputs": [{"name": "output", "type": "INT", "links": [2857]}]},
+        {"id": 1521, "type": "VAELoader", "widgets_values": ["vae_chain.safetensors"],
+         "outputs": [{"name": "VAE", "type": "VAE", "links": [2855]}]},
+    ],
+    "outputNode": {"id": -20},
+    "inputs": [{"name": "unet_name_1", "linkIds": [2858]},
+               {"name": "value_1", "linkIds": [2838]},
+               {"name": "unet_name", "linkIds": [2835]},
+               {"name": "value", "linkIds": [2836]},
+               {"name": "strength_model", "linkIds": [2837]},
+               {"name": "value_2", "linkIds": [2839]}],
+    "outputs": [{"name": "output", "type": "MODEL", "linkIds": [2124]},
+                {"name": "CLIP", "type": "CLIP", "linkIds": [2854]},
+                {"name": "VAE", "type": "VAE", "linkIds": [2855]},
+                {"name": "output_1", "type": "STRING", "linkIds": [2856]},
+                {"name": "output_2", "type": "INT", "linkIds": [2857]}],
+    "links": [[2113, 1143, 0, 1145, 0, "MODEL"],
+              [2114, 1145, 0, 1144, 1, "MODEL"],
+              [2116, 1151, 0, 1144, 2, "BOOLEAN"],
+              [2117, 1151, 0, 1150, 2, "BOOLEAN"],
+              [2119, 1147, 0, 1150, 1, "INT"],
+              [2120, 1149, 0, 1150, 0, "INT"],
+              [2124, 1144, 0, -20, 0, "MODEL"],
+              [2853, 1519, 0, 1144, 0, "MODEL"],
+              [2855, 1521, 0, -20, 2, "VAE"],
+              [2857, 1150, 0, -20, 4, "INT"],
+              [2835, -10, 2, 1143, 0, "COMBO"],
+              [2836, -10, 3, 1147, 0, "INT"],
+              [2837, -10, 4, 1145, 1, "FLOAT"],
+              [2838, -10, 1, 1149, 0, "INT"],
+              [2839, -10, 5, 1151, 0, "BOOLEAN"],
+              [2858, -10, 0, 1519, 0, "COMBO"]],
+}
+
+
+def _wf50(raw=True):
+    """Живой граф пользователя: KSampler, rgthree-лоадер, сабграф со свитчем."""
+    return {
+        "nodes": [
+            {"id": 1, "type": "KSampler",
+             "inputs": [{"name": "model", "type": "MODEL", "link": 100},
+                         {"name": "steps", "type": "INT",
+                          "widget": {"name": "steps"}, "link": 102}],
+             "widgets_values": [8007355321346, "randomize", 8, 1, "euler", "beta", 1]},
+            {"id": 2, "type": "Power Lora Loader (rgthree)",
+             "inputs": [{"name": "model", "type": "MODEL", "link": 101}],
+             "widgets_values": [
+                 {}, {"type": "PowerLoraLoaderHeaderWidget"},
+                 {"on": False, "lora": "off_lora.safetensors", "strength": 1},
+                 {"on": True, "lora": "on_lora.safetensors", "strength": 1},
+             ]},
+            # Экземпляр сабграфа: widgets_values + named-форма (как в живом снимке)
+            {"id": 3, "type": _SUB50_ID,
+             "widgets_values": ["merged.safetensors", 10, "raw_int8.safetensors",
+                                12, 0.6, raw],
+             "widgets_values_named": {"unet_name_1": "merged.safetensors", "value_1": 10,
+                                      "unet_name": "raw_int8.safetensors", "value": 12,
+                                      "strength_model": 0.6, "value_2": raw},
+             "outputs": [{"name": "output", "type": "MODEL", "links": [101]},
+                         {"name": "CLIP", "type": "CLIP", "links": []},
+                         {"name": "VAE", "type": "VAE", "links": []},
+                         {"name": "output_1", "type": "STRING", "links": []},
+                         {"name": "output_2", "type": "INT", "links": [102]}]},
+        ],
+        "links": [[100, 2, 0, 1, 0, "MODEL"],
+                  [101, 3, 0, 2, 0, "MODEL"],
+                  [102, 3, 4, 1, 4, "INT"]],
+        "definitions": {"subgraphs": [_sub50]},
+    }
+
+
+_meta50 = mod._gen_meta(_wf50(True), role_of=_role41c)
+check("41c: шаги — из ПРОВОДА (сабграф->свитч), а не из устаревшего виджета 8",
+      _meta50.get("steps") == 12, str(_meta50))
+check("41c: LoRA внутри сабграфа видна и с верной силой (не затёрта своей же силой)",
+      {"name": "turbo_lora.safetensors", "strength": 0.6} in (_meta50.get("loras") or []),
+      str(_meta50.get("loras")))
+check("41c: модель — активной ветки RAW",
+      _meta50.get("model") == "raw_int8.safetensors", str(_meta50.get("model")))
+check("41c: включённый слот rgthree и LoRA сабграфа вместе",
+      sorted(l["name"] for l in _meta50.get("loras", []))
+      == ["on_lora.safetensors", "turbo_lora.safetensors"], str(_meta50.get("loras")))
+check("41c: VAE из цепочки (в сабграфе)",
+      _meta50.get("vae") == "vae_chain.safetensors", str(_meta50.get("vae")))
+
+_meta50t = mod._gen_meta(_wf50(False), role_of=_role41c)
+check("41c: свитч на TURBO -> модель и ШАГИ другой ветки (10), LoRA RAW не участвует",
+      _meta50t.get("steps") == 10 and _meta50t.get("model") == "merged.safetensors"
+      and "turbo_lora.safetensors" not in json.dumps(_meta50t.get("loras"), ensure_ascii=False),
+      str(_meta50t))
+
+# Простые провода параметров на верхнем уровне: шаги/cfg/denoise/разрешение
+_p50a = {"id": 10, "type": "PrimitiveInt", "widgets_values": [24, "fixed"],
+         "outputs": [{"name": "INT", "links": [501]}]}
+_p50b = {"id": 11, "type": "PrimitiveFloat", "widgets_values": [2.5],
+         "outputs": [{"name": "FLOAT", "links": [502]}]}
+_p50c = {"id": 12, "type": "PrimitiveInt", "widgets_values": [1860],
+         "outputs": [{"name": "INT", "links": [503]}]}
+_wf50w = {"nodes": [_p50a, _p50b, _p50c,
+    {"id": 1, "type": "KSampler",
+     "inputs": [{"name": "model", "type": "MODEL", "link": None},
+                 {"name": "steps", "type": "INT", "widget": {"name": "steps"}, "link": 501},
+                 {"name": "cfg", "type": "FLOAT", "widget": {"name": "cfg"}, "link": 502}],
+     "widgets_values": [7, "randomize", 8, 1, "euler", "beta", 1]},
+    {"id": 2, "type": "EmptyLatentImage",
+     "inputs": [{"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 503}],
+     "widgets_values": [1024, 1024, 1]},
+    ],
+    "links": [[501, 10, 0, 1, 2, "INT"], [502, 11, 0, 1, 3, "FLOAT"],
+              [503, 12, 0, 2, 0, "INT"]]}
+_meta50w = mod._gen_meta(_wf50w, role_of=_role41c)
+check("41c: провод шагов важнее виджета (24, а не 8)", _meta50w.get("steps") == 24, str(_meta50w))
+check("41c: провод cfg важнее виджета (2.5, а не 1)", _meta50w.get("cfg") == 2.5, str(_meta50w))
+check("41c: провод ширины латента важнее виджета (1860)",
+      _meta50w.get("width") == 1860 and _meta50w.get("height") == 1024, str(_meta50w))
+check("41c: непроводной параметр остаётся из виджета (denoise=1)",
+      _meta50w.get("denoise") == 1, str(_meta50w))
+
+# Провод от непонятного узла: не выдумываем — остаётся виджет
+_wf50x = {"nodes": [
+    {"id": 1, "type": "KSampler",
+     "inputs": [{"name": "steps", "type": "INT", "widget": {"name": "steps"}, "link": 601}],
+     "widgets_values": [7, "randomize", 8, 1, "euler", "beta", 1]},
+    {"id": 2, "type": "ComfyMathExpression", "widgets_values": ["a * b + 1"],
+     "outputs": [{"name": "INT", "type": "INT", "links": [601]}]},
+], "links": [[601, 2, 0, 1, 2, "INT"]]}
+_meta50x = mod._gen_meta(_wf50x, role_of=_role41c)
+check("41c: непонятный источник провода -> шаги остаются из виджета (8)",
+      _meta50x.get("steps") == 8, str(_meta50x))
+
+# Запись экземпляра сабграфа берётся ПО ИМЕНИ виджета, а не по позиции
+check("41c: _promoted_overrides кладёт значение и по имени, и по слоту",
+      mod._promoted_overrides(_sub50, {"id": 3, "widgets_values": ["m", 10, "r", 12, 0.6, True],
+                                       "widgets_values_named": {"strength_model": 0.6,
+                                                                "value_2": True}}).get((1145, "@strength_model")) == 0.6)
+check("41c: _effective_widgets не перекрывает имя LoRA её же силой",
+      mod._effective_widgets(_sub50["nodes"][1], {(1145, "@strength_model"): 0.6})[0]
+      == "turbo_lora.safetensors")
+_n50, _l50, _d50 = mod._graph_of(_sub50)
+_ov50raw = mod._promoted_overrides(_sub50, {"widgets_values_named": {"value": 12, "value_1": 10,
+                                                                 "value_2": True}})
+_ov50turbo = mod._promoted_overrides(_sub50, {"widgets_values_named": {"value": 12, "value_1": 10,
+                                                                   "value_2": False}})
+check("41c: _output_value по свитчу: RAW -> 12",
+      mod._output_value(_n50, _l50, _d50, _ov50raw, 1150, 0) == 12)
+check("41c: _output_value по свитчу: TURBO -> 10",
+      mod._output_value(_n50, _l50, _d50, _ov50turbo, 1150, 0) == 10)
+check("41c: _output_value не выдумывает для чужого узла",
+      mod._output_value({9: {"id": 9, "type": "SomeUnknownNode", "widgets_values": ["x"]}},
+                        {}, {}, {}, 9, 0) is None)
+
+
+# Главный живой баг v1.51: активная ветка БЕЗ LoRA, а фолбэк «по всему графу»
+# подставлял лору из ВЫКЛЮЧЕННОЙ ветки сабграфа. Пользователь переключился с RAW
+# (с turbo-LoRA) на TURBO и без лоры — а галерея писала, что turbo-LoRA была.
+_wf51 = mod_c51 = json.loads(json.dumps(_wf50(False)))
+for _n in _wf51["nodes"]:
+    if _n["type"] == "Power Lora Loader (rgthree)":
+        for _slot in _n["widgets_values"]:
+            if isinstance(_slot, dict) and "lora" in _slot:
+                _slot["on"] = False
+_meta51 = mod._gen_meta(_wf51, role_of=_role41c)
+check("41c: TURBO без лоры -> LoRA НЕ показывается (неактивная ветка сабграфа не подмешивается)",
+      not _meta51.get("loras"), str(_meta51.get("loras")))
+check("41c: тот же случай — модель и шаги всё равно верные",
+      _meta51.get("model") == "merged.safetensors" and _meta51.get("steps") == 10, str(_meta51))
+
+# Разрешение тоже бывает ПРОВОДОМ — из своей ноды Degg Res Set (Degg_Res_Set)
+_drs50 = {"id": 20, "type": "DeggResSet",
+          "widgets_values": [1, None, "16:9 (Widescreen)", 0.5, 8, None, 512, 512,
+                              None, 768, 768, None, 1088, 2336],
+          "widgets_values_named": {"select": 1, "__grp": None,
+                                   "aspect_ratio": "16:9 (Widescreen)", "megapixels": 0.5,
+                                   "multiple": 8, "__grp#1": None, "w1": 512, "h1": 512,
+                                   "__grp#2": None, "w2": 768, "h2": 768,
+                                   "__grp#3": None, "w3": 1088, "h3": 2336},
+          "outputs": [{"name": "width", "links": [701]},
+                      {"name": "height", "links": [702]}]}
+_wf50r = {"nodes": [
+    _drs50,
+    {"id": 1, "type": "KSampler", "widgets_values": [7, "randomize", 8, 1, "euler", "beta", 1]},
+    {"id": 2, "type": "EmptySD3LatentImage",
+     "inputs": [{"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 701},
+                 {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": 702}],
+     "widgets_values": [1024, 1840, 1]},
+], "links": [[701, 20, 0, 2, 0, "INT"], [702, 20, 1, 2, 1, "INT"]]}
+_meta50r = mod._gen_meta(_wf50r, role_of=_role41c)
+check("41c: разрешение из Degg Res Set (preset 1: 16:9, 0.5 МП) — 960x536, а не виджет 1024x1840",
+      (_meta50r.get("width"), _meta50r.get("height")) == (960, 536), str(_meta50r))
+_drs50b = dict(_drs50, widgets_values_named={"select": 3, "aspect_ratio": "1:1 (Square)",
+                                              "megapixels": 1.0, "multiple": 8,
+                                              "w1": 512, "h1": 512, "w2": 768, "h2": 768,
+                                              "w3": 1088, "h3": 2336})
+check("41c: Degg Res Set preset 3/4 — ручные w/h (768x768), без расчёта",
+      (mod._degg_res_set_output(_drs50b, 0), mod._degg_res_set_output(_drs50b, 1)) == (768, 768))
+check("41c: Degg Res Set без named-формы не выдумывает",
+      mod._degg_res_set_output({"widgets_values": [1]}, 0) is None
+      and mod._degg_res_set_output(_drs50, 5) is None)
+
+
 # --- итог -------------------------------------------------------------------
 _p(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
 if fails:
