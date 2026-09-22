@@ -1867,13 +1867,24 @@ await run("v1.33: sanitizeFileName режет недопустимые симв�
 // onNodeCreated сбросит st.entries в []), /entry — полные тексты, /preview —
 // картинку.
 let bulkExportPickerCalled = false;
-const installFetchStub = (entries, fulls) => {
+// Метаданные для /meta (v1.46, §41): NO живого (правильное имя) — сервер отдаёт
+// в /list помимо id/title/folder только head. /meta перехватывается тем же
+// стабом, чтобы фазы галереи не трогали настоящий бэкенд.
+let metaOverride = null;
+const installFetchStub = (entries, fulls, metas = null) => {
+  listOverride = null;
   sandbox.fetch = async (u) => {
     const url = String(u);
     if (url.includes("/prompt_library/list")) return jsonResponse(listOverride ? listResponse : { entries, folders: [] });
     if (url.includes("/prompt_library/entry?id=")) {
       const id = decodeURIComponent(url.split("id=")[1] || "");
       return jsonResponse(fulls.get ? (fulls.get(id) || {}) : (fulls[id] || {}));
+    }
+    if (url.includes("/prompt_library/meta?id=")) {
+      const id = decodeURIComponent(url.split("id=")[1] || "");
+      const pool = metas || metaOverride;
+      const m = (pool && (pool.get ? pool.get(id) : pool[id])) || {};
+      return jsonResponse({ id, meta: m });
     }
     if (url.includes("/prompt_library/preview")) {
       return { ok: true, status: 200, blob: async () => ({ type: "image/png", size: 3 }) };
@@ -2681,6 +2692,147 @@ await run("slots: строка «🔌 Выходы» в дереве откры�
     rows.length === 1 && ftext(rows[0]).includes("записи нет"),
     st.list.children.map((c) => ftext(c)).join(" ; "));
   check("сокет выхода 2 после всего жив", node.outputs.length === 3 && node.outputs[2].name === "prompt_2");
+});
+
+await run("v1.46: галерея — кнопки «📥 Галерея» (шапка) и «🌐 В HTML» (панель карточки)", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  check("«📥 Галерея» доступна из состояния (как exportBtn)", !!st.galleryBtn);
+  check("подпись «📥 Галерея» не изменилась",
+    st.galleryBtn && st.galleryBtn.textContent === "📥 Галерея", String(st.galleryBtn && st.galleryBtn.textContent));
+  const cssG = String(st.galleryBtn && st.galleryBtn.style.cssText);
+  check("галерея стилем отличается от Экспорт (фиолетовая, не синяя)",
+    cssG.includes("background:#3a2c6a") && !cssG.includes("background:#2c4a73"), cssG);
+  check("«🌐 В HTML» в панели карточки", !!st.bGallery && st.bGallery.textContent === "🌐 В HTML",
+    String(st.bGallery && st.bGallery.textContent));
+  // Фиолетовый цвет кнопки светится на фоне ноды — галерея не путается с Экспорт.
+});
+
+await run("v1.46: галерея категории — зеркало обложек + prompt_library.html в корне", async () => {
+  const raw = [
+    { id: "G1", title: "Фото с моря", folder: "Фото", preview: "p/G1.png", prompt: "полный текст фото с моря" },
+    { id: "G2", title: "Портрет", folder: "Фото/Портреты", preview: "", prompt: "полный текст портрета" },
+    { id: "G4", title: "Альбом выпуска", folder: "Фото/Портреты/Альбом", preview: "p/G4.png", prompt: "полный текст альбома" },
+    { id: "G9", title: "Без папки", folder: "", preview: "", prompt: "полный текст без папки" },
+  ];
+  const metas = new Map([
+    ["G1", { model: "flux1-dev", vae: "ae.safetensors", loras: [{ name: "detail", strength: 0.7 }],
+      sampler: "euler", scheduler: "normal", steps: 20, cfg: 1.0, denoise: 1, seed: 12345, width: 768, height: 512 }],
+    ["G2", { sampler: "dpmpp_2m", scheduler: "karras", steps: 28, cfg: 7, seed: 99 }],
+  ]);
+  installFetchStub(raw.map(({ id, title, folder }) => ({ id, title, folder, head: "", favorite: false, pinned: false, has_preview: true, media: null })),
+    new Map(raw.map((e) => [e.id, e])), metas);
+
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  await st.reload();
+
+  const files = [];
+  const fakeDirHandle = makeDirHandle(files);
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => fakeDirHandle;
+  try {
+    await st.exportFolderHtml("Фото");
+    // Зеркало: html-файл — в папке категории, обложки — рядом и в подпапках.
+    const html = files.find((f) => f.name === "Фото/prompt_library.html");
+    check("v1.46: prompt_library.html лежит в зеркале категории (Фото/)",
+      !!html, files.map((f) => f.name).join(","));
+    check("v1.46: обложки в зеркале: рядом и по подпапкам",
+      files.some((f) => f.name === "Фото/Фото с моря.png")
+        && files.some((f) => f.name === "Фото/Портреты/Альбом/Альбом выпуска.png"),
+      files.map((f) => f.name).join(","));
+    check("v1.46: галерея НЕ пишет .md (html — поверх, не заменяя)",
+      !files.some((f) => f.name.endsWith(".md")), files.map((f) => f.name).join(","));
+    const content = String(html && html.content);
+    // Карточка G1: превью-ссылка относительная (не base64), промпт в data-атрибуте,
+    // метаданные генерации таблицей.
+    check("v1.46: обложка в html — относительная ссылка на png",
+      content.includes("src=\"%D0%A4%D0%BE%D1%82%D0%BE%20%D1%81%20%D0%BC%D0%BE%D1%80%D1%8F.png\""),
+      content.slice(0, 600));
+    check("v1.46: в html есть карточка G2 без обложки (заглушка «без обложки»)",
+      content.includes("без обложки"));
+    check("v1.46: промпт в data-prompt (encodeURIComponent, не сырой)",
+      content.includes('data-prompt="%D0%BF%D0%BE%D0%BB%D0%BD%D1%8B%D0%B9%20%D1%82%D0%B5%D0%BA%D1%81%D1%82%20%D1%84%D0%BE%D1%82%D0%BE%20%D1%81%20%D0%BC%D0%BE%D1%80%D1%8F"')
+        && content.includes("data-prompt="), "data-prompt присутствует");
+    check("v1.46: метаданные генерации таблицей (Модель/LoRA/Семплер/Разрешение)",
+      content.includes("Модель") && content.includes("LoRA")
+        && content.includes("Семплер") && content.includes("Разрешение"),
+      "таблица параметров есть");
+    check("v1.46: в шапке html счёт и название категории",
+      content.includes("Фото · 3 записей") || content.includes("Вся библиотека"), "шапка галереи");
+  } finally {
+    windowStub.showDirectoryPicker = origPicker;
+  }
+});
+
+await run("v1.46: галерея отмеченного — те же карточки через exportMarkedHtml", async () => {
+  const raw = [
+    { id: "M1", title: "Отмеченная", folder: "Фото", preview: "p/M1.png", prompt: "текстM1" },
+    { id: "M2", title: "Вторая", folder: "Видео", preview: "", prompt: "текстM2" },
+    { id: "M3", title: "Мимо", folder: "Архив", preview: "", prompt: "текстM3" },
+  ];
+  installFetchStub(raw.map((e) => ({ id: e.id, title: e.title, folder: e.folder, head: "", favorite: false, pinned: false, has_preview: !!1, media: null })),
+    new Map(raw.map((e) => [e.id, e])), null);
+
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  await st.reload();
+  st.markEntries.add("M1"); st.markEntries.add("M2");
+
+  const files = [];
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => makeDirHandle(files);
+  try {
+    await st.exportMarkedHtml();
+    const html = files.find((f) => f.name === "prompt_library.html");
+    check("v1.46: html отмеченного пишется в выбранную папку", !!html,
+      files.map((f) => f.name).join(","));
+    const content = String(html && html.content);
+    check("v1.46: в отмеченной галерее обе метки, «Мимо» — нет",
+      content.includes("Отмеченная") && content.includes("Вторая")
+        && !content.includes("Мимо"), content.slice(0, 400));
+    check("v1.46: шапка отмеченного — «Отмеченное · 2 записей»",
+      content.includes("Отмеченное · 2 записей"), "шапка");
+    // Отмеченные пишут обложку в зеркало с корня, не в подпапку категории
+    check("v1.46: обложка отмеченной в зеркале от корня",
+      files.some((f) => f.name === "Фото/Отмеченная.png"), files.map((f) => f.name).join(","));
+  } finally {
+    windowStub.showDirectoryPicker = origPicker;
+  }
+});
+
+await run("v1.46: галерея одной записи — html + обложка рядом, без зеркала", async () => {
+  const full = { id: "S1", title: "Соло", folder: "Фото", preview: "p/S1.png", prompt: "сольный промпт" };
+  installFetchStub([{ id: "S1", title: "Соло", folder: "Фото", head: "", favorite: false, pinned: false, has_preview: true, media: null }],
+    new Map([["S1", full]]),
+    new Map([["S1", { sampler: "euler", steps: 15, cfg: 1.5, seed: 7 }]]));
+
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  st.detailId = "S1";
+  st.full.set("S1", full);
+
+  const files = [];
+  const origPicker = windowStub.showDirectoryPicker;
+  windowStub.showDirectoryPicker = async () => makeDirHandle(files);
+  try {
+    await st.exportEntryHtml();
+    const html = files.find((f) => f.name === "prompt_library.html");
+    check("v1.46: карточка пишет prompt_library.html", !!html,
+      files.map((f) => f.name).join(","));
+    check("v1.46: обложка рядом (не в подпапку)", 
+      files.some((f) => f.name === "Соло.png"), files.map((f) => f.name).join(","));
+    const content = String(html && html.content);
+    check("v1.46: в html — карточка сольной записи и её промпт",
+      content.includes("Соло") && content.includes('data-prompt="%D1%81%D0%BE%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9%20%D0%BF%D1%80%D0%BE%D0%BC%D0%BF%D1%82"'),
+      content.slice(0, 400));
+  } finally {
+    windowStub.showDirectoryPicker = origPicker;
+  }
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
