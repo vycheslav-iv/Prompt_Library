@@ -198,11 +198,25 @@ function makeNode() {
     { name: "selected", value: "", type: "text", options: {}, callback: null, serialize: true },
     { name: "save_folder", value: "", type: "text", options: {}, callback: null, serialize: true },
     { name: "pickup", value: "", type: "text", options: {}, callback: null, serialize: true },
+    { name: "slots_out", value: "[]", type: "text", options: { hidden: true, hideInPanel: true }, serialize: true },
   ];
   const node = {
     id: 1, pos: [0, 0], size: [470, 700], flags: {}, bgcolor: null, widgets,
     inputs: [{ name: "source", type: "*", link: null }, { name: "image", type: "IMAGE", link: null }],
-    outputs: [{ name: "CLIP", type: "CLIP", links: [] }, { name: "STRING", type: "STRING", links: [] }],
+    outputs: [
+      { name: "category_out", type: "STRING", links: [] },
+      { name: "prompt_out", type: "STRING", links: [] },
+      { name: "out_2", type: "STRING", links: [] },
+      { name: "out_3", type: "STRING", links: [] },
+      { name: "out_4", type: "STRING", links: [] },
+      { name: "out_5", type: "STRING", links: [] },
+      { name: "out_6", type: "STRING", links: [] },
+      { name: "out_7", type: "STRING", links: [] },
+      { name: "out_8", type: "STRING", links: [] },
+      { name: "out_9", type: "STRING", links: [] },
+      { name: "out_10", type: "STRING", links: [] },
+      { name: "out_11", type: "STRING", links: [] },
+    ],
     graph: { setDirtyCanvas() {}, links: {}, getNodeById: () => null, _nodes: [] },
     addWidget(type, name, value, cb, opts) {
       const w = { name, value, type, callback: cb, options: opts || {}, serialize: true };
@@ -215,6 +229,7 @@ function makeNode() {
     addInput(name, type) { const i = { name, type, link: null }; node.inputs.push(i); return i; },
     removeInput(idx) { node.inputs.splice(idx, 1); },
     disconnectInput(i) { if (node.inputs[i]) node.inputs[i].link = null; },
+    disconnectOutput(i) { if (node.outputs[i]) node.outputs[i].links = []; },
     removeOutput() {}, setSize(s) { node.size = s; }, setDirtyCanvas() {},
     getExtraMenuOptions: () => [], onResize: null,
     element: makeEl("div"), computeSize: () => [470, 700],

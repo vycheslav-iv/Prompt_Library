@@ -1542,14 +1542,6 @@ app.registerExtension({
                     // (привязку доп. выхода). Ближайший свободный индекс берёт
                     // bindOutSlot; дубль (та же карточка/папка) игнорируется.
                     if (target === "__outs") {
-                        // Запрет: категория «Выходы» только для режима «Выдача»
-                        const modeW = this.widgets?.find((w) => w.name === "mode");
-                        const modeVal = modeW ? String(modeW.value || "") : "";
-                        if (modeVal !== "📤 Выдача") {
-                            st.toast("warn", "Prompt Library: выходы",
-                                "Категория «🔌 Выходы» доступна только в режиме «📤 Выдача».");
-                            return;
-                        }
                         if (d.kind === "entry") {
                             for (const id of (d.ids || (d.id ? [d.id] : []))) {
                                 const e = st.entries.find((x) => x.id === id);
@@ -1745,8 +1737,7 @@ app.registerExtension({
                 // v1.44 (§40): категория привязок доп. выходов (виртуальная ветка)
                 const outsRow = folderRow("__outs", "🔌 Выходы", 0, false);
                 st.tree.appendChild(outsRow);
-                st.tree.appendChild(folderRow("__root", "📥 Без категории", 0, false));
-                // Подключённые выходы — как дети категории «Выходы»
+                // Подключённые выходы — как дети категории «Выходы» (перед "Без категории")
                 const slots = (st.readOutSlots() || []).filter((s) => s).sort((a, b) => a.i - b.i);
                 for (const slot of slots) {
                     const isFolder = slot.kind === "folder";
@@ -2995,6 +2986,8 @@ app.registerExtension({
 
             reload();
             requestAnimationFrame(() => { st.hookCanvasDrop?.(); st.enforceMinWidth?.(); st.applyNodeMinWidth?.(); this.graph?.setDirtyCanvas(true, true); });
+            // v1.44: скрыть доп. выходы сразу при создании ноды
+            st.applyOutSockets();
             return ret;
         };
 
