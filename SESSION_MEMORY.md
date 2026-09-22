@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (v1.44, 2026-09-22)
+# Память сессии — Prompt Library (v1.45.2, 2026-09-22)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,40 +7,45 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- **v1.44: мультивывод — базовая структура готова, UX доработки в процессе** (передана другой модели для завершения).
-  - **Python**: 12 выходов (`category_out`, `prompt_out`, `out_2`..`out_11`), `RETURN_NAMES` обновлён, `_output_linked` проверяет output 1, `execute` возвращает `(category_path, out_text, *slot_texts)`.
-  - **JS**: категория «🔌 Выходы» в проводнике (после «★ Избранное», перед «📥 Без категории»), папка-слот с `active_id`, скрытые сокеты 2..11 (`o.hide`), tooltip `o.title` вместо переименования `o.name`, `applyOutSockets` в конце `onNodeCreated`.
-  - **PNG-персистентность**: 5-й элемент `widgets_values` + `widgets_values_named.slots_out` (JSON `{i,kind,id|path,active_id,name}`), гидрация в `onConfigure`.
+- Продолжение по памяти v1.44 (передача другой модели): код v1.45.2 уже лежал в рабочем дереве — проверен и принят: 3 UX-проблемы мультивывода закрыты.
+- `SPECIFICATION.md` приведён к факту: запись 36 в §15 (была «⏳ частично» с блоком «Проблемы UX не сделано») → ✅ со сводкой по шагам; заголовок §40 → «v1.44 — v1.45.2»; в §40.6 добавлен итог проверки перед коммитом.
+- Прогнан `python _process/check.py Prompt_Library` — ЗЕЛЁНОЕ: провалов 0 (Python-песочница 331/331, JS-смоук 94/94, аудит чист); `sync.py` — 5 файлов, `__pycache__` очищен.
+- Закоммичено и запушено: `d7ae938` → `origin/master` (pre-commit хук сам прогнал check.py — зелёный).
 
 ## 2. Итоговое состояние кода
 
-- `prompt_library_node.py` — `RETURN_NAMES` = (`category_out`, `prompt_out`, `out_2`..`out_11`); `_output_linked` проверяет output 1; `execute` возвращает `(category_path, out_text, *slot_texts)`.
-- `web/js/prompt_library.js` — `st.outsActiveFolder`, `plDrop` без проверки режима, `renderTree` рисует подключённые выходы под «🔌 Выходы» с иконкой 🔌📁 для папок, `render` для `__outs` показывает карточки папки и выбор `active_id`, `applyOutSockets` задаёт `o.title` (tooltip) и `o.hide`, `o.name` не меняется.
-- `SPECIFICATION.md` — §40 обновлён с реальным статусом (частично реализовано), проблемы UX документированы.
-- Тесты: Python 330/330 ✅, статический аудит ✅, `check.py` (Python часть) ✅, sync ✅, push ✅.
-- **JS смоук**: известная проблема с релоад-штормом в тестовом окружении (`plLiveStates` накапливает ноды между тестами → релоад-шторм). Код работает корректно в живом ComfyUI.
+- `prompt_library_node.py:854` — `RETURN_TYPES` = 12×STRING; порядок v1.45.1: 0 = `category_path`, 1 = `prompt_1 (основной)`, 2..11 = `prompt_2…11`; `execute` возвращает `(путь, текст, *слоты)`.
+- `web/js/prompt_library.js:111` — `PL_JS_VERSION = "1.45.2-icons-select"`.
+- `web/js/prompt_library.js:1223` — `st.applyOutSockets`: физический `removeOutput`/`addOutput` (`o.hide` в фронтенде 1.52 не работает вовсе), сокет с проводом не убирается, tooltip `o.title` («→ …»), выравнивание имён по def; мета сокетов — `captureOutBase` (:1205, вызывается в `onNodeCreated` :3332), урезка в rAF после `configure`; гидрация привязок — `onConfigure` :3413.
+- `web/js/prompt_library.js:1150/1175/1275` — `readOutSlots` / `nextOutSlot` / `bindOutSlot`; лимит `OUT_SLOTS_LIMIT = 10` (:1148); рядом `unbindOutSlot`, `reorderOutSlot`.
+- `web/js/prompt_library.js:1956+` (renderTree) — категория «🔌 Выходы»: строки слотов с маркером `🔌N`, ✖-отвязка, drag-перестановка; клик по карточке-выводу → `selWidget.value` + `fillDetail` (:2759) **без смены `selFolder`**; клик по папке-слоту → `outsActiveFolder`.
+- `web/js/prompt_library.js:1747` — `plDrop` в `"__outs"` создаёт слоты (карточка/папка, дубль игнорируется).
+- `SPECIFICATION.md` — §40 целиком (v1.45.2), запись 36 ✅, §17 «Текущее состояние» актуальны, в конце §40.6 итог проверки.
 
-## 3. Проблемы UX — НЕ СДЕЛАНО (передана другая модель)
+## 3. Проблемы, которые встречались (и как решали)
 
-1. **Имена проводов в UI не обновляются** — используется только `o.title` (tooltip), `o.name` остаётся `out_2`..`out_11`. Требуется отображать название подключения в UI сокета.
-2. **Сокеты могут не скрываться сразу при создании ноды** — `applyOutSockets` вызывается в `onNodeCreated`, но в живом ComfyUI может требоваться дополнительная перерисовка.
-3. **Выбор в категории «Выходы» не работает как в обычном режиме**:
-   - Не подсвечивается запись в проводнике (слева)
-   - Не показывается превью карточки
-   - Не открывается панель промпта снизу (fillDetail)
-   - Вместо этого происходит переход в папку категории (`selFolder` меняется)
-   - **Требуется**: при клике в «Выходы» → подсветка в проводнике, превью слева, панель промпта снизу, **БЕЗ смены `selFolder`**.
+- `o.hide` не скрывает сокеты (NodeSlots.vue рисует все `nodeData.outputs`, поля `hide` нет) → физический `removeOutput`/`addOutput` — как смена входов в Degg_Switch.
+- Смоук «падал релоад-штормом» → на деле догоняющий `reload()` ноды затирал тестовые entries; вылечено гейтом ответа `/list`. Смоук 94/94 ЗЕЛЁНЫЙ.
+- Шапка папки-вывода с `flex:1 1 100%` во flex-КОЛОНКЕ выдавливала карточки вниз → `flex:0 0 auto`.
+- Эмодзи почти чёрные на тёмной ноде (`color` на эмодзи не действует — цвет глифа задаёт шрифт) → `PL_ICON_FILTER = brightness(1.65)`.
 
-## 4. Текущее состояние
+## 4. Что важно не сломать при продолжении работы
 
-- Python: 330/330 ✅ | статический аудит ✅ | `check.py` (Python) ✅ | sync ✅ | push ✅
-- JS смоук: известная проблема с релоад-штормом в тестовом окружении (`plLiveStates` накапливает ноды между тестами). Код работает корректно в живом ComfyUI.
-- **Следующий шаг**: передача другой модели для доработки UX (пункты 1-3 выше).
+- Порядок выходов 0=путь, 1=промпт — менять только по явной просьбе пользователя; графы, сохранённые v1.44/v1.45, после обновления меняют значения 0/1 местами (осознанная цена, §40.6).
+- `o.name`/`localized_name` сокетов = `RETURN_NAMES` — не переименовывать вручную: `applyOutSockets` выравнивает по def, а подсказка «промпт» на пути категории и был дефект v1.44.
+- Сокет с проводом не убирать никогда; урезка/расширение списка сокетов — только в rAF после `configure` (иначе `zip(outputs, data.outputs)` съедает сокеты графа).
+- Выбор записи не сбрасывать при переходе по категориям (основной промпт `prompt_1` не должен гаснуть).
+- Перед «готово» — `python _process/check.py Prompt_Library` с показом вывода; после правок — `sync.py` + перезапуск ComfyUI.
 
-## 5. Связанные файлы
+## 5. Следующие шаги (идеи, не сделано)
 
-- `prompt_library_node.py` — `_output_linked` (output 1), `RETURN_NAMES`, `execute` возвращает `(category_path, out_text, *slot_texts)`.
-- `web/js/prompt_library.js` — `st.outsActiveFolder`, `plDrop` (без проверки режима), `renderTree` (подключённые выходы под «🔌 Выходы» с 🔌📁), `render` (`__outs` с карточками папки, выбор `active_id`), `applyOutSockets` (tooltip `o.title`, `o.hide`, `o.name` не меняется).
-- `SPECIFICATION.md` — §40 с реальным статусом, проблемы UX, заголовок версии, «Текущее состояние».
-- `tests/_test_prompt_library.py` — 330/330; `tests/_smoke_prompt_library.mjs` — известная проблема с релоад-штормом; `tests/_audit_prompt_library.mjs`.
-- `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library` — рабочая копия (после sync.py — перезапуск ComfyUI).
+- **Живая проверка** (нужен перезапуск ComfyUI, sync уже прогнан), чек-лист §40.6: сокет появляется/исчезает в Vue-режиме; не рвутся чужие провода при отвязке середины; в «Выходах» видны подсветка/превью/панель и клик не уводит в папку записи.
+- Предложено пользователю (ждёт ответа): дополнить скилл `comfyui-dom-widget-sizing` двумя ловушками этой сессии — `flex:1 1 100%` на шапке в flex-колонке и эмодзи, не берущие CSS `color`.
+
+## 6. Связанные файлы
+
+- `prompt_library_node.py` — слоты `slots_out`, `RETURN_TYPES`/`RETURN_NAMES`, `execute`.
+- `web/js/prompt_library.js` — `applyOutSockets`, `bindOutSlot`, `renderTree` («🔌 Выходы»), `plDrop("__outs")`, `fillDetail`.
+- `SPECIFICATION.md` — §40 (мультивывод), §15 запись 36, §17.
+- `tests/_test_prompt_library.py` (331/331), `tests/_smoke_prompt_library.mjs` (94/94), `tests/_audit_prompt_library.mjs`.
+- `D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\Prompt_Library` — рабочая копия (sync прогнан, ждёт перезапуска ComfyUI).
