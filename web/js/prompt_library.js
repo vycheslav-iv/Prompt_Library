@@ -50,6 +50,14 @@ function plIcon(text, extra) {
     if (_gl) s.style.transform = "translateY(" + _gl + "px)";
     return s;
 }
+// Обычный текстовый пролёт (НЕ текстовый узел): фильтр яркости действует на
+// элемент, а заглушки тестов и `ftext` читают текст по ЭЛЕМЕНТАМ — сырой
+// текстовый узел рядом с пролётом они не видят (v1.55).
+function plTextSpan(text) {
+    const s = document.createElement("span");
+    s.textContent = text;
+    return s;
+}
 // Название карточки: [🔌N] [📌] [📷/🎬] + имя. Текст иконок остаётся в DOM
 // (ftext в тестах и поиск по названию не ломаются), меняется только раскладка.
 // dense=true — плотный ряд «Списка» (превью слева, строка по центру): там камера
@@ -137,7 +145,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.53-delete-cancel-pair";
+const PL_JS_VERSION = "1.55-tree-plug-lit";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -1909,8 +1917,21 @@ const reload = async () => {
                 if (isFolder) row.title = "Клик — открыть · Ctrl+клик — пометить · Shift+клик — диапазон";
                 const name = document.createElement("span");
                 name.style.cssText = "flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                name.textContent = (marked ? "☑ " : "") + label;
                 name.title = isFolder ? key : label;
+                // v1.55: «🔌» в подписи — ОТДЕЛЬНЫМ пролётом с тем же фильтром, что
+                // на карточке и в строке слота. Фильтр не может осветлить часть
+                // текстового узла, поэтому подпись разбивается на пролёты; текст
+                // остаётся в DOM целиком (ftext/поиск читают его по элементам).
+                // Отчёт пользователя: «значок вилки в категории Выходы не был
+                // осветлён в отличие от этого же значка на карточках».
+                const plugLabel = /^(🔌)\s?(.*)$/u.exec(label || "");
+                if (plugLabel) {
+                    if (marked) name.appendChild(plTextSpan("☑ "));
+                    name.appendChild(plIcon("🔌"));
+                    if (plugLabel[2]) name.appendChild(plTextSpan(" " + plugLabel[2]));
+                } else {
+                    name.textContent = (marked ? "☑ " : "") + label;
+                }
                 row.appendChild(name);
                 // Категория, подключённая к доп. выходу, носит номер провода
                 // прямо в проводнике — видно, что куда уходит (§40).
@@ -1919,7 +1940,7 @@ const reload = async () => {
                     const bn = document.createElement("span");
                     bn.textContent = "🔌" + slotOfFolder.i;
                     bn.title = `Категория подключена к выходу «промпт ${slotOfFolder.i}»`;
-                    bn.style.cssText = "color:#7fe0a8;font-size:10px;flex-shrink:0;padding:0 2px;";
+                    bn.style.cssText = PL_ICON_FILTER + "color:#7fe0a8;font-size:10px;flex-shrink:0;padding:0 2px;";
                     row.appendChild(bn);
                 }
                 // Папки можно таскать; любая строка — дроп-зона
@@ -2040,7 +2061,10 @@ const reload = async () => {
                 st.tree.innerHTML = "";
                 // Порядок строк для Shift-диапазона (включая служебные — при
                 // применении диапазона они пропускаются, метятся только папки).
-                st.folderOrder = ["__all", "__fav", "__outs", "__root"];
+                // Порядок строк совпадает с порядком отрисовки НИЖЕ: служебные
+                // ветки, затем привязки «Выходов», затем «Без категории», затем
+                // папки — иначе Shift-диапазон считает диапазон по чужому списку.
+                st.folderOrder = ["__all", "__fav", "__outs"];
                 st.tree.appendChild(folderRow("__all", "📚 Всё", 0, false));
                 st.tree.appendChild(folderRow("__fav", "★ Избранное", 0, false));
                 // v1.44 (§40): категория привязок доп. выходов (виртуальная ветка)
@@ -2101,6 +2125,11 @@ const reload = async () => {
                     st.tree.appendChild(row);
                     st.folderOrder.push("__outs_slot_" + slot.i);
                 }
+                // Служебная ветка «Без категории» (folder === ""). Строка была
+                // потеряна в v1.44 (c2dd0bd) при вставке строк «🔌 Выходы» —
+                // записи без категории оставались только во «Всё» (v1.54).
+                st.tree.appendChild(folderRow("__root", "📄 Без категории", 0, false));
+                st.folderOrder.push("__root");
                 const all = [...new Set([...st.folders, ...st.entries.map((e) => e.folder).filter(Boolean)])];
                 all.sort((a, b) => {
                     const aP = st.pinnedFolders.has(a);

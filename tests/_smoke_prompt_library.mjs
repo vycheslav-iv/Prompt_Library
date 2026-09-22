@@ -2326,6 +2326,24 @@ await run("slots: папка-вывод — карточки с превью, к
   const folderSlotRow = st.tree.children.find((r) => ftext(r).includes("ПапкаA") && ftext(r).includes("🔌2"));
   check("папка-вывод видна в дереве с номером провода (📁 ПапкаA + 🔌2)", !!folderSlotRow,
     st.tree.children.map((r) => ftext(r)).join(" ; "));
+  // v1.55: ЛЮБОЙ значок 🔌 в дереве обязан быть осветлён так же, как на
+  // карточках. Обход всего дерева, а не поиск одного элемента: у папки-вывода
+  // в дереве сразу ДВА места с 🔌 — строка слота (пролёт с фильтром, v1.45.7) и
+  // бейдж «🔌2» у самой строки папки (был без фильтра). Поиск «первого
+  // подходящего» находил только строку слота и молчал о бейдже.
+  const treePlugs = [];
+  const walkPlugs = (el) => {
+    for (const c of (el.children || [])) {
+      const t = String(c.textContent || "");
+      if (!(c.children || []).length && t.includes("🔌")) treePlugs.push(c);
+      walkPlugs(c);
+    }
+  };
+  walkPlugs(st.tree);
+  const darkPlugs = treePlugs.filter((s) => !String(s.style.cssText).includes("brightness(1.65)"));
+  check("каждый 🔌 в дереве осветлён (и строка слота, и бейдж у папки): найдено >= 2, тёмных 0",
+    treePlugs.length >= 2 && darkPlugs.length === 0,
+    `всего 🔌: ${treePlugs.length}; без фильтра: ${darkPlugs.map((s) => s.textContent + " | " + s.style.cssText).join(" ;; ") || "—"}`);
   folderSlotRow.onclick({});
   check("клик открыл папку внутри «Выходов»", st.selFolder === "__outs" && st.outsActiveFolder === "ПапкаA");
   st.render();
@@ -2711,7 +2729,16 @@ await run("slots: строка «🔌 Выходы» в дереве откры�
   st.renderTree(); st.render();
   const outsRow = st.tree.children[2];
   check("третья строка дерева — категория выходов",
-    outsRow && outsRow.children[0] && outsRow.children[0].textContent === "🔌 Выходы");
+    !!outsRow && ftext(outsRow).includes("🔌") && ftext(outsRow).includes("Выходы"),
+    outsRow ? ftext(outsRow) : "строки нет");
+  // v1.55: вилка в строке «Выходы» — таким же пролётом с фильтром карточек, а не
+  // тёмным текстовым узлом (отчёт пользователя: значок не был осветлён).
+  const plugSpan = outsRow && (outsRow.children[0].children || [])
+    .find((s) => String(s.textContent || "") === "🔌");
+  check("вилка в строке «Выходы» осветлена, как на карточках (brightness 1.65)",
+    !!plugSpan && String(plugSpan.style.cssText).includes("brightness(1.65)"),
+    plugSpan ? String(plugSpan.style.cssText) : "пролёта с 🔌 нет — значок в текстовом узле");
+  check("подпись строки не потерялась", ftext(outsRow).includes("Выходы"), ftext(outsRow));
   outsRow.onclick({});
   check("клик переключил selFolder на __outs", st.selFolder === "__outs");
   check("save_folder виджет получил __outs",
@@ -2723,6 +2750,40 @@ await run("slots: строка «🔌 Выходы» в дереве откры�
     rows.length === 1 && ftext(rows[0]).includes("записи нет"),
     st.list.children.map((c) => ftext(c)).join(" ; "));
   check("сокет выхода 2 после всего жив", node.outputs.length === 3 && node.outputs[2].name === "prompt_2");
+});
+
+// --- v1.54: «📄 Без категории» — служебная ветка дерева ---------------------
+// Баг: строка исчезла из проводника (c2dd0bd, v1.44 — при вставке строк
+// «🔌 Выходы» её appendChild удалили вместе с комментарием, а фраза
+// «перед Без категории» осталась). Следствие: записи без категории (folder="")
+// попадали в список ТОЛЬКО через «Всё»; отдельной ветки не было вовсе.
+await run("v1.54: строка «📄 Без категории» в дереве — записи без категории", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.folders.push("Фото");
+  st.entries.push(mkSlotEntry("free1", ""), mkSlotEntry("in1", "Фото"));
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  const labels = st.tree.children.map((r) => ftext(r));
+  check("в дереве есть строка «📄 Без категории»",
+    labels.some((t) => t.includes("Без категории")), labels.join(" ; "));
+  const rootRow = st.tree.children.find((r) => ftext(r).includes("Без категории"));
+  check("она идёт ПОСЛЕ «🔌 Выходы» (порядок: Всё / Избранное / Выходы / Без категории)",
+    !!rootRow && st.tree.children.indexOf(rootRow) === 3, labels.join(" ; "));
+  // Значок закреплён проверкой: 📥 занят кнопкой «📥 Импорт» в ряду действий,
+  // у служебной ветки — «📄» (лист). Смена значка = осознанная правка теста.
+  check("подпись строки — ровно «📄 Без категории» (не 📥 — он у кнопки «Импорт»)",
+    !!rootRow && ftext(rootRow) === "📄 Без категории", rootRow ? ftext(rootRow) : "строки нет");
+  await rootRow.onclick({});
+  check("клик переключил selFolder на __root", st.selFolder === "__root", st.selFolder);
+  check("save_folder виджет получил __root",
+    node.widgets.find((w) => w.name === "save_folder").value === "__root");
+  const shown = st.list.children.map((c) => ftext(c));
+  check("в списке — только записи БЕЗ категории (записи из папок не мешаются)",
+    shown.some((t) => t.includes("free1")) && !shown.some((t) => t.includes("in1")),
+    shown.join(" ; "));
 });
 
 await run("v1.46: галерея — кнопки «🌐 Экспорт в HTML» (ряд) и «🌐 В HTML» (панель карточки)", () => {
