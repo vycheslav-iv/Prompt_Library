@@ -145,7 +145,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.57-import-sources";
+const PL_JS_VERSION = "1.58-png-files";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -3450,10 +3450,19 @@ const reload = async () => {
                 }
                 st.importMdFromFolder(st.importTreeDefault(target));
             };
-            // PNG из ComfyUI: без диалога структуры — категорий в PNG нет вовсе.
+            // PNG из ComfyUI (v1.58): выбор способа — папка со всеми PNG либо
+            // отдельные файлы. Категорий в PNG нет вовсе, поэтому после выбора
+            // файлов диалога структуры не бывает.
             st.importPickPng = (target) => {
                 if (st.importGuard(target)) return;
-                st.importPngFromFolder();
+                st.uiPanel({
+                    title: "🖼 PNG из ComfyUI",
+                    subtitle: "Папка — все PNG в выбранном каталоге; файлы — один или несколько на выбор.",
+                    items: [
+                        { label: "📂 Папка со всеми PNG", onClick: () => st.importPngFromFolder() },
+                        { label: "🖼 Отдельные файлы (один или несколько)", onClick: () => st.pickPngFiles() },
+                    ],
+                });
             };
             // HTML-галерея: структура карточек как категории — то же решение, что
             // у .md (галочка появляется только для «Без категории»).
@@ -3599,6 +3608,88 @@ const reload = async () => {
                 await walk(dirHandle, "");
                 return out;
             };
+            // Чтение файла в байты: arrayBuffer там, где есть, иначе FileReader
+            // (старые браузеры). Единая точка для папки и отдельных файлов.
+            st._fileToBytes = async (file) => {
+                if (!file) return null;
+                try {
+                    if (file.arrayBuffer) return new Uint8Array(await file.arrayBuffer());
+                    return new Uint8Array(await new Promise((res, rej) => {
+                        const fr = new FileReader();
+                        fr.onload = () => res(fr.result);
+                        fr.onerror = rej;
+                        fr.readAsArrayBuffer(file);
+                    }));
+                } catch (e) { return null; }
+            };
+            // Разбор PNG-чанков в запись: apи-граф → положительный промпт (или
+            // UI-граф → widgets), граф уходит в запись (а не только в обложку):
+            // на PNG тяжелее 4МБ обложка сжимается и чанк теряется, а «Параметры
+            // генерации» берутся из графа записи. Одинаково для папки и файлов.
+            st.pngItemFromBuf = (buf) => {
+                let prompt = "";
+                let workflow = null;
+                if (buf && buf.length) {
+                    try {
+                        const chunks = st.pngChunks(buf);
+                        let api = null, ui = null;
+                        if (chunks.prompt) {
+                            const p = JSON.parse(chunks.prompt);
+                            if (p && typeof p === "object" && !Array.isArray(p)) api = p;
+                        }
+                        if (!api && chunks.workflow) {
+                            const u = JSON.parse(chunks.workflow);
+                            if (u && typeof u === "object" && !Array.isArray(u)) ui = u;
+                        }
+                        prompt = st.promptFromGraph(api || {});
+                        if (!prompt && ui) prompt = st.promptFromWorkflow(ui);
+                        workflow = api || ui || null;
+                    } catch (e) { /* чанк есть, но не JSON — оставляем пусто */ }
+                }
+                return { prompt, workflow };
+            };
+            // Импорт выбранных файлов (v1.58): один или несколько PNG из
+            // штатного файлового диалога работает в любом браузере — в отличие
+            // от showDirectoryPicker (Chrome/Edge). src делаем уникальным (по нему
+            // приклеивается обложка): два файла с одинаковым именем получили бы
+            // один src и вторая обложка перезаписала бы первую.
+            st.importPngFromFiles = async (files) => {
+                if (!files || !files.length) return;
+                st.setExportProgress(true, 0, files.length);
+                st.hintSticky = `Импорт: читаю ${files.length} PNG…`;
+                st.renderHint?.();
+                const items = [];
+                const used = new Set();
+                for (const f of files) {
+                    const buf = await st._fileToBytes(f);
+                    const parsed = st.pngItemFromBuf(buf);
+                    const base = f.name.replace(/\.png$/i, "");
+                    let src = f.name, n = 2;
+                    while (used.has(src)) src = `${base}_${n++}.png`;
+                    used.add(src);
+                    items.push({ title: base, prompt: parsed.prompt, folder: "", created_at: "",
+                        favorite: false, media: "image", workflow: parsed.workflow, src,
+                        _cover: { name: f.name, size: f.size, getFile: async () => f } });
+                }
+                await st.importRun(items, false);
+            };
+            // Файловый диалог (v1.58): скрытый input — тот же паттерн, что у
+            // текстового импорта (§50.4), только accept под PNG.
+            st.pickPngFiles = () => {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.multiple = true;
+                input.accept = "image/png,.png";
+                input.style.display = "none";
+                input.onchange = async () => {
+                    const files = Array.from(input.files || []).filter((f) => /\.png$/i.test(f.name));
+                    if (!files.length) return;
+                    await st.importPngFromFiles(files);
+                };
+                document.body.appendChild(input);
+                input.click();
+                setTimeout(() => { try { document.body.removeChild(input); } catch (e) { /* silent */ } }, 2000);
+            };
             // Ряд источников: PNG из ComfyUI — обложка сам файл («raw», он же
             // разбор чанка), категорий нет.
             st.importPngFromFolder = async () => {
@@ -3629,42 +3720,13 @@ const reload = async () => {
                 }
                 const items = [];
                 for (const p of found) {
-                    let buf = null;
-                    try {
-                        const file = await p.file.getFile();
-                        if (file.arrayBuffer) buf = new Uint8Array(await file.arrayBuffer());
-                        else buf = new Uint8Array(await new Promise((res, rej) => {
-                            const fr = new FileReader();
-                            fr.onload = () => res(fr.result);
-                            fr.onerror = rej;
-                            fr.readAsArrayBuffer(file);
-                        }));
-                    } catch (e) { /* файл не прочитался — останется без промпта */ }
-                    let prompt = "";
-                    let workflow = null;
-                    if (buf && buf.length) {
-                        try {
-                            const chunks = st.pngChunks(buf);
-                            let api = null, ui = null;
-                            if (chunks.prompt) {
-                                const p = JSON.parse(chunks.prompt);
-                                if (p && typeof p === "object" && !Array.isArray(p)) api = p;
-                            }
-                            if (!api && chunks.workflow) {
-                                const u = JSON.parse(chunks.workflow);
-                                if (u && typeof u === "object" && !Array.isArray(u)) ui = u;
-                            }
-                            prompt = st.promptFromGraph(api || {});
-                            if (!prompt && ui) prompt = st.promptFromWorkflow(ui);
-                            // Граф уходит в запись (а не только в обложку): на
-                            // PNG тяжелее 4МБ обложка сжимается и чанк теряется,
-                            // а «Параметры генерации» берутся из графа записи.
-                            workflow = api || ui || null;
-                        } catch (e) { /* чанк есть, но не JSON — оставляем пусто */ }
-                    }
+                    let file = null;
+                    try { file = await p.file.getFile(); } catch (e) { /* файл не прочитался — без промпта */ }
+                    const parsed = st.pngItemFromBuf(file ? await st._fileToBytes(file) : null);
                     const base = p.rel.split("/").pop().replace(/\.png$/i, "");
-                    items.push({ title: base, prompt, folder: "", created_at: "", favorite: false,
-                        media: "image", workflow, src: p.rel, _cover: p.file });
+                    items.push({ title: base, prompt: parsed.prompt, folder: "", created_at: "",
+                        favorite: false, media: "image", workflow: parsed.workflow, src: p.rel,
+                        _cover: p.file });
                 }
                 await st.importRun(items, false);
             };

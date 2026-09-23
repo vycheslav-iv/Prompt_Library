@@ -3473,6 +3473,93 @@ await run("v1.57: importRun переживает ok без валидного JS
   }
 });
 
+// --- v1.58: PNG — выбор «папка / отдельные файлы» (см. §50.7) -----------------
+await run("v1.58: PNG — меню-выбор открывает панель с папкой и файлами", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const origToast = st.toast;
+  st.toast = () => {};
+  try {
+    st.selFolder = "Коллекция";
+    const before = documentStub.body.children.length;
+    st.importPickPng("Коллекция");
+    check("v1.58: выбор PNG открывает оверлей (а не сразу диалог папки)",
+      documentStub.body.children.length === before + 1,
+      String(documentStub.body.children.length));
+    const panel = documentStub.body.children[documentStub.body.children.length - 1];
+    const btns = walkEls(panel).filter((e) => typeof e.onclick === "function");
+    const sources = btns.filter((b) => String(b.textContent) !== "Отмена");
+    check("v1.58: в панели два источника + «Отмена», оба активны",
+      btns.length === 3 && sources.length === 2 && sources.every((b) => !b.disabled),
+      btns.map((b) => String(b.textContent)).join(" | "));
+    check("v1.58: метки — папка со всеми PNG и отдельные файлы",
+      sources.some((b) => b.textContent.includes("Папка") && b.textContent.includes("PNG"))
+        && sources.some((b) => /файл/i.test(b.textContent)),
+      sources.map((b) => String(b.textContent)).join(" | "));
+    const beforeCancel = documentStub.body.children.length;
+    btns[btns.length - 1].onclick();
+    check("v1.58: «Отмена» снимает оверлей",
+      documentStub.body.children.length === beforeCancel - 1,
+      String(documentStub.body.children.length));
+  } finally {
+    st.toast = origToast;
+  }
+});
+
+await run("v1.58: PNG — импорт отдельных файлов (src уникален, обложка по src)", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const origFetch = sandbox.fetch;
+  const origToast = st.toast;
+  st.toast = () => {};
+  st.fileToDataUrl = async () => "data:image/png;base64,RklMRQ";
+  const posts = [];
+  const graph = { "5": { class_type: "KSampler", inputs: { positive: ["6", 0] } },
+    "6": { class_type: "CLIPTextEncode", inputs: { text: "луч света в окне" } } };
+  const goodPng = makePng([pngTexT("prompt", JSON.stringify(graph))]);
+  const fakeFile = (name, bytes) => ({ name, size: bytes.length,
+    arrayBuffer: async () => new Uint8Array(bytes) });
+  sandbox.fetch = async (u, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : null;
+    posts.push({ url: String(u), body });
+    if (String(u).includes("/prompt_library/import")) {
+      return jsonResponse({ ok: true, created: [
+        { id: "f1", title: "Первое", folder: "", src: "Первое.png" },
+        { id: "f2", title: "Первое", folder: "", src: "Первое_2.png" } ],
+        skipped: [], failed: [], free: 100, total: 2 });
+    }
+    if (String(u).includes("/prompt_library/list")) return jsonResponse(listResponse);
+    return jsonResponse({});
+  };
+  try {
+    st.selFolder = "Коллекция";
+    await st.importPngFromFiles([fakeFile("Первое.png", goodPng), fakeFile("Первое.png", goodPng)]);
+    const imp = posts.find((p) => p.url.includes("/prompt_library/import"));
+    check("v1.58: файлы ушли записями, промпт из чанка, категория пуста",
+      imp && imp.body.items.length === 2
+        && imp.body.items.every((it) => it.prompt === "луч света в окне")
+        && imp.body.items.every((it) => it.folder === "" && it.media === "image"),
+      JSON.stringify(imp && imp.body.items));
+    check("v1.58: одинаковые имена файлов получают уникальные src",
+      imp && imp.body.items[0].src === "Первое.png" && imp.body.items[1].src === "Первое_2.png",
+      JSON.stringify(imp && imp.body.items.map((i) => i.src)));
+    check("v1.58: граф уходит в запись (items.workflow)",
+      imp && imp.body.items.every((it) => it.workflow && it.workflow["6"]),
+      JSON.stringify(imp && imp.body.items));
+    const covers = posts.filter((p) => p.url.includes("attach_preview"));
+    check("v1.58: обложки обеих записей привязаны (по уникальному src)",
+      covers.length === 2 && new Set(covers.map((c) => c.body.id)).size === 2,
+      JSON.stringify(covers.map((c) => c.body.id)));
+    check("v1.58: отчёт — создано 2",
+      /создано 2/.test(String(st.hintSticky)), String(st.hintSticky));
+  } finally {
+    sandbox.fetch = origFetch;
+    st.toast = origToast;
+  }
+});
+
 await run("v1.57: HTML-галерея — парсинг собственной карточки (round-trip)", () => {
   const node = mkSlotNode();
   const st = node._pl;

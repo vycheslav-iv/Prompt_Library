@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (v1.57, 2026-09-23)
+# Память сессии — Prompt Library (v1.58, 2026-09-23)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -37,7 +37,27 @@
 `_workflow_chunk_from_bytes` (граф из обложки ≤4МБ). Запись графа —
 `workflows/{id}.json`. Тесты 430/430.
 
-**JS** (`web/js/prompt_library.js`, `PL_JS_VERSION = "1.57-import-sources"`, :148):
+**JS** (`web/js/prompt_library.js`, `PL_JS_VERSION = "1.58-png-files"`, :148):
+- `st.importPickPng` (:3454) — БОЛЬШЕ не открывает сразу пикер папки: сначала
+  панель-выбор (паттерн `st.uiPanel` §50.6): «📂 Папка со всеми PNG» →
+  `st.importPngFromFolder()` (прежний `showDirectoryPicker`-путь) / «🖼 Отдельные
+  файлы (один или несколько)» → `st.pickPngFiles()` — скрытый
+  `input type="file" accept="image/png,.png" multiple` (паттерн текстового импорта
+  §50.4, работает в ЛЮБОМ браузере, а не только Chrome/Edge как
+  `showDirectoryPicker`); «✖ Отмена» закрывает без импорта.
+- Общие PNG-хелперы (вынесены из дублирования папка/файлы):
+  `st._fileToBytes(file)` — чтение в `Uint8Array` (arrayBuffer, фолбэк FileReader,
+  `null` на ошибке); `st.pngItemFromBuf(buf)` (район :3660) — разбор чанка
+  (tEXt/iTXt, пакетный `src` = title, обложка, граф в workflow через §50.3);
+  `st.importPngFromFiles(files)` — уникализация `src` (`used` Set → `_2`, `_3`),
+  `importRun(items, false)`, отчёт «создано N / дубликатов M» + тост; коллизия
+  `src` (два `Первое.png`) → уникальный `Первое_2.png`, иначе серверное эхо
+  `bySrc` перезаписал бы первую обложку второй.
+- Меню «📥 Импорт»: `importPickPng` (:3454) = панель-выбор; `importPickText`
+  (:3477), `st.importPngFromFiles` (район :36xx), `st.importPngFromFolder`
+  (:3604) — отрефакторен на общие хелперы; `pickPngFiles` (:36xx).
+- `st.pickPngFiles` — скрытый `input` с `accept="image/png,.png"` removed через
+  `setTimeout` 2000 (как текстовый импорт); multiple → `importPngFromFiles`.
 - Меню импорта: `st.importStart` + `importGuard` (★/Выходы — отказ, :3428) +
   `importPickTree/Png/Html/Text` (:3437-:3477).
 - ОБЩИЙ ПОТОК: `importSummary` (:3278) → `importRun(items, tree, extra)` (:3293) —
