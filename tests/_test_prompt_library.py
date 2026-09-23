@@ -2268,6 +2268,207 @@ check("41c: Degg Res Set без named-формы не выдумывает",
       and mod._degg_res_set_output(_drs50, 5) is None)
 
 
+# --- 49. импорт в базу: цель, дубли, нормализация, лимит (v1.56) --------------
+# Импорт — батч-операция «создать много записей за раз». Правила, которые тут
+# закрепляются (решения пользователя):
+#   • дубликат = тот же текст ПОСЛЕ нормализации (CRLF/хвостовые пробелы не
+#     делают копию) — пропускаем и отчитываемся, существующие не трогаем;
+#   • цель берётся из проводника ноды: «Всё» → категория из шапки .md как есть,
+#     реальная папка X → X + остаток категории (без дубля «X/X/…»),
+#     «Без категории» → плоско в корень (галочка tree=true — как при «Всё»);
+#   • в базу нельзя записать больше MAX_ENTRIES: при нехватке места — отказ
+#     БЕЗ частичной записи (иначе _trim_entries молча съел бы хвост);
+#   • дата создания, избранное, тип и источник из файла переносятся в запись.
+print("\n49. Импорт в базу (пакетная запись)")
+_IMP = ("POST", "/prompt_library/import")
+check("роут /prompt_library/import зарегистрирован (v1.56)", _IMP in handlers)
+
+if _IMP in handlers:
+    # Контрольная база: тесты лимита не должны зависеть от того, что делали
+    # предыдущие секции (секция 6 доводит базу ровно до MAX_ENTRIES).
+    lib_file.write_text(json.dumps({"entries": [
+        {"id": "impseed01", "hash": mod._dedup_hash("стартовый текст", "Старт"),
+         "title": "стартовый", "prompt": "стартовый текст", "folder": "Старт",
+         "category": "Старт", "favorite": False, "pinned": False,
+         "created_at": "2019-01-01T00:00:00", "last_used": None, "use_count": 0,
+         "preview": None, "workflow": None, "media": None},
+    ], "folders": ["Старт"]}, ensure_ascii=False), encoding="utf-8")
+    _broadcasts.clear()
+
+    # (а) базовая пакетная запись
+    r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+        {"title": "Импорт один", "prompt": "первый импортный текст",
+         "folder": "Импорт/Вложенная", "created_at": "2020-01-02T03:04:05",
+         "favorite": True, "media": "video", "src": "D:/exp/Первый.md"},
+        {"title": "Импорт два", "prompt": "второй импортный текст",
+         "folder": "Импорт", "created_at": "2020-01-03T03:04:05"},
+    ]}))
+    check("/import создаёт обе записи (200, created=2)",
+          r["status"] == 200 and len(r["json"].get("created", [])) == 2, str(r))
+    ent, fold = mod._load_db()
+    one = next((e for e in ent if e["prompt"] == "первый импортный текст"), None)
+    two = next((e for e in ent if e["prompt"] == "второй импортный текст"), None)
+    check("дата из файла сохраняется (не подменяется на «сейчас»)",
+          bool(one) and one["created_at"] == "2020-01-02T03:04:05",
+          str(one and one.get("created_at")))
+    check("избранное, тип, название и источник переносятся",
+          bool(one) and one["favorite"] is True and one["media"] == "video"
+          and one["title"] == "Импорт один" and one.get("import_src") == "D:/exp/Первый.md",
+          str(one))
+    check("в created вернулся src — по нему клиент привяжет обложки",
+          r["json"]["created"][0].get("src") == "D:/exp/Первый.md",
+          str(r["json"]["created"][0].get("src")))
+    check("цель «Всё»: категория из шапки встаёт как есть",
+          bool(one) and one["folder"] == "Импорт/Вложенная",
+          str(one and one.get("folder")))
+    check("hash пересчитан под папку (дедуп по hash не ломается)",
+          bool(one) and one["hash"] == mod._dedup_hash(one["prompt"], one["folder"]))
+    check("новая папка и её родители зарегистрированы",
+          "Импорт" in fold and "Импорт/Вложенная" in fold, str(fold))
+    check("импорт рассылает broadcast (соседние ноды перечитают)",
+          _broadcasts == ["prompt_library/refresh"], str(_broadcasts))
+    check("запись без названия получает авто-название по тексту",
+          bool(two) and bool(two["title"]), str(two and two.get("title")))
+
+    # (б) дубль против базы: пропускаем и говорим, ГДЕ он лежит
+    _broadcasts.clear()
+    r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+        {"prompt": "первый импортный текст", "folder": "Совсем другая"},
+    ]}))
+    sk = (r["json"].get("skipped") or [{}])[0]
+    check("дубль пропущен: created пуст, база не выросла",
+          r["status"] == 200 and r["json"].get("created") == []
+          and len(mod._load_db()[0]) == len(ent), str(r))
+    check("в отчёте видно существующую запись и её папку",
+          sk.get("exists_id") == (one["id"] if one else None)
+          and sk.get("exists_folder") == "Импорт/Вложенная" and sk.get("reason") == "db", str(sk))
+    check("при полном пропуске broadcast не шлётся", _broadcasts == [], str(_broadcasts))
+
+    # (в) нормализация: CRLF и хвостовые пробелы не делают копию
+    r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+        {"prompt": "второй импортный текст\r\n   \r\n \t", "folder": ""},
+    ]}))
+    check("CRLF/хвостовые пробелы не создают дубль-клон",
+          r["json"].get("created") == [] and r["json"]["skipped"][0]["reason"] == "db", str(r))
+
+    # (г) дубль внутри самого пакета
+    r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+        {"prompt": "пакетный уникальный текст", "folder": "Пакет"},
+        {"prompt": "пакетный уникальный текст", "folder": "Пакет/Вторая"},
+    ]}))
+    check("внутри пакета второй экземпляр пропущен (reason=batch)",
+          len(r["json"].get("created", [])) == 1 and r["json"]["skipped"][0]["reason"] == "batch",
+          str(r))
+
+    # (д) цель — реальная папка: префикс не дублируется, чужой остаток уходит под неё
+    r = h("POST", "/prompt_library/import", Req({"target": "Коллекция", "items": [
+        {"prompt": "цель-своя", "folder": "Коллекция/Под"},
+        {"prompt": "цель-равно", "folder": "Коллекция"},
+        {"prompt": "цель-чужая", "folder": "Другая/Под"},
+        {"prompt": "цель-пустая", "folder": ""},
+    ]}))
+    by = {e["prompt"]: e["folder"] for e in mod._load_db()[0]}
+    check("цель X: своя подпапка остаётся X/Под (без дубля X/X)",
+          by.get("цель-своя") == "Коллекция/Под", str(by.get("цель-своя")))
+    check("цель X: запись самой папки кладётся прямо в X",
+          by.get("цель-равно") == "Коллекция", str(by.get("цель-равно")))
+    check("цель X: чужая категория уходит ПОД X",
+          by.get("цель-чужая") == "Коллекция/Другая/Под", str(by.get("цель-чужая")))
+    check("цель X: запись без категории — в X",
+          by.get("цель-пустая") == "Коллекция", str(by.get("цель-пустая")))
+
+    # (е) «Без категории»: плоско и с галочкой «сохранить структуру»
+    h("POST", "/prompt_library/import", Req({"target": "__root", "items": [
+        {"prompt": "плоско-текст", "folder": "Импорт/Вложенная"},
+    ]}))
+    by = {e["prompt"]: e["folder"] for e in mod._load_db()[0]}
+    check("«Без категории» без галочки: запись в корень",
+          by.get("плоско-текст") == "", str(by.get("плоско-текст")))
+    h("POST", "/prompt_library/import", Req({"target": "__root", "tree": True, "items": [
+        {"prompt": "плоско-структура", "folder": "Импорт/Вложенная"},
+    ]}))
+    by = {e["prompt"]: e["folder"] for e in mod._load_db()[0]}
+    check("«Без категории» с галочкой: структура восстанавливается",
+          by.get("плоско-структура") == "Импорт/Вложенная", str(by.get("плоско-структура")))
+
+    # (ж) служебные ветки — не место хранения
+    for _tgt in ("__fav", "__outs"):
+        r = h("POST", "/prompt_library/import", Req({"target": _tgt, "items": [{"prompt": "в служебную"}]}))
+        check(f"цель {_tgt} отклонена (400)", r["status"] == 400, str(r))
+
+    # (з) мусорные элементы отчитываются, а не создаются
+    r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+        {"title": "пустышка", "prompt": "   "},
+        {"prompt": "мусор рядом с валидным"},
+    ]}))
+    check("элемент без текста идёт в failed с причиной",
+          r["json"].get("failed") and r["json"]["failed"][0].get("reason") == "empty", str(r))
+    r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [{"prompt": "  "}]}))
+    check("пакет целиком из пустышек не пишется (400)", r["status"] == 400, str(r))
+    r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": []}))
+    check("пустой список — 400, а не пустая запись", r["status"] == 400, str(r))
+
+    # (к) обложка несёт граф: импорт .md возвращает и параметры генерации
+    # Наш экспорт выгружает превью вместе со встроенным чанком workflow, поэтому
+    # импорт .md не теряет «Параметры генерации» в галерее (v1.56).
+    try:
+        import base64
+        import io
+        from PIL import Image, PngImagePlugin
+
+        def _png49(workflow=None):
+            info = PngImagePlugin.PngInfo()
+            if workflow is not None:
+                info.add_text("workflow", json.dumps(workflow, ensure_ascii=False, separators=(",", ":")))
+            buf = io.BytesIO()
+            Image.new("RGB", (48, 32), (180, 40, 40)).save(buf, "PNG", pnginfo=info)
+            return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+        _wf49 = {"nodes": [
+            {"id": 1, "type": "KSampler", "widgets_values": [0, "euler", "beta", 12, 1, 1]},
+            {"id": 2, "type": "CLIPTextEncode", "widgets_values": ["текст из графа"]},
+        ], "links": []}
+        r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+            {"title": "С обложкой", "prompt": "текст обложки-графа"}]}))
+        _id49 = r["json"]["created"][0]["id"]
+        r = h("POST", "/prompt_library/attach_preview",
+              Req({"id": _id49, "preview_data": _png49(_wf49)}))
+        _e49 = next(e for e in mod._load_db()[0] if e["id"] == _id49)
+        check("обложка с чанком workflow вернула граф записи",
+              r["status"] == 200 and mod._entry_workflow(_e49) == _wf49, str(r))
+        check("граф лёг ФАЙЛОМ workflows/{id}.json, а не раздул базу",
+              _e49.get("workflow_file") == f"workflows/{_id49}.json"
+              and not _e49.get("workflow"), str(_e49.get("workflow_file")))
+        check("сохранённое превью тоже несёт чанк (галерея читает параметры из него)",
+              mod._preview_workflow_chunk(mod._preview_path(_id49)) == _wf49)
+
+        r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+            {"prompt": "без графа"}]}))
+        _id49b = r["json"]["created"][0]["id"]
+        r = h("POST", "/prompt_library/attach_preview",
+              Req({"id": _id49b, "preview_data": _png49(None)}))
+        _e49b = next(e for e in mod._load_db()[0] if e["id"] == _id49b)
+        check("PNG без чанка не выдумывает граф (и не падает)",
+              r["status"] == 200 and mod._entry_workflow(_e49b) is None, str(r))
+        check("превью при этом сохранилось", bool(_e49b.get("preview")), str(_e49b.get("preview")))
+    except ImportError as exc:  # PIL нет — проверять нечего, но и молчать нельзя
+        check(f"(к) блок с обложкой пропущен: {exc}", False, "PIL нужен для превью")
+
+    # (и) лимит базы: отказ БЕЗ частичной записи
+    free = mod.MAX_ENTRIES - len(mod._load_db()[0])
+    many_items = [{"prompt": f"лимит-{i}"} for i in range(free + 1)]
+    before = len(mod._load_db()[0])
+    r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": many_items}))
+    check("не влезает в MAX_ENTRIES -> 400 с числами (free/want/max)",
+          r["status"] == 400 and r["json"].get("free") == free
+          and r["json"].get("want") == free + 1 and r["json"].get("max") == mod.MAX_ENTRIES, str(r))
+    check("при отказе по лимиту база не изменилась вообще (нет частичной записи)",
+          len(mod._load_db()[0]) == before, str(len(mod._load_db()[0])))
+    r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": many_items[:free]}))
+    check("ровно по свободным местам импорт проходит", r["status"] == 200
+          and len(r["json"].get("created", [])) == free, str(r)[:200])
+
+
 # --- итог -------------------------------------------------------------------
 _p(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
 if fails:

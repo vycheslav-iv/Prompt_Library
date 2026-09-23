@@ -215,6 +215,7 @@ const sandbox = {
   URL: { createObjectURL: () => "blob:", revokeObjectURL() {} },
   Blob: function () {}, FileReader: function () { this.readAsDataURL = () => {}; },
   structuredClone: (v) => JSON.parse(JSON.stringify(v)),
+  TextDecoder, TextEncoder, // v1.57: нужны pngChunks (tEXt/iTXt читаются в UTF-8)
 };
 sandbox.globalThis = sandbox;
 
@@ -2786,6 +2787,271 @@ await run("v1.54: строка «📄 Без категории» в дерев�
     shown.join(" ; "));
 });
 
+// --- v1.56: импорт из .md (Stage 1) ----------------------------------------
+// Файлы живут у клиента → разбор делает браузер, сервер принимает готовый
+// список (/prompt_library/import). Проверяем четыре вещи, которые легко
+// сломать незаметно: разбор шапки экспорта, обход папки с обложками (в т.ч.
+// «Третий/Третий.md» от одиночного экспорта), меню источников и целевая ветка.
+const walkEls = (el, out = []) => {
+  for (const c of (el.children || [])) { out.push(c); walkEls(c, out); }
+  return out;
+};
+
+await run("v1.56: «📥 Импорт» — рабочая кнопка и меню источников", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const before = documentStub.body.children.length;
+  st.importStart();
+  check("клик открыл меню оверлеем вне ноды (раскладку не трогает)",
+    documentStub.body.children.length === before + 1,
+    String(documentStub.body.children.length));
+  const panel = documentStub.body.children[documentStub.body.children.length - 1];
+  const btns = walkEls(panel).filter((e) => typeof e.onclick === "function");
+  check("в меню 4 источника + «Отмена»", btns.length === 5, String(btns.length));
+  // «Отмена» тоже нажимается — считаем активные СРЕДИ источников.
+  const sources = btns.filter((b) => String(b.textContent) !== "Отмена");
+  check("все четыре источника активны (PNG/HTML/текст включены)",
+    sources.length === 4 && sources.every((b) => !b.disabled),
+    btns.map((b) => `${b.textContent}${b.disabled ? "(off)" : ""}`).join(" | "));
+  check("метки источников на месте: .md, PNG, HTML, текстовый файл",
+    sources.some((b) => b.textContent.includes("Папка с .md"))
+      && sources.some((b) => b.textContent.includes("PNG"))
+      && sources.some((b) => b.textContent.includes("HTML"))
+      && sources.some((b) => b.textContent.includes("Текстовый файл")),
+    sources.map((b) => String(b.textContent)).join(" | "));
+  const cancel = btns[btns.length - 1];
+  cancel.onclick();
+  check("«Отмена» снимает оверлей", documentStub.body.children.length === before,
+    String(documentStub.body.children.length));
+});
+
+await run("v1.56: разбор .md — свой формат, чужой файл, CRLF", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const own = ["# Закат над морем", "", "- №: a1b2c3", "- Категория: Фото/Пейзажи",
+    "- Создана: 2021-05-06T07:08:09", "- Тип: 📷 фото", "- В избранном: да", "",
+    "## Промпт", "", "тёплый свет, длинная выдержка", ""].join("\r\n");
+  const p = st.parseImportMd(own, "из-имени");
+  check("свой файл опознан по шапке экспорта", p.own === true && p.title === "Закат над морем",
+    JSON.stringify(p));
+  check("категория, дата, тип и ★ перенесены",
+    p.folder === "Фото/Пейзажи" && p.created_at === "2021-05-06T07:08:09"
+      && p.media === "image" && p.favorite === true, JSON.stringify(p));
+  check("текст — без заголовка и без хвостовых пустых строк (CRLF не мешает)",
+    p.prompt === "тёплый свет, длинная выдержка", JSON.stringify(p.prompt));
+  const nocat = st.parseImportMd("# X\n\n- №: z\n- Категория: Без категории\n\n## Промпт\n\nтекст", "f");
+  check("«Без категории» из шапки — это корень, а не папка с таким именем",
+    nocat.folder === "", JSON.stringify(nocat.folder));
+  const vid = st.parseImportMd("- №: v\n- Категория: Видео\n- Тип: 🎬 видео\n- В избранном: нет\n\n## Промпт\n\nкадры", "f");
+  check("видео и «нет» в избранном читаются", vid.media === "video" && vid.favorite === false,
+    JSON.stringify(vid));
+  const foreign = st.parseImportMd("# Мой промпт\n\nстрока один\nстрока два\n", "из-имени");
+  check("чужой md: название из «# …», промпт — всё тело (own=false)",
+    foreign.own === false && foreign.title === "Мой промпт"
+      && foreign.prompt === "строка один\nстрока два", JSON.stringify(foreign));
+  const plain = st.parseImportMd("просто текст без заголовка", "Имя файла.txt");
+  check("текст без заголовка: название — из имени файла",
+    plain.title === "Имя файла.txt" && plain.prompt === "просто текст без заголовка",
+    JSON.stringify(plain));
+  check("пустой файл даёт пустой промпт (в импорт такой не пойдёт)",
+    st.parseImportMd("   \n\n  ", "f").prompt === "");
+  // Заголовок «## Промпт» без нашей шапки — ещё не признак своего файла:
+  // иначе чужой md терял бы текст и получал пустую категорию молча.
+  check("«## Промпт» без шапки — всё ещё чужой файл (own=false)",
+    st.parseImportMd("# Чужой\n\n## Промпт\n\nтело", "f").own === false);
+});
+
+await run("v1.56: обход папки — .md + обложки рядом и в одноимённой подпапке", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const fileEntry = (name) => ({ kind: "file", name });
+  const dirEntry = (name, entries) => ({
+    kind: "directory", name,
+    values: async function* () { for (const e of entries) yield e; },
+  });
+  const root = dirEntry("root", [
+    fileEntry("Первый.md"), fileEntry("первый.PNG"),
+    fileEntry("Второй.md"),
+    dirEntry("Третий", [fileEntry("Третий.md"), fileEntry("Третий.png")]),
+    dirEntry("Пусто", []),
+  ]);
+  const found = await st.collectImportDir(root);
+  check("найдены все .md, включая вложенную папку", found.length === 3,
+    found.map((f) => f.rel).join(" | "));
+  const first = found.find((f) => f.base === "Первый");
+  check("обложка ищется без учёта регистра расширения",
+    !!first.cover && first.cover.name === "первый.PNG", JSON.stringify(first && first.cover));
+  const third = found.find((f) => f.base === "Третий");
+  check("обложка внутри одноимённой папки тоже находится (одиночный экспорт v1.33)",
+    !!third.cover && third.cover.name === "Третий.png" && third.rel === "Третий/Третий.md",
+    JSON.stringify(third));
+  check("у файла без обложки cover пуст (импорт без превью — не ошибка)",
+    found.find((f) => f.base === "Второй").cover === null);
+  check("план обложек: небольшой PNG — как есть (в нём чанк workflow)",
+    st.coverPlan("x.png", 1000) === "raw" && st.coverPlan("x.PNG", 500000) === "raw");
+  check("план обложек: тяжёлый PNG и любой jpg — ужимать в браузере",
+    st.coverPlan("x.png", 9000000) === "shrink" && st.coverPlan("x.jpg", 10) === "shrink");
+});
+
+await run("v1.56: цель импорта и отказ в служебных ветках", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const started = [];
+  const orig = st.importMdFromFolder;
+  st.importMdFromFolder = async (tree) => { started.push(tree); };
+  const origToast = st.toast;
+  const toasts = [];
+  st.toast = (sev, sum, det) => { toasts.push(`${sev}:${sum}:${det}`); };
+  try {
+    check("умолчание структуры: «Без категории» — плоско, остальные — со структурой",
+      st.importTreeDefault("__root") === false && st.importTreeDefault("Фото") === true
+        && st.importTreeDefault("__all") === true,
+      st.importTreeDefault("__root") + "/" + st.importTreeDefault("Фото"));
+    st.selFolder = "Коллекция";
+    st.importPickTree("Коллекция");
+    check("реальная папка: импорт начинается сразу, структура сохраняется",
+      started.length === 1 && started[0] === true, JSON.stringify(started));
+    st.selFolder = "__fav";
+    st.importPickTree("__fav");
+    check("«Избранное» — не место хранения: предупреждение без импорта",
+      started.length === 1 && toasts.length === 1 && String(toasts[0]).includes("Избранное"),
+      JSON.stringify(toasts));
+    st.importPickTree("__outs");
+    check("«🔌 Выходы» тоже отклонены (только привязки)",
+      started.length === 1 && String(toasts[1]).includes("Выходы"), JSON.stringify(toasts));
+    // «Без категории»: спрашиваем о структуре только тут, где выбор реально есть
+    const before = documentStub.body.children.length;
+    st.importPickTree("__root");
+    check("«Без категории» открывает выбор «плоско / со структурой»",
+      documentStub.body.children.length === before + 1 && started.length === 1,
+      String(documentStub.body.children.length));
+    const panel = documentStub.body.children[documentStub.body.children.length - 1];
+    const btns = walkEls(panel).filter((e) => typeof e.onclick === "function");
+    check("в диалоге два варианта + «Отмена»", btns.length === 3, String(btns.length));
+    btns[1].onclick();
+    check("выбор «сохранить структуру» уходит в импорт с tree=true",
+      started.length === 2 && started[1] === true, JSON.stringify(started));
+  } finally {
+    st.importMdFromFolder = orig;
+    st.toast = origToast;
+  }
+});
+
+await run("v1.56: полный проход импорта — payload, дубликаты, обложки, отчёт", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.fileToDataUrl = async () => "data:image/png;base64,QUJD";
+  const origFetch = sandbox.fetch;
+  const origPicker = windowStub.showDirectoryPicker;
+  const posts = [];
+  const toasts = [];
+  const origToast = st.toast;
+  st.toast = (sev, sum, det) => { toasts.push(`${sev}|${det}`); };
+  const md = (t, cat) => `# ${t}\n\n- №: x\n- Категория: ${cat}\n- Создана: 2020-02-02T02:02:02\n- Тип: 📷 фото\n- В избранном: нет\n\n## Промпт\n\nтекст ${t}\n`;
+  const fh = (name, text) => ({
+    kind: "file", name,
+    getFile: async () => ({ name, size: 1000, text: async () => text }),
+  });
+  const dir = {
+    kind: "directory", name: "root",
+    values: async function* () {
+      yield fh("Один.md", md("Один", "Фото"));
+      yield fh("Один.png", "");
+      yield fh("Два.md", md("Два", "Фото/Зима"));
+    },
+  };
+  windowStub.showDirectoryPicker = async () => dir;
+  sandbox.fetch = async (u, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : null;
+    posts.push({ url: String(u), body });
+    if (String(u).includes("/prompt_library/import")) {
+      return jsonResponse({ ok: true, created: [
+        { id: "imp1", title: "Один", folder: "Коллекция/Фото", src: "Один.md" },
+        { id: "imp2", title: "Два", folder: "Коллекция/Фото/Зима", src: "Два.md" },
+      ], skipped: [{ title: "Старый", exists_folder: "Фото", reason: "db" }],
+        failed: [], free: 100, total: 3 });
+    }
+    if (String(u).includes("/prompt_library/list")) return jsonResponse(listResponse);
+    return jsonResponse({});
+  };
+  try {
+    st.selFolder = "Коллекция";
+    await st.importMdFromFolder(true);
+    const imp = posts.find((p) => p.url.includes("/prompt_library/import"));
+    check("в /import ушла цель и структура из проводника",
+      imp && imp.body.target === "Коллекция" && imp.body.tree === true,
+      JSON.stringify(imp && imp.body && { t: imp.body.target, tree: imp.body.tree }));
+    check("каждый файл ушёл записью с категорией, датой и src",
+      imp && imp.body.items.length === 2
+        && imp.body.items[0].src === "Один.md" && imp.body.items[0].folder === "Фото"
+        && imp.body.items[0].created_at === "2020-02-02T02:02:02",
+      JSON.stringify(imp && imp.body.items));
+    const covers = posts.filter((p) => p.url.includes("attach_preview"));
+    check("обложка привязана ТОЛЬКО к своей записи (id по src, force=true)",
+      covers.length === 1 && covers[0].body.id === "imp1" && covers[0].body.force === true
+        && String(covers[0].body.preview_data).startsWith("data:image/png"),
+      JSON.stringify(covers.map((c) => c.body.id)));
+    check("отчёт в нижней строке: создано/дубликаты/без обложки",
+      /создано 2/.test(String(st.hintSticky)) && /дубликатов 1/.test(String(st.hintSticky)),
+      String(st.hintSticky));
+    check("тост предупреждает о дубликате и говорит, где он лежит",
+      toasts.length === 1 && toasts[0].startsWith("warn")
+        && String(toasts[0]).includes("уже в «Фото»"), JSON.stringify(toasts));
+  } finally {
+    sandbox.fetch = origFetch;
+    windowStub.showDirectoryPicker = origPicker;
+    st.toast = origToast;
+  }
+});
+
+await run("v1.56: отказ сервера (лимит базы) говорится словами, обложек нет", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const origFetch = sandbox.fetch;
+  const origPicker = windowStub.showDirectoryPicker;
+  const posts = [];
+  const toasts = [];
+  const origToast = st.toast;
+  st.toast = (sev, sum, det) => { toasts.push(String(det)); };
+  windowStub.showDirectoryPicker = async () => ({
+    kind: "directory", name: "root",
+    values: async function* () {
+      yield { kind: "file", name: "A.md",
+        getFile: async () => ({ name: "A.md", size: 10, text: async () => "# A\n\n- №: 1\n- Категория: X\n\n## Промпт\n\nтекст" }) };
+    },
+  });
+  sandbox.fetch = async (u, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : null;
+    posts.push({ url: String(u), body });
+    if (String(u).includes("/prompt_library/import")) {
+      return { ok: false, status: 400, json: async () => ({ error: "limit", free: 3, want: 9, max: 500 }) };
+    }
+    if (String(u).includes("/prompt_library/list")) return jsonResponse(listResponse);
+    return jsonResponse({});
+  };
+  try {
+    await st.importMdFromFolder(true);
+    check("отказ объяснён числами (свободно/нужно/лимит), а не «ошибка»",
+      toasts.length === 1 && /свободно 3 из 500/.test(toasts[0]) && /записей 9/.test(toasts[0]),
+      JSON.stringify(toasts));
+    check("после отказа обложки не заливаются",
+      !posts.some((p) => p.url.includes("attach_preview")),
+      JSON.stringify(posts.map((p) => p.url)));
+    check("в подсказке сказано, что импорт отменён", /Импорт отменён/.test(String(st.hintSticky)),
+      String(st.hintSticky));
+  } finally {
+    sandbox.fetch = origFetch;
+    windowStub.showDirectoryPicker = origPicker;
+    st.toast = origToast;
+  }
+});
+
 await run("v1.46: галерея — кнопки «🌐 Экспорт в HTML» (ряд) и «🌐 В HTML» (панель карточки)", () => {
   const node = makeNode();
   proto.onNodeCreated.call(node);
@@ -2822,9 +3088,12 @@ await run("v1.48: ряд экспорта/импорта — в шапке пр�
     String(st.root.children.indexOf(st.exportRow)));
   check("ряд фиксированной высоты 22px (высота ноды считается константами)",
     String(st.exportRow.style.cssText).includes("height:22px"), String(st.exportRow.style.cssText));
-  check("«📥 Импорт» — выключенная кнопка-место (функционал ещё не сделан)",
-    st.importBtn.disabled === true && st.importBtn.textContent === "📥 Импорт",
-    String(st.importBtn.textContent));
+  check("«📥 Импорт» в ряду и подпись на месте",
+    st.importBtn.textContent === "📥 Импорт", String(st.importBtn.textContent));
+  check("v1.56: кнопка импорта БОЛЬШЕ не выключена (первый источник работает)",
+    st.importBtn.disabled !== true
+      && String(st.importBtn.style.cssText).includes("cursor:pointer"),
+    String(st.importBtn.style.cssText));
   // Дерево больше не несёт кнопок экспорта: только «+ Категория»
   const treeHead = st.tree.parentNode.children[0];
   const headTexts = treeHead.children[1].children.map((b) => b.textContent);
@@ -3038,6 +3307,314 @@ await run("v1.49: неразрешённый переключатель — че
       files.map((f) => f.name).join(","));
   } finally {
     windowStub.showDirectoryPicker = origPicker;
+  }
+});
+
+// --- v1.57: импорт PNG из ComfyUI, HTML-галереи и текстового файла (Stage 2–3)
+// Источники стали активными: PNG разбираем в браузере (чанки tEXt/iTXt → граф →
+// положительный промпт), галерея — обратный ход экспорта html (карточка → запись,
+// обложка рядом), текст — разбиение на записи. Сервер не менялся (/import один).
+const crcDummy = () => Buffer.alloc(4);
+const rawPngChunk = (type, data) => {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  return Buffer.concat([len, Buffer.from(type, "latin1"), data, crcDummy()]);
+};
+const pngTexT = (kw, value) => rawPngChunk("tEXt", Buffer.concat([
+  Buffer.from(kw, "utf8"), Buffer.from([0]), Buffer.from(value, "utf8")]));
+const pngITxt = (kw, value) => rawPngChunk("iTXt", Buffer.concat([
+  Buffer.from(kw, "utf8"), Buffer.from([0]),
+  Buffer.from([0, 0]), Buffer.from("en", "latin1"), Buffer.from([0]), Buffer.from([0]),
+  Buffer.from(value, "utf8")]));
+const makePng = (chunks) => Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+  ...chunks,
+]);
+
+await run("v1.57: PNG — разбор чанков и положительный промпт из графа", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const graph = {
+    "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "m.safetensors" } },
+    "4": { class_type: "CLIPTextEncode", inputs: { text: "детали", clip: ["1", 1] } },
+    "5": { class_type: "KSampler", inputs: {
+      seed: 1, steps: 20, cfg: 7, sampler_name: "euler", scheduler: "normal", denoise: 1,
+      model: ["1", 0], positive: ["6", 0], negative: ["7", 0], latent_image: ["9", 0] } },
+    "6": { class_type: "CLIPTextEncode", inputs: { text: "красивая девушка", clip: ["1", 1] } },
+    "7": { class_type: "CLIPTextEncode", inputs: { text: "плохое качество", clip: ["1", 1] } },
+  };
+  const ui = { nodes: [
+    { id: 5, type: "KSampler", inputs: [{ name: "positive", link: 10 }], widgets: [] },
+    { id: 6, type: "CLIPTextEncode", inputs: [{ name: "clip", link: 2 }], widgets: ["красивая девушка", ""] },
+  ], links: [[10, 6, 0, 5, "CONDITIONING"]] };
+  const gs = JSON.stringify(graph);
+  const us = JSON.stringify(ui);
+  const chunks = st.pngChunks(new Uint8Array(makePng([pngTexT("prompt", gs), pngITxt("workflow", us)])));
+  check("v1.57: tEXt/iTXt прочитаны по ключевому слову (prompt/workflow)", !!chunks.prompt && !!chunks.workflow,
+    JSON.stringify(Object.keys(chunks)));
+  check("v1.57: положительный промпт из графа — positive → CLIPTextEncode",
+    st.promptFromGraph(JSON.parse(chunks.prompt)) === "красивая девушка", JSON.stringify(chunks.prompt));
+  check("v1.57: из UI-графа — тот же текст через widgets CLIPTextEncode",
+    st.promptFromWorkflow(JSON.parse(chunks.workflow)) === "красивая девушка", JSON.stringify(chunks.workflow));
+  const g2 = {
+    "5": { class_type: "KSampler", inputs: { positive: ["6", 0], negative: ["7", 0] } },
+    "6": { class_type: "TextConcat", inputs: { text: ["8", 0] } },
+    "8": { class_type: "CLIPTextEncode", inputs: { text: "итоговый текст" } },
+  };
+  check("v1.57: промпт нашёлся даже через цепочку ссылок (следования до depth)",
+    st.promptFromGraph(g2) === "итоговый текст", String(st.promptFromGraph(g2)));
+  const g3 = { "2": { class_type: "CLIPTextEncode", inputs: { text: "один-единственный" } } };
+  check("v1.57: без сэмплера фолбэк — единственный CLIPTextEncode",
+    st.promptFromGraph(g3) === "один-единственный", String(st.promptFromGraph(g3)));
+  const g4 = { "5": { class_type: "KSampler", inputs: { positive: ["6", 0] } },
+    "6": { class_type: "CustomNode", inputs: { foo: "bar" } } };
+  check("v1.57: без текста в графе — пустой ответ (не выдуманный)",
+    st.promptFromGraph(g4) === "" && st.promptFromGraph({}) === "", String(st.promptFromGraph(g4)));
+  const g5 = {
+    "1": { class_type: "SamplerCustomAdvanced", inputs: { samples: ["5", 0] } },
+    "5": { class_type: "KSampler", inputs: { positive: ["6", 0], negative: ["7", 0] } },
+    "6": { class_type: "CLIPTextEncode", inputs: { text: "нашёл второй сэмплер" } },
+  };
+  check("v1.57: первый сэмплер без positive не блокирует — ищем дальше",
+    st.promptFromGraph(g5) === "нашёл второй сэмплер", String(st.promptFromGraph(g5)));
+});
+
+await run("v1.57: импорт PNG — запись с промптом, сам PNG обложкой (raw)", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const origFetch = sandbox.fetch;
+  const origPicker = windowStub.showDirectoryPicker;
+  const posts = [];
+  const origToast = st.toast;
+  st.toast = () => {};
+  st.fileToDataUrl = async () => "data:image/png;base64,U0hPVA";
+  const graph = { "5": { class_type: "KSampler", inputs: { positive: ["6", 0] } },
+    "6": { class_type: "CLIPTextEncode", inputs: { text: "кадр на рассвете" } } };
+  const png = makePng([pngTexT("prompt", JSON.stringify(graph))]);
+  const fileEntry = {
+    kind: "file", name: "Shot 001.png",
+    getFile: async () => ({ name: "Shot 001.png", size: png.length,
+      arrayBuffer: async () => new Uint8Array(png) }),
+  };
+  const dir = { kind: "directory", name: "root", values: async function* () { yield fileEntry; } };
+  windowStub.showDirectoryPicker = async () => dir;
+  sandbox.fetch = async (u, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : null;
+    posts.push({ url: String(u), body });
+    if (String(u).includes("/prompt_library/import")) {
+      return jsonResponse({ ok: true, created: [
+        { id: "png1", title: "Shot 001", folder: "", src: "Shot 001.png" }],
+        skipped: [], failed: [], free: 100, total: 1 });
+    }
+    if (String(u).includes("/prompt_library/list")) return jsonResponse(listResponse);
+    return jsonResponse({});
+  };
+  try {
+    st.selFolder = "Коллекция";
+    await st.importPngFromFolder();
+    const imp = posts.find((p) => p.url.includes("/prompt_library/import"));
+    check("v1.57: PNG ушёл записью с промптом из чанка, категория пуста",
+      imp && imp.body.items.length === 1
+        && imp.body.items[0].prompt === "кадр на рассвете"
+        && imp.body.items[0].title === "Shot 001"
+        && imp.body.items[0].folder === ""
+        && imp.body.items[0].src === "Shot 001.png",
+      JSON.stringify(imp && imp.body.items));
+    check("v1.57: медиа — image (PNG сам становится обложкой)",
+      imp && imp.body.items[0].media === "image", JSON.stringify(imp && imp.body.items));
+    check("v1.57: граф уходит в записи (items.workflow) — параметры не зависят от обложки",
+      imp && imp.body.items[0].workflow && imp.body.items[0].workflow["6"]
+        && imp.body.items[0].workflow["6"].inputs.text === "кадр на рассвете",
+      JSON.stringify(imp && imp.body.items[0].workflow));
+    const covers = posts.filter((p) => p.url.includes("attach_preview"));
+    check("v1.57: тот же PNG привязан обложкой к своей записи (raw, force=true)",
+      covers.length === 1 && covers[0].body.id === "png1" && covers[0].body.force === true
+        && String(covers[0].body.preview_data).startsWith("data:image/png"),
+      JSON.stringify(covers.map((c) => c.body.id)));
+    check("v1.57: отчёт — создано 1, без дубликатов и потерь",
+      /создано 1/.test(String(st.hintSticky)) && /дубликатов/.test(String(st.hintSticky)) === false,
+      String(st.hintSticky));
+  } finally {
+    sandbox.fetch = origFetch;
+    windowStub.showDirectoryPicker = origPicker;
+    st.toast = origToast;
+  }
+});
+
+await run("v1.57: importRun переживает ok без валидного JSON (rep=null)", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const origFetch = sandbox.fetch;
+  const origToast = st.toast;
+  st.toast = () => {};
+  const importRes = { ok: true, status: 200,
+    json: async () => { throw new Error("не JSON"); },
+    text: async () => JSON.stringify({}), blob: async () => ({}), headers: { get: () => null } };
+  sandbox.fetch = async (u, init) => String(u).includes("/prompt_library/import")
+    ? importRes
+    : (String(u).includes("/prompt_library/list") ? jsonResponse(listResponse) : jsonResponse({}));
+  try {
+    st.selFolder = "__all";
+    let threw = null, hint = null;
+    try {
+      await st.importRun([{ title: "t", prompt: "p", folder: "", created_at: "",
+        favorite: false, media: null, src: "s.png" }], false);
+    } catch (e) { threw = e; }
+    hint = String(st.hintSticky);
+    check("v1.57: rep=null не роняет импорт — сводка «создано 0»",
+      threw === null && /создано 0/.test(hint),
+      threw ? ("THROW: " + String(threw)) : hint);
+  } finally {
+    sandbox.fetch = origFetch;
+    st.toast = origToast;
+  }
+});
+
+await run("v1.57: HTML-галерея — парсинг собственной карточки (round-trip)", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const full = { id: "h1", title: "Закат над морем", folder: "Фото/Пейзажи",
+    created_at: "2021-05-06T07:08:09", media: "image", favorite: true,
+    prompt: "тёплый свет, длинная выдержка" };
+  const html = st.entryToHtml(full, { model: "flux1-dev" }, "Портреты/Закат над морем.png");
+  const cards = st.parseGalleryHtml(html);
+  check("v1.57: из собственной карточки читаются title и промпт",
+    cards.length === 1 && cards[0].title === "Закат над морем"
+      && cards[0].prompt === "тёплый свет, длинная выдержка", JSON.stringify(cards));
+  check("v1.57: категория/тип/★/дата перенесены",
+    cards[0].folder === "Фото/Пейзажи" && cards[0].media === "image"
+      && cards[0].favorite === true && cards[0].created_at === "2021-05-06T07:08:09",
+    JSON.stringify(cards[0]));
+  check("v1.57: src обложки декодирован в относительный путь",
+    cards[0].relImg === "Портреты/Закат над морем.png", JSON.stringify(cards[0].relImg));
+  const nocat = st.parseGalleryHtml(st.entryToHtml(
+    { id: "h2", title: "Нет", folder: "", media: null, favorite: false, prompt: "тело" }, {}, ""));
+  check("v1.57: «Без категории» → folder=''",
+    nocat.length === 1 && nocat[0].folder === "", JSON.stringify(nocat));
+  const unk = st.parseGalleryHtml("<html><body>нет карточек</body></html>");
+  check("v1.57: чужой html — пустой список (не ошибка)",
+    Array.isArray(unk) && unk.length === 0, JSON.stringify(unk));
+});
+
+await run("v1.57: импорт HTML-галереи — категории из карточек, обложки из папки", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const origFetch = sandbox.fetch;
+  const origPicker = windowStub.showDirectoryPicker;
+  const origToast = st.toast;
+  st.toast = () => {};
+  st.fileToDataUrl = async () => "data:image/png;base64,aW1n";
+  const posts = [];
+  const card = (id, title, folder, img, prompt) => st.entryToHtml(
+    { id, title, folder, created_at: "", media: "image", favorite: false, prompt }, {}, img);
+  const html = `<!DOCTYPE html><html><body><main>\n${card("g1", "Море", "Фото", "Фото/Закат.png", "закат над водой")}\n${card("g2", "Кот", "Фото/Животные", "Фото/Животные/Cat.png", "рыжий кот")}\n</main></body></html>`;
+  const htmlFile = {
+    kind: "file", name: "prompt_library.html",
+    getFile: async () => ({ name: "prompt_library.html", size: html.length, text: async () => html }),
+  };
+  const img = (name) => ({
+    kind: "file", name,
+    getFile: async () => ({ name, size: 1000, text: async () => "", arrayBuffer: async () => new Uint8Array(0) }),
+  });
+  const root = {
+    kind: "directory", name: "root",
+    values: async function* () {
+      yield htmlFile;
+      yield { kind: "directory", name: "Фото", values: async function* () {
+        yield img("Закат.png");
+        yield { kind: "directory", name: "Животные", values: async function* () { yield img("Cat.png"); } };
+      } };
+    },
+  };
+  windowStub.showDirectoryPicker = async () => root;
+  sandbox.fetch = async (u, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : null;
+    posts.push({ url: String(u), body });
+    if (String(u).includes("/prompt_library/import")) {
+      return jsonResponse({ ok: true, created: [
+        { id: "h1", title: "Море", folder: "Коллекция/Фото", src: "prompt_library.html#1" },
+        { id: "h2", title: "Кот", folder: "Коллекция/Фото/Животные", src: "prompt_library.html#2" } ],
+        skipped: [], failed: [], free: 100, total: 2 });
+    }
+    if (String(u).includes("/prompt_library/list")) return jsonResponse(listResponse);
+    return jsonResponse({});
+  };
+  try {
+    st.selFolder = "Коллекция";
+    await st.importHtmlFromFolder(true);
+    const imp = posts.find((p) => p.url.includes("/prompt_library/import"));
+    check("v1.57: html-карточки ушли записями с категориями карточки",
+      imp && imp.body.items.length === 2
+        && imp.body.items[0].folder === "Фото" && imp.body.items[1].folder === "Фото/Животные"
+        && imp.body.items[0].src === "prompt_library.html#1"
+        && imp.body.items[1].src === "prompt_library.html#2"
+        && imp.body.items.every((it) => it.media === "image"),
+      JSON.stringify(imp && imp.body.items));
+    const covers = posts.filter((p) => p.url.includes("attach_preview"));
+    check("v1.57: обложки галереи привязаны к своим записям",
+      covers.length === 2 && new Set(covers.map((c) => c.body.id)).size === 2,
+      JSON.stringify(covers.map((c) => c.body.id)));
+  } finally {
+    sandbox.fetch = origFetch;
+    windowStub.showDirectoryPicker = origPicker;
+    st.toast = origToast;
+  }
+});
+
+await run("v1.57: текстовый файл — разбиение на записи (абзац/строка/весь)", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const es1 = st.textEntries("Заметки.txt", "первая строка\n\nвторой абзац.", "para");
+  check("v1.57: абзацы — записи, title — первая строка абзаца",
+    es1.length === 2 && es1[0].prompt === "первая строка" && es1[0].title === "первая строка",
+    JSON.stringify(es1));
+  const es2 = st.textEntries("теги.txt", "brave\nglitter\nnight", "line");
+  check("v1.57: строки — записи, title — имя файла",
+    es2.length === 3 && es2[1].prompt === "glitter" && es2[0].title === "теги.txt",
+    JSON.stringify(es2));
+  const es3 = st.textEntries("Заголовок.md", "# Заголовок\n\nвся история", "whole");
+  check("v1.57: весь файл — одна запись, title из «# …»",
+    es3.length === 1 && es3[0].prompt === "# Заголовок\n\nвся история" && es3[0].title === "Заголовок",
+    JSON.stringify(es3));
+  check("v1.57: пустой текст — пустой разбор",
+    st.textEntries("p.txt", "\n \n", "para").length === 0);
+
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : null;
+    posts.push({ url: String(u), body });
+    if (String(u).includes("/prompt_library/import")) {
+      return jsonResponse({ ok: true, created: [
+        { id: "t1", title: "звёзды яркие", folder: "", src: "небо.txt#para" },
+        { id: "t2", title: "луна", folder: "", src: "небо.txt#para" }],
+        skipped: [], failed: [], free: 100, total: 2 });
+    }
+    if (String(u).includes("/prompt_library/list")) return jsonResponse(listResponse);
+    return jsonResponse({});
+  };
+  try {
+    st.selFolder = "__all";
+    await st.importTextRun([{ base: "небо.txt", text: "звёзды яркие\n\nлуна" }], st.selFolder, "para");
+    const imp = posts.find((p) => p.url.includes("/prompt_library/import"));
+    check("v1.57: текстовые записи — без категорий и обложек",
+      imp && imp.body.items.length === 2
+        && imp.body.items.every((it) => it.folder === "" && it.media === null)
+        && imp.body.items[0].prompt === "звёзды яркие" && imp.body.items[1].prompt === "луна",
+      JSON.stringify(imp && imp.body.items));
+    check("v1.57: без обложек attach_preview не вызывается",
+      !posts.some((p) => p.url.includes("attach_preview")),
+      JSON.stringify(posts.map((p) => p.url)));
+    check("v1.57: отчёт «создано 2»",
+      /создано 2/.test(String(st.hintSticky)), String(st.hintSticky));
+  } finally {
+    sandbox.fetch = origFetch;
   }
 });
 

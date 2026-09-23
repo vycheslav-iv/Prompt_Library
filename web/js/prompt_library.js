@@ -145,7 +145,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.55-tree-plug-lit";
+const PL_JS_VERSION = "1.57-import-sources";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -483,14 +483,15 @@ app.registerExtension({
                 if (smartMarked) return st.exportMarkedHtml?.();
                 return st.exportFolderHtml?.(st.selFolder || "__all");
             };
-            // Импорт (v1.48): место зарезервировано под будущий функционал —
-            // кнопка видна, но выключена (галерея/библиотека обратно ещё не
-            // читается). Рядом с экспортом — туда же придёт рабочая версия.
+            // Импорт: v1.48 держал место выключенной кнопкой, v1.56 включает
+            // первый рабочий источник (.md + обложки) — та же строка, раскладка
+            // не менялась. Источники PNG/HTML/текст видны в меню и ждут своих
+            // шагов (§49).
             const importBtn = document.createElement("button");
             importBtn.textContent = "📥 Импорт";
-            importBtn.title = "Импорт библиотеки/галереи — функционал ещё не сделан (кнопка-место)";
-            importBtn.disabled = true;
-            importBtn.style.cssText = "flex-shrink:0;background:#222;color:#777;border:1px dashed #444;border-radius:4px;padding:2px 8px;cursor:not-allowed;font-size:11px;";
+            importBtn.title = "Импорт в библиотеку: .md с обложками, PNG, HTML-галерея, текст";
+            importBtn.style.cssText = "flex-shrink:0;background:#2c4a73;color:#dfe8ff;border:1px solid #4a6a9a;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;";
+            importBtn.onclick = () => { try { st.importStart?.(); } catch (e) { /* silent */ } };
             // Ряд экспорта/импорта (v1.48): отдельная строка под окном ручного
             // ввода и над тулбаром — в шапке проводника остаётся только
             // «+ Категория» (там кнопки не помещались и спорили с деревом).
@@ -977,12 +978,18 @@ app.registerExtension({
             // записал (и разослал WS-сигнал), но соседняя нода этой страницы получит
             // его с задержкой — перечитываем её сразу. Забыть вызов в новом хендлере
             // невозможно: мутации идут только через st.apiPost (§26.9).
-            st.apiPost = async (path, payload) => {
+            // opts.quiet — не дёргать соседние ноды на КАЖДОМ запросе: массовая
+            // заливка обложек при импорте (v1.56) шлёт сотни POST, и обновление
+            // после каждого — сотни лишних перечитываний базы. Вызывающий
+            // обязан сам обновить всех один раз в конце.
+            st.apiPost = async (path, payload, opts) => {
                 const r = await fetch(path, {
                     method: "POST", headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload || {}),
                 });
-                if (r && r.ok) { try { plRefreshLocal(st); } catch (e) { /* silent */ } }
+                if (r && r.ok && !(opts && opts.quiet)) {
+                    try { plRefreshLocal(st); } catch (e) { /* silent */ }
+                }
                 return r;
             };
 
@@ -3116,6 +3123,733 @@ const reload = async () => {
                     const pct = Math.min(100, Math.max(0, Math.round((done / total) * 100)));
                     st.progFill.style.width = pct + "%";
                 }
+            };
+            // --- Импорт из файлов (v1.56, Stage 1: .md + обложки) ------------
+            // Файлы живут у клиента, поэтому разбор делает браузер, а сервер
+            // принимает готовый список записей (/prompt_library/import) — одна
+            // форма для любого источника (.md сейчас, PNG/HTML/текст дальше).
+            // Разбор .md — зеркало того, что пишет _entryToMd (экспорт):
+            // «# название», «- № / Категория / Создана / Тип / В избранном»,
+            // «## Промпт» и сам текст. Чужой .md (без шапки) читаем как текст:
+            // название — из первого «# …» либо из имени файла, промпт — всё тело.
+            st.parseImportMd = (text, fallbackTitle) => {
+                const src = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+                const out = { own: false, title: "", prompt: "", folder: "",
+                              created_at: "", favorite: false, media: null };
+                const grab = (re) => { const m = re.exec(src); return m ? m[1].trim() : ""; };
+                const head = /^#\s+([^\n]*)/m.exec(src);
+                const num = grab(/^[-*]\s*№:\s*([^\n]*)/m);
+                const cat = grab(/^[-*]\s*Категория:\s*([^\n]*)/m);
+                const created = grab(/^[-*]\s*Создана:\s*([^\n]*)/m);
+                const type = grab(/^[-*]\s*Тип:\s*([^\n]*)/m);
+                const fav = grab(/^[-*]\s*В избранном:\s*([^\n]*)/m);
+                // «Свой» — по шапке, которую пишет экспорт; одного «## Промпт»
+                // мало (такой заголовок встречается и в чужих файлах).
+                const own = !!(num || cat || (created && /^##\s*Промпт\s*$/m.test(src)));
+                if (own) {
+                    out.own = true;
+                    out.title = (head ? head[1].trim() : "") || String(fallbackTitle || "");
+                    const i = src.search(/^##\s*Промпт\s*$/m);
+                    let body = i >= 0 ? src.slice(i).replace(/^##\s*Промпт[^\n]*\n?/, "") : src;
+                    out.prompt = body.replace(/^\n+/, "").replace(/\s+$/, "");
+                    // «Без категории» — это корень (пустая папка), а не категория
+                    // с таким названием (иначе при импорте заводилась бы папка).
+                    out.folder = cat === "Без категории" ? "" : cat;
+                    out.created_at = created;
+                    out.favorite = /^да$/i.test(fav);
+                    out.media = /видео/i.test(type) ? "video" : (/фото/i.test(type) ? "image" : null);
+                    return out;
+                }
+                let rest = src.trim();
+                const h1 = /^#\s+(.+)\n?/.exec(rest);
+                out.title = String(fallbackTitle || "");
+                if (h1) { out.title = h1[1].trim() || out.title; rest = rest.slice(h1[0].length); }
+                out.prompt = rest.trim();
+                return out;
+            };
+            // Чем отправлять обложку: небольшие PNG — КАК ЕСТЬ, потому что в них
+            // лежит чанк workflow нашего экспорта, и сервер вернёт по нему
+            // параметры генерации (v1.56). Остальное ужимаем в браузере: dataURL
+            // многомегабайтной картинки не пролезет в запрос (сервер режет по 8МБ).
+            st.coverPlan = (name, size) => (/\u002epng$/i.test(String(name || ""))
+                && Number(size || 0) <= 4_000_000) ? "raw" : "shrink";
+            st.fileToDataUrl = (file) => new Promise((resolve) => {
+                try {
+                    const fr = new FileReader();
+                    fr.onload = () => resolve(String(fr.result || ""));
+                    fr.onerror = () => resolve("");
+                    fr.readAsDataURL(file);
+                } catch (e) { resolve(""); }
+            });
+            st.shrinkToPng = async (file, max = 512) => {
+                try {
+                    const bmp = await createImageBitmap(file);
+                    const k = Math.min(1, max / Math.max(bmp.width || 1, bmp.height || 1));
+                    const w = Math.max(1, Math.round((bmp.width || 1) * k));
+                    const h = Math.max(1, Math.round((bmp.height || 1) * k));
+                    const cv = document.createElement("canvas");
+                    cv.width = w; cv.height = h;
+                    cv.getContext("2d").drawImage(bmp, 0, 0, w, h);
+                    return cv.toDataURL("image/png");
+                } catch (e) { return ""; }
+            };
+            st.coverDataUrl = async (entry) => {
+                if (!entry) return "";
+                // Имя и размер живут у File, а не у записи каталога: решение
+                // «как есть / ужать» принимается по реальному файлу.
+                let file = null;
+                try { file = await entry.getFile(); } catch (e) { return ""; }
+                if (!file) return "";
+                return st.coverPlan(file.name, file.size) === "raw"
+                    ? await st.fileToDataUrl(file) : await st.shrinkToPng(file);
+            };
+            // «Без категории» по умолчанию импортирует ПЛОСКО (решение
+            // пользователя), остальные ветки — со структурой; галочка в диалоге
+            // переключает. Маппинг категорий живёт на сервере (_import_target_folder),
+            // чтобы правило «куда лёг файл» существовало в одном месте.
+            st.importTreeDefault = (target) => String(target || "") !== "__root";
+            // Обход папки: .md + обложка с тем же базовым именем рядом ЛИБО в
+            // подпапке с этим именем (так выгружает одиночный экспорт v1.33).
+            st.collectImportDir = async (dirHandle) => {
+                const out = [];
+                const exts = [".png", ".jpg", ".jpeg", ".webp"];
+                const walk = async (dir, rel) => {
+                    const files = [];
+                    const dirs = [];
+                    for await (const entry of dir.values()) {
+                        if (entry.kind === "file") files.push(entry);
+                        else if (entry.kind === "directory") dirs.push(entry);
+                    }
+                    const byName = new Map(files.map((f) => [f.name.toLowerCase(), f]));
+                    for (const f of files) {
+                        if (!/\.md$/i.test(f.name)) continue;
+                        const base = f.name.replace(/\.md$/i, "");
+                        let cover = null;
+                        for (const ext of exts) {
+                            const hit = byName.get((base + ext).toLowerCase());
+                            if (hit) { cover = hit; break; }
+                        }
+                        out.push({ rel: rel ? rel + "/" + f.name : f.name, base, file: f, cover });
+                    }
+                    for (const d of dirs) await walk(d, rel ? rel + "/" + d.name : d.name);
+                };
+                await walk(dirHandle, "");
+                return out;
+            };
+            // Меню выбора источника: простой фиксированный оверлей вне ноды —
+            // раскладку и BASE_H не трогает (см. §49).
+            st.uiPanel = (opts) => {
+                const wrap = document.createElement("div");
+                wrap.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;";
+                const box = document.createElement("div");
+                box.style.cssText = "min-width:300px;max-width:520px;background:#1c1c1c;color:#e6e6e6;border:1px solid #3a3a3a;border-radius:8px;padding:14px 16px;font:12px system-ui,'Segoe UI',sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.55);";
+                const h = document.createElement("div");
+                h.textContent = opts.title || "";
+                h.style.cssText = "font-size:14px;font-weight:bold;margin-bottom:6px;";
+                box.appendChild(h);
+                if (opts.subtitle) {
+                    const s = document.createElement("div");
+                    s.textContent = opts.subtitle;
+                    s.style.cssText = "color:#aaa;margin-bottom:10px;line-height:1.4;";
+                    box.appendChild(s);
+                }
+                const close = () => { try { document.body.removeChild(wrap); } catch (e) { /* silent */ } };
+                for (const it of (opts.items || [])) {
+                    const b = document.createElement("button");
+                    b.textContent = it.label;
+                    b.disabled = !!it.disabled;
+                    b.title = it.hint || "";
+                    b.style.cssText = "display:block;width:100%;text-align:left;margin:4px 0;padding:7px 10px;border-radius:5px;font-size:12px;cursor:"
+                        + (it.disabled ? "not-allowed;border:1px dashed #3a3a3a;background:#222;color:#777;"
+                                       : "pointer;border:1px solid #4a6a9a;background:#2c4a73;color:#dfe8ff;");
+                    b.onclick = () => { close(); if (it.onClick) it.onClick(); };
+                    box.appendChild(b);
+                }
+                const cancel = document.createElement("button");
+                cancel.textContent = "Отмена";
+                cancel.style.cssText = "display:block;width:100%;margin-top:8px;padding:6px 10px;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#ccc;cursor:pointer;font-size:12px;";
+                cancel.onclick = close;
+                box.appendChild(cancel);
+                wrap.onclick = (ev) => { if (ev.target === wrap) close(); };
+                wrap.appendChild(box);
+                document.body.appendChild(wrap);
+                return { close, box, items: (opts.items || []) };
+            };
+            st.importSummary = (rep, extra) => {
+                const e = extra || {};
+                const nCreated = ((rep && rep.created) || []).length;
+                const nSkip = ((rep && rep.skipped) || []).length;
+                const nFail = (((rep && rep.failed) || []).length) + (e.bad || 0);
+                const parts = [`создано ${nCreated}`];
+                if (nSkip) parts.push(`пропущено дубликатов ${nSkip}`);
+                if (nFail) parts.push(`без текста ${nFail}`);
+                if (e.coverFail) parts.push(`без обложки ${e.coverFail}`);
+                return parts.join(", ");
+            };
+            // Общий проход импорта (v1.57): запись списка записей + привязка
+            // обложек. Выделен из .md-потока, чтобы PNG/галерея/текст делили
+            // один путь «составили файлы → записали → обложки → отчёт». Цель
+            // читается из st.selFolder — у всех источников она одна.
+            st.importRun = async (items, tree, extra) => {
+                if (!items || !items.length) return;
+                const target = st.selFolder || "__all";
+                st.setExportProgress(true, 0, items.length);
+                st.hintSticky = `Импортирую ${items.length} записей…`;
+                st.renderHint?.();
+                let rep = null;
+                try {
+                    const r = await st.apiPost("/prompt_library/import", {
+                        target, tree,
+                        items: items.map((it) => ({ title: it.title, prompt: it.prompt,
+                            folder: it.folder, created_at: it.created_at,
+                            favorite: it.favorite, media: it.media, src: it.src,
+                            workflow: it.workflow || null })),
+                    });
+                    rep = await r.json().catch(() => null);
+                    if (!r.ok) {
+                        // Отказы сервера (лимит базы / служебная цель) — говорим
+                        // причину словами, ничего не додумывая.
+                        let why = (rep && rep.error) || "неизвестная ошибка";
+                        if (rep && rep.error === "limit") {
+                            why = `не хватает места в базе: свободно ${rep.free} из ${rep.max}, а записей ${rep.want}`;
+                        }
+                        st.setExportProgress(false);
+                        st.hintSticky = `Импорт отменён: ${why}.`;
+                        st.renderHint?.();
+                        st.toast("error", "Prompt Library: импорт не выполнен", why);
+                        return;
+                    }
+                } catch (e) {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Импорт сорвался: сервер не ответил.";
+                    st.renderHint?.();
+                    return;
+                }
+                // Сервер ответил ok, но без читаемого JSON (rare): отчёт «создано 0».
+                if (rep === null) rep = {};
+                // Обложки — по одной, тихо (без перезагрузки соседних нод на каждом
+                // файле), одним итоговым локальным обновлением.
+                const bySrc = new Map();
+                for (const c of ((rep && rep.created) || [])) if (c && c.src) bySrc.set(c.src, c.id);
+                let coverFail = 0, done = 0;
+                for (const it of items) {
+                    const id = bySrc.get(it.src);
+                    if (id && it._cover) {
+                        try {
+                            const dataUrl = await st.coverDataUrl(it._cover);
+                            if (dataUrl) {
+                                const r2 = await st.apiPost("/prompt_library/attach_preview",
+                                    { id, preview_data: dataUrl, media: it.media || "image", force: true },
+                                    { quiet: true });
+                                if (!r2.ok) coverFail++;
+                            } else { coverFail++; }
+                        } catch (e) { coverFail++; }
+                    }
+                    done++;
+                    st.setExportProgress(true, done, items.length);
+                    st.hintSticky = `Импорт: ${done} из ${items.length}…`;
+                    st.renderHint?.();
+                }
+                try { plRefreshLocal(st); } catch (e) { /* silent */ }
+                await reload();
+                st.setExportProgress(false);
+                const summary = st.importSummary(rep, { bad: (extra && extra.bad) || 0, coverFail });
+                st.hintSticky = `Импорт из «${target === "__all" ? "Всё" : target === "__root" ? "Без категории" : target}»: ${summary}.`;
+                st.renderHint?.();
+                const sk = (rep.skipped || []).slice(0, 3)
+                    .map((s) => `«${s.title}» — уже в «${s.exists_folder || "корне"}»`).join("; ");
+                st.toast(summary.includes("дубликатов") ? "warn" : "success",
+                    "Prompt Library: импорт", summary + (sk ? `. Дубликаты: ${sk}${(rep.skipped || []).length > 3 ? " и др." : ""}` : ""));
+            };
+            // Главный проход: выбрали папку → собрали → разобрали → записали → обложки.
+            st.importMdFromFolder = async (tree) => {
+                if (typeof window.showDirectoryPicker !== "function") {
+                    st.toast("warn", "Prompt Library: импорт", "Нужен Chrome или Edge — выбор папки недоступен.");
+                    return;
+                }
+                let dir = null;
+                try {
+                    dir = await window.showDirectoryPicker({ mode: "read" });
+                } catch (e) {
+                    if (e && e.name === "AbortError") return;  // закрыл диалог — тихо
+                    st.toast("warn", "Prompt Library: импорт", "Не удалось открыть выбор папки.");
+                    return;
+                }
+                st.setExportProgress(true, 0, 1);
+                st.hintSticky = "Импорт: смотрю папку…";
+                st.renderHint?.();
+                let found = [];
+                try {
+                    found = await st.collectImportDir(dir);
+                } catch (e) { /* пустая выборка — отчитаемся ниже */ }
+                if (!found.length) {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Импорт: в папке нет .md (Stage 1 читает .md и обложки).";
+                    st.renderHint?.();
+                    return;
+                }
+                const items = [];
+                let bad = 0;
+                for (const f of found) {
+                    let text = "";
+                    try { text = await (await f.file.getFile()).text(); }
+                    catch (e) { bad++; continue; }
+                    const p = st.parseImportMd(text, f.base);
+                    if (!p.prompt) { bad++; continue; }
+                    items.push({ title: p.title, prompt: p.prompt, folder: p.folder,
+                                 created_at: p.created_at, favorite: p.favorite,
+                                 media: p.media, src: f.rel, _cover: f.cover });
+                }
+                if (!items.length) {
+                    st.setExportProgress(false);
+                    st.hintSticky = `Импорт: пригодных .md не нашлось (${found.length} файлов).`;
+                    st.renderHint?.();
+                    return;
+                }
+                await st.importRun(items, tree, { bad });
+            };
+            // Кнопка «📥 Импорт»: меню источников (v1.57 — все четыре активны).
+            st.importStart = () => {
+                const t = st.selFolder || "__all";
+                const where = t === "__all" ? "📚 Всё" : t === "__root" ? "📄 Без категории"
+                    : t.startsWith("__") ? "служебная ветка" : `📁 ${t}`;
+                st.uiPanel({
+                    title: "📥 Импорт в библиотеку",
+                    subtitle: `Куда: ${where}. Что уже есть в базе — не импортируется, такие записи попадут в отчёт.`,
+                    items: [
+                        { label: "📁 Папка с .md и обложками", onClick: () => st.importPickTree(t) },
+                        { label: "🖼 PNG из ComfyUI", onClick: () => st.importPickPng(t) },
+                        { label: "🌐 HTML-галерея", onClick: () => st.importPickHtml(t) },
+                        { label: "📝 Текстовый файл", onClick: () => st.importPickText(t) },
+                    ],
+                });
+            };
+            // Служебные ветки не место хранения (§24): объясняем и не начинаем.
+            st.importGuard = (target) => {
+                if (target === "__fav" || target === "__outs") {
+                    st.toast("warn", "Prompt Library: импорт",
+                        target === "__fav" ? "«Избранное» — не место хранения: выберите категорию или «Всё»."
+                                           : "«🔌 Выходы» — только привязки выходов: выберите категорию или «Всё».");
+                    return true;
+                }
+                return false;
+            };
+            st.importPickTree = (target) => {
+                if (st.importGuard(target)) return;
+                if (target === "__root") {
+                    // Решение о структуре появляется только когда оно вообще есть.
+                    st.uiPanel({
+                        title: "📄 Импорт в «Без категории»",
+                        subtitle: "Категории из файлов можно сохранить или положить всё плоско в корень.",
+                        items: [
+                            { label: "Плоско в корень (без категорий)", onClick: () => st.importMdFromFolder(false) },
+                            { label: "Сохранить структуру как категории", onClick: () => st.importMdFromFolder(true) },
+                        ],
+                    });
+                    return;
+                }
+                st.importMdFromFolder(st.importTreeDefault(target));
+            };
+            // PNG из ComfyUI: без диалога структуры — категорий в PNG нет вовсе.
+            st.importPickPng = (target) => {
+                if (st.importGuard(target)) return;
+                st.importPngFromFolder();
+            };
+            // HTML-галерея: структура карточек как категории — то же решение, что
+            // у .md (галочка появляется только для «Без категории»).
+            st.importPickHtml = (target) => {
+                if (st.importGuard(target)) return;
+                if (target === "__root") {
+                    st.uiPanel({
+                        title: "🌐 Импорт галереи в «Без категории»",
+                        subtitle: "Категории из карточек можно сохранить или положить всё плоско в корень.",
+                        items: [
+                            { label: "Плоско в корень (без категорий)", onClick: () => st.importHtmlFromFolder(false) },
+                            { label: "Сохранить структуру как категории", onClick: () => st.importHtmlFromFolder(true) },
+                        ],
+                    });
+                    return;
+                }
+                st.importHtmlFromFolder(st.importTreeDefault(target));
+            };
+            // Текстовый файл: скрытый input[type=file], чтение в браузер, дальше
+            // диалог «как разбить» (textSplitDialog). Категорий нет.
+            st.importPickText = (target) => {
+                if (st.importGuard(target)) return;
+                const input = document.createElement("input");
+                input.type = "file";
+                input.multiple = true;
+                input.accept = ".txt,.md,text/plain,text/markdown";
+                input.style.display = "none";
+                input.onchange = async () => {
+                    const files = Array.from(input.files || []).filter((f) => /\.(txt|md)$/i.test(f.name));
+                    if (!files.length) return;
+                    const readFiles = [];
+                    for (const f of files) {
+                        let text = "";
+                        try {
+                            text = f.text? await f.text() : await new Promise((res, rej) => {
+                                const fr = new FileReader();
+                                fr.onload = () => res(String(fr.result || ""));
+                                fr.onerror = rej;
+                                fr.readAsText(f);
+                            });
+                        } catch (e) { continue; }
+                        readFiles.push({ base: f.name, text });
+                    }
+                    if (!readFiles.length) return;
+                    st.textSplitDialog(readFiles);
+                };
+                document.body.appendChild(input);
+                input.click();
+                setTimeout(() => { try { document.body.removeChild(input); } catch (e) { /* silent */ } }, 2000);
+            };
+            // --- v1.57: импорт PNG из ComfyUI ---------------------------------
+            // Чанки tEXt/iTXt читаются в UTF-8 по ключевому слову (prompt —
+            // API-граф, workflow — UI-граф). Возвращается объект {keyword: text};
+            // одно имя дважды — перезаписывает (последний чанк).
+            st.pngChunks = (buf) => {
+                const out = {};
+                if (!buf || buf.length < 8) return out;
+                const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+                for (let i = 0; i < 8; i++) if (buf[i] !== sig[i]) return out;
+                const utf8 = (bytes) => {
+                    try { return new TextDecoder("utf-8").decode(bytes); }
+                    catch (e) { return Array.from(bytes).map((b) => String.fromCharCode(b)).join(""); }
+                };
+                const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+                let p = 8;
+                while (p + 8 <= buf.length) {
+                    const len = dv.getUint32(p); p += 4;
+                    const type = String.fromCharCode(buf[p], buf[p + 1], buf[p + 2], buf[p + 3]); p += 4;
+                    if (len > buf.length - p) break; // обрезанный хвост — останавливаемся
+                    const data = len > 0 ? buf.slice(p, p + len) : new Uint8Array(0);
+                    p += len + 4; // + CRC (не проверяем)
+                    if (type === "tEXt") {
+                        let k = 0; while (k < data.length && data[k] !== 0) k++;
+                        if (k > 0) out[utf8(data.slice(0, k))] = utf8(data.slice(k + 1));
+                    } else if (type === "iTXt") {
+                        let k = 0; while (k < data.length && data[k] !== 0) k++;
+                        if (k === 0) continue;
+                        const kw = utf8(data.slice(0, k));
+                        const compFlag = data[k + 1];
+                        let q = k + 3; while (q < data.length && data[q] !== 0) q++;
+                        let r = q + 1; while (r < data.length && data[r] !== 0) r++;
+                        if (compFlag === 0) out[kw] = utf8(data.slice(r + 1));
+                    }
+                }
+                return out;
+            };
+            // Положительный промпт из API-графа (чанк prompt): каждый узел
+            // /sampler/i по очереди → inputs.positive → следуем по inputs.text
+            // (строка ИЛИ ссылка [id, idx]) до глубины 4; берём первый рабочий
+            // результат (сэмплер без positive — например SamplerCustomAdvanced —
+            // пропускается, а не глушит разбор). Без результата — единственный
+            // CLIPTextEncode с непустым текстом. Не нашлось — "".
+            st.promptFromGraph = (graph) => {
+                const g = graph || {};
+                const ids = Object.keys(g);
+                const textVia = (pos) => {
+                    if (!Array.isArray(pos)) return null;
+                    let nodeId = String(pos[0]);
+                    const seen = new Set();
+                    let depth = 0;
+                    while (nodeId && g[nodeId] && !seen.has(nodeId) && depth < 4) {
+                        seen.add(nodeId);
+                        const t = (g[nodeId].inputs || {}).text;
+                        if (typeof t === "string") return t;
+                        if (Array.isArray(t) && t.length) { nodeId = String(t[0]); depth++; }
+                        else return null;
+                    }
+                    return null;
+                };
+                const samplers = ids.filter((id) => /sampler/i.test(g[id].class_type || ""));
+                for (const sid of samplers) {
+                    const t = textVia(g[sid].inputs && g[sid].inputs.positive);
+                    if (t) return t;
+                }
+                const enc = ids.filter((id) => /cliptextencode/i.test(g[id].class_type || "")
+                    && typeof (g[id].inputs || {}).text === "string"
+                    && String(g[id].inputs.text).trim() !== "");
+                return enc.length === 1 ? g[enc[0]].inputs.text : "";
+            };
+            // Положительный промпт из UI-графа (чанк workflow): первый
+            // CLIPTextEncode с непустым первым виджетом (widgets могут не
+            // совпадать по индексу с inputs — текст живёт в widgets[0]).
+            st.promptFromWorkflow = (ui) => {
+                const nodes = (ui && ui.nodes) || [];
+                const enc = nodes.find((n) => /cliptextencode/i.test(n.type || "")
+                    && Array.isArray(n.widgets) && n.widgets.length
+                    && typeof n.widgets[0] === "string" && n.widgets[0].trim() !== "");
+                return enc ? enc.widgets[0] : "";
+            };
+            // Обход папки: все *.png (вложенные — тоже), rel-путь от корня.
+            st.collectImportPng = async (dirHandle) => {
+                const out = [];
+                const walk = async (dir, prefix) => {
+                    const files = [], dirs = [];
+                    for await (const e of dir.values()) {
+                        if (e.kind === "file") files.push(e); else if (e.kind === "directory") dirs.push(e);
+                    }
+                    for (const f of files) if (/\.png$/i.test(f.name)) {
+                        out.push({ rel: prefix ? prefix + "/" + f.name : f.name, file: f });
+                    }
+                    for (const d of dirs) await walk(d, prefix ? prefix + "/" + d.name : d.name);
+                };
+                await walk(dirHandle, "");
+                return out;
+            };
+            // Ряд источников: PNG из ComfyUI — обложка сам файл («raw», он же
+            // разбор чанка), категорий нет.
+            st.importPngFromFolder = async () => {
+                st.setExportProgress(true, 0, 1);
+                st.hintSticky = "Импорт: смотрю папку…";
+                st.renderHint?.();
+                if (typeof window.showDirectoryPicker !== "function") {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Ваш браузер не поддерживает выбор папки — нужен Chrome или Edge.";
+                    st.renderHint?.();
+                    return;
+                }
+                let dirHandle = null;
+                try { dirHandle = await window.showDirectoryPicker(); }
+                catch (e) {
+                    st.setExportProgress(false);
+                    if (e && e.name === "AbortError") return;
+                    st.hintSticky = "Не удалось открыть выбор папки.";
+                    st.renderHint?.();
+                    return;
+                }
+                const found = await st.collectImportPng(dirHandle);
+                if (!found.length) {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Импорт: пригодных PNG не нашлось (0 файлов).";
+                    st.renderHint?.();
+                    return;
+                }
+                const items = [];
+                for (const p of found) {
+                    let buf = null;
+                    try {
+                        const file = await p.file.getFile();
+                        if (file.arrayBuffer) buf = new Uint8Array(await file.arrayBuffer());
+                        else buf = new Uint8Array(await new Promise((res, rej) => {
+                            const fr = new FileReader();
+                            fr.onload = () => res(fr.result);
+                            fr.onerror = rej;
+                            fr.readAsArrayBuffer(file);
+                        }));
+                    } catch (e) { /* файл не прочитался — останется без промпта */ }
+                    let prompt = "";
+                    let workflow = null;
+                    if (buf && buf.length) {
+                        try {
+                            const chunks = st.pngChunks(buf);
+                            let api = null, ui = null;
+                            if (chunks.prompt) {
+                                const p = JSON.parse(chunks.prompt);
+                                if (p && typeof p === "object" && !Array.isArray(p)) api = p;
+                            }
+                            if (!api && chunks.workflow) {
+                                const u = JSON.parse(chunks.workflow);
+                                if (u && typeof u === "object" && !Array.isArray(u)) ui = u;
+                            }
+                            prompt = st.promptFromGraph(api || {});
+                            if (!prompt && ui) prompt = st.promptFromWorkflow(ui);
+                            // Граф уходит в запись (а не только в обложку): на
+                            // PNG тяжелее 4МБ обложка сжимается и чанк теряется,
+                            // а «Параметры генерации» берутся из графа записи.
+                            workflow = api || ui || null;
+                        } catch (e) { /* чанк есть, но не JSON — оставляем пусто */ }
+                    }
+                    const base = p.rel.split("/").pop().replace(/\.png$/i, "");
+                    items.push({ title: base, prompt, folder: "", created_at: "", favorite: false,
+                        media: "image", workflow, src: p.rel, _cover: p.file });
+                }
+                await st.importRun(items, false);
+            };
+            // --- v1.57: import HTML-галереи ------------------------------------
+            // Обратный ход экспорта «Галереей»: карточка → запись, рел-путь
+            // превью → файл рядом (img src кодируется по сегментам).
+            st._htmlUnesc = (s) => String(s ?? "").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+                .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+            st._htmlRelDecode = (s) => String(s || "").split("/")
+                .map((seg) => { try { return decodeURIComponent(seg); } catch (e) { return seg; } }).join("/");
+            st.parseGalleryHtml = (html) => {
+                const body = String(html || "");
+                const cards = [];
+                const parts = body.split('<div class="pl-card">');
+                for (let i = 1; i < parts.length; i++) {
+                    const b = parts[i];
+                    const titleM = /<div class="pl-title">([\s\S]*?)<\/div>/.exec(b);
+                    const promptM = /<details class="pl-prompt">[\s\S]*?<pre>([\s\S]*?)<\/pre>/i.exec(b);
+                    const imgM = /<img src="([^"]*)"/i.exec(b);
+                    if (!titleM) continue;
+                    const kv = {};
+                    let cur = null;
+                    const reRow = /<tr><td class="k">([\s\S]*?)<\/td><td>([\s\S]*?)<\/td><\/tr>/g;
+                    while ((cur = reRow.exec(b)) !== null) kv[st._htmlUnesc(cur[1]).trim()] = st._htmlUnesc(cur[2]).trim();
+                    const folder = (kv["Категория"] && kv["Категория"] !== "Без категории")
+                        ? kv["Категория"] : "";
+                    const rawMedia = kv["Тип"] || "";
+                    const media = /🎬/.test(rawMedia) ? "video" : /📷/.test(rawMedia) ? "image" : "";
+                    cards.push({
+                        title: st._htmlUnesc(titleM[1]).trim(),
+                        prompt: promptM ? st._htmlUnesc(promptM[1]) : "",
+                        folder,
+                        created_at: kv["Создана"] || "",
+                        media: media || "",
+                        favorite: (kv["В избранном"] || "").trim() === "да",
+                        relImg: imgM ? st._htmlRelDecode(imgM[1]) : "",
+                    });
+                }
+                return cards;
+            };
+            // Обход: файлы раньше подпапок (карточки в корне — приоритетнее),
+            // html-файлы и карта изображений rel→entry по всему дереву.
+            st.collectImportHtml = async (dirHandle) => {
+                const htmls = [];
+                const images = new Map();
+                const walk = async (dir, prefix) => {
+                    const files = [], dirs = [];
+                    for await (const e of dir.values()) {
+                        if (e.kind === "file") files.push(e); else if (e.kind === "directory") dirs.push(e);
+                    }
+                    for (const f of files) {
+                        const rel = prefix ? prefix + "/" + f.name : f.name;
+                        if (/prompt_library\.html$/i.test(f.name)) {
+                            htmls.push({ rel, file: f });
+                        } else if (/\.(png|jpe?g|webp|gif)$/i.test(f.name)) {
+                            images.set(rel, f);
+                        }
+                    }
+                    for (const d of dirs) await walk(d, prefix ? prefix + "/" + d.name : d.name);
+                };
+                await walk(dirHandle, "");
+                return { htmls, images };
+            };
+            st.importHtmlFromFolder = async (tree) => {
+                st.setExportProgress(true, 0, 1);
+                st.hintSticky = "Импорт: смотрю папку…";
+                st.renderHint?.();
+                if (typeof window.showDirectoryPicker !== "function") {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Ваш браузер не поддерживает выбор папки — нужен Chrome или Edge.";
+                    st.renderHint?.();
+                    return;
+                }
+                let dirHandle = null;
+                try { dirHandle = await window.showDirectoryPicker(); }
+                catch (e) {
+                    st.setExportProgress(false);
+                    if (e && e.name === "AbortError") return;
+                    st.hintSticky = "Не удалось открыть выбор папки.";
+                    st.renderHint?.();
+                    return;
+                }
+                const found = await st.collectImportHtml(dirHandle);
+                if (!found.htmls.length) {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Импорт: prompt_library.html не нашёлся (нужна папка с экспортом «Галереей»).";
+                    st.renderHint?.();
+                    return;
+                }
+                const items = [];
+                for (const h of found.htmls) {
+                    let text = "";
+                    try {
+                        const f = await h.file.getFile();
+                        text = f.text ? await f.text() : await new Promise((res, rej) => {
+                            const fr = new FileReader();
+                            fr.onload = () => res(String(fr.result || ""));
+                            fr.onerror = rej;
+                            fr.readAsText(f);
+                        });
+                    } catch (e) { continue; }
+                    const cards = st.parseGalleryHtml(text);
+                    // Путь изображений в карточках относится к папке html-файла —
+                    // пересчитываем в путь от корня обхода.
+                    const htmlDir = h.rel.split("/").slice(0, -1).join("/");
+                    cards.forEach((c, idx) => {
+                        if (!(c && c.title && String(c.prompt || "").trim())) return;
+                        let key = htmlDir ? htmlDir + "/" + c.relImg : c.relImg;
+                        if (!found.images.has(key) && c.relImg) key = c.relImg;
+                        items.push({ title: c.title, prompt: c.prompt, folder: c.folder,
+                            created_at: c.created_at, favorite: c.favorite,
+                            media: c.media || null, src: h.rel + "#" + (idx + 1),
+                            _cover: found.images.get(key) || null });
+                    });
+                }
+                if (!items.length) {
+                    st.setExportProgress(false);
+                    st.hintSticky = "Импорт: карточек с текстом в галерее не нашлось.";
+                    st.renderHint?.();
+                    return;
+                }
+                await st.importRun(items, tree);
+            };
+            // --- v1.57: импорт текстового файла -------------------------------
+            // Разбиение по режимам: абзац (blank-line), строка (каждая непустая),
+            // весь файл одной записью (title из «# …» либо имя файла без расширения).
+            st.textEntries = (base, text, mode) => {
+                const raw = String(text || "");
+                const out = [];
+                if (mode === "line") {
+                    for (const ln of raw.split("\n")) {
+                        const t = ln.trim();
+                        if (t) out.push({ title: String(base || ""), prompt: t });
+                    }
+                    return out;
+                }
+                if (mode === "whole") {
+                    const t = raw.trim();
+                    if (!t) return out;
+                    const hm = /^#\s+(.+)$/m.exec(raw);
+                    const title = hm ? hm[1].trim()
+                        : String(base || "").replace(/\.(txt|md)$/i, "") || "Запись";
+                    out.push({ title, prompt: t });
+                    return out;
+                }
+                // "para" — по умолчанию
+                for (const block of raw.split(/\n\s*\n/)) {
+                    const t = block.trim();
+                    if (!t) continue;
+                    const lines = t.split("\n");
+                    out.push({ title: lines[0].trim(), prompt: t });
+                }
+                return out;
+            };
+            // Диалог «как разбить текст» — 3 режима для всех выбранных файлов.
+            st.textSplitDialog = (readFiles) => {
+                const modes = [
+                    ["Абзацы (каждый абзац — запись)", "para"],
+                    ["Строки (каждая строка — запись)", "line"],
+                    ["Весь файл одной записью", "whole"],
+                ];
+                st.uiPanel({
+                    title: "📝 Текстовый файл → библиотека",
+                    subtitle: `Файлов: ${readFiles.length}. Как разбить на записи?`,
+                    items: modes.map(([label, mode]) => ({
+                        label, onClick: () => st.importTextRun(readFiles, st.selFolder || "__all", mode),
+                    })),
+                });
+            };
+            // Текстовые файлы: записи без категорий и обложек; src — имя+
+            // «#режим», чтобы дубликаты считались корректно при повторном импорте.
+            st.importTextRun = (readFiles, target, mode) => {
+                const items = [];
+                for (const f of readFiles || []) {
+                    for (const e of st.textEntries(f.base, f.text, mode)) {
+                        items.push({ title: e.title, prompt: e.prompt, folder: "", created_at: "",
+                            favorite: false, media: null, src: String(f.base) + "#" + String(mode), _cover: null });
+                    }
+                }
+                if (!items.length) {
+                    st.hintSticky = "Импорт: в тексте не нашлось ни одной записи.";
+                    st.renderHint?.();
+                    return;
+                }
+                return st.importRun(items, false);
             };
             st.exportFolder = async (pathKey) => {
                 st.setExportProgress(true, 0, 1);

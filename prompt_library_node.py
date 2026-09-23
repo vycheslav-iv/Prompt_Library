@@ -390,6 +390,48 @@ def _find_text_match(entries, prompt):
     return None
 
 
+def _norm_import_text(text):
+    """Нормализация текста для сравнения дублей при импорте (v1.56).
+
+    Файл приносит CRLF, хвостовые пробелы и пустые строки на конце — по сырому
+    тексту одно и то же считалось бы разным. Обрезаем строки построчно, снимаем
+    пустые края, переносы приводим к '\n'. ВНУТРЕННИЕ пустые строки сохраняем:
+    абзацы промпта — часть текста. Отличие от /add (там _find_text_match
+    сравнивает сырой stripped-текст) намеренное: из файла, а не из ноды.
+    """
+    s = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [ln.rstrip() for ln in s.split("\n")]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
+def _import_target_folder(header_folder, target, tree=True):
+    """Куда ложится импортируемая запись (v1.56).
+
+    header_folder — категория из шапки файла («- Категория: …»), target — ветка,
+    выбранная в проводнике ноды, tree — «сохранять структуру».
+    «Всё» — структура восстанавливается 1:1; реальная папка X — остаток
+    категории уходит ПОД X, а префикс X/ не удваивается (иначе импорт туда,
+    откуда экспортировали, дал бы «X/X/Портреты»); «Без категории» — плоско в
+    корень, если структуру не попросили сохранить.
+    """
+    header = _norm_folder(header_folder or "")
+    tgt = str(target or "").strip()
+    if tgt in ("", "__all"):
+        return header
+    if tgt == "__root":
+        return header if tree else ""
+    base = _norm_folder(tgt)
+    if not tree or not header:
+        return base
+    if header == base or header.startswith(base + "/"):
+        return header
+    return base + "/" + header
+
+
 def _new_id(*parts):
     base = "|".join(parts) + datetime.datetime.now().isoformat()
     return hashlib.md5(base.encode("utf-8")).hexdigest()[:10]
@@ -533,6 +575,18 @@ def _upgrade_preview_to_png(entry, workflow):
         return False
 
 
+def _dataurl_bytes(data_url):
+    """Байты из dataURL (или голого base64). Пусто/битый → b""."""
+    try:
+        import base64
+        s = str(data_url or "")
+        if s.startswith("data:") and "," in s:
+            s = s.split(",", 1)[1]
+        return base64.b64decode(s[:8_000_000], validate=False)
+    except Exception:
+        return b""
+
+
 def _save_preview_upload(data_url, entry_id, workflow=None):
     """Превью из ручной загрузки (PNG/JPEG dataURL или голый base64).
     Сохраняет даунскейл 512px в previews/{id}.png. Возвращает относительный
@@ -579,6 +633,28 @@ def _preview_path(entry_id):
         if f.exists():
             return f
     return None
+
+
+def _workflow_chunk_from_bytes(raw):
+    """Workflow-чанк из БАЙТОВ PNG (v1.56).
+
+    Нужен при импорте: обложка, выгруженная нашим экспортом, — это то же превью
+    со встроенным графом, поэтому параметры генерации возвращаются в базу вместе
+    с картинкой, без отдельного файла воркфлоу. Не-PNG / нет чанка → None.
+    """
+    try:
+        import io
+        from PIL import Image
+        data = Image.open(io.BytesIO(raw)).info.get("workflow")
+    except Exception:
+        return None
+    if not data:
+        return None
+    try:
+        wf = json.loads(data)
+    except Exception:
+        return None
+    return wf if isinstance(wf, dict) else None
 
 
 def _preview_workflow_chunk(path):
@@ -1657,7 +1733,11 @@ def _pickup_stash(node, folder, workflow):
     return token
 
 
-def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None, media=None):
+def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None, media=None,
+               created_at=None, favorite=False, pinned=False, import_src=None):
+    """Новая запись. Хвостовые аргументы (v1.56) — для импорта: файл несёт дату,
+    ★ и источник, и подменять их на «сейчас»/False значило бы терять данные
+    (у обычных вызовов всё остаётся по умолчанию — поведение не меняется)."""
     h = _dedup_hash(prompt, folder)
     for e in entries:
         if e.get("hash") == h:
@@ -1670,14 +1750,17 @@ def _add_entry(entries, prompt, folder, preview=None, title="", workflow=None, m
             "prompt": prompt,
             "folder": folder,
             "category": folder,  # legacy-дубль для совместимости
-            "favorite": False,
-            "pinned": False,  # закреп вверху папки (v1.30, §36)
-            "created_at": _now(),
+            "favorite": bool(favorite),
+            "pinned": bool(pinned),  # закреп вверху папки (v1.30, §36)
+            "created_at": created_at or _now(),
             "last_used": None,  # дата последней выдачи (как в библиотеке)
             "use_count": 0,  # счётчик выдач (для сортировки «Частые»)
             "preview": preview,  # уже относительный путь 'previews/{id}.png' или None
             "workflow": workflow,  # снапшот воркфлоу (открытие с канваса); None = нет
             "media": media,  # 'video' / 'image' / None (старые записи — None = неизвестно)
+            # Откуда пришла запись при импорте (имя файла/путь): нужно отчёту и
+            # будущему «перечитать из источника». У обычных записей — None.
+            "import_src": import_src or None,
         })
     return entry_id, True
 
@@ -2154,6 +2237,13 @@ try:
         # Метка типа описывает ТЕКУЩУЮ обложку: заменили видео на картинку —
         # метка меняется, иначе фильтр «Видео» показывал бы не то.
         target["media"] = media
+        # Импорт обложки (v1.56): если у записи графа ещё нет, а картинка его
+        # несёт (наш экспорт выгружает превью вместе со встроенным workflow),
+        # забираем граф из неё — иначе «Параметры генерации» в галерее потеряются.
+        if preview_data and not _entry_has_workflow(target):
+            _wf_chunk = _workflow_chunk_from_bytes(_dataurl_bytes(preview_data))
+            if _wf_chunk and _attach_workflow(entries, entry_id, _wf_chunk):
+                _save_preview_upload(preview_data, entry_id, _wf_chunk)
         try:
             _save_db(entries, folders)
         except Exception as exc:
@@ -2321,6 +2411,128 @@ try:
             # без него соседние Library-ноды и другие вкладки остаются со старым списком.
             _broadcast_refresh()
         return web.json_response({"ok": True, "id": entry_id, "duplicate": False})
+
+    @routes.post("/prompt_library/import")
+    @_locked
+    async def _pl_import(request, body=None):
+        """Пакетный импорт записей из файлов (v1.56).
+
+        Файлы живут у клиента, поэтому разбор .md/HTML/PNG делает браузер (JS),
+        а сюда приходит уже список записей — одна форма для любого источника.
+        Правила (решения пользователя):
+          • дубликат = тот же текст ПОСЛЕ нормализации (_norm_import_text) в
+            ЛЮБОЙ папке — такая запись не создаётся, а возвращается в skipped
+            вместе с папкой существующей: пользователь видит, что и почему
+            не влезло; существующие записи не трогаются вообще;
+          • цель берётся из проводника ноды (_import_target_folder);
+          • в базу нельзя записать больше MAX_ENTRIES — при нехватке места
+            отказ БЕЗ частичной записи (иначе _trim_entries молча съел бы хвост
+            вместе с файлами графов и превью).
+        """
+        target = str(body.get("target", "__all") or "").strip()
+        # Умолчание «сохранять структуру» зависит от цели: «Без категории» по
+        # решению пользователя кладёт все записи плоско в корень (галочка в UI
+        # включает структуру), у остальных веток структура сохраняется.
+        tree = body.get("tree", None)
+        tree = (target != "__root") if tree is None else bool(tree)
+        items = body.get("items")
+        if not isinstance(items, list) or not items:
+            return web.json_response({"error": "items must be a non-empty list"}, status=400)
+        # Служебные ветки — фильтры/привязки, не место хранения (§24).
+        if target.startswith("__") and target not in ("__all", "__root"):
+            return web.json_response(
+                {"error": f"target '{target}' is not a storage place"}, status=400)
+
+        entries, folders = _load_db()
+        # Индекс базы по нормализованному тексту: одно правило на весь импорт.
+        seen = {}
+        for e in entries:
+            key = _norm_import_text(e.get("prompt"))
+            if key and key not in seen:
+                seen[key] = e
+
+        to_add, skipped, failed = [], [], []
+        batch = set()
+        for raw in items:
+            if not isinstance(raw, dict):
+                failed.append({"title": "", "reason": "bad-item"})
+                continue
+            prompt = str(raw.get("prompt") or "").strip()
+            title = str(raw.get("title") or "").strip()
+            if not prompt:
+                failed.append({"title": title, "reason": "empty"})
+                continue
+            key = _norm_import_text(prompt)
+            dup = seen.get(key)
+            if dup is not None:
+                skipped.append({"title": title or _auto_title(prompt),
+                                "exists_id": dup.get("id"),
+                                "exists_folder": dup.get("folder", ""),
+                                "reason": "db"})
+                continue
+            if key in batch:  # два одинаковых файла в одной папке/выборке
+                skipped.append({"title": title or _auto_title(prompt),
+                                "exists_folder": _import_target_folder(
+                                    raw.get("folder"), target, tree),
+                                "reason": "batch"})
+                continue
+            batch.add(key)
+            media = str(raw.get("media") or "").strip().lower()
+            if media not in ("image", "video"):
+                media = None
+            wf = raw.get("workflow")
+            to_add.append({
+                "prompt": prompt,
+                "title": title,
+                "folder": _import_target_folder(raw.get("folder"), target, tree),
+                "media": media,
+                "favorite": bool(raw.get("favorite")),
+                "created_at": str(raw.get("created_at") or "").strip() or None,
+                "import_src": str(raw.get("src") or "").strip()[:400] or None,
+                "workflow": wf if isinstance(wf, dict) else None,
+            })
+
+        free = max(0, MAX_ENTRIES - len(entries))
+        if not to_add:
+            if not skipped:  # мусор вместо записей — говорим прямо, а не «ок»
+                return web.json_response(
+                    {"error": "nothing to import", "failed": failed}, status=400)
+            # Всё оказалось дублями: это не ошибка, но и писать нечего.
+            return web.json_response({"ok": True, "created": [], "skipped": skipped,
+                                      "failed": failed, "free": free, "total": len(items)})
+        if len(to_add) > free:
+            return web.json_response({"error": "limit", "free": free,
+                                      "want": len(to_add), "max": MAX_ENTRIES}, status=400)
+
+        created = []
+        new_folders = set(folders)
+        for it in to_add:
+            entry_id, was_new = _add_entry(
+                entries, it["prompt"], it["folder"], title=it["title"],
+                media=it["media"], workflow=it["workflow"],
+                created_at=it["created_at"], favorite=it["favorite"],
+                import_src=it["import_src"])
+            if not was_new:
+                # hash-дедуп _add_entry сработал там, где нормализация не совпала
+                # с хранимым текстом (например CRLF внутри старой записи):
+                # честно кладём в skipped, а не выдаём за созданное.
+                skipped.append({"title": it["title"] or _auto_title(it["prompt"]),
+                                "exists_id": entry_id, "reason": "db"})
+                continue
+            # src возвращаем клиенту: по нему он привязывает обложки к созданным
+            # записям (порядок created не совпадает с порядком items — часть
+            # элементов ушла в skipped/failed).
+            created.append({"id": entry_id, "title": it["title"] or _auto_title(it["prompt"]),
+                            "folder": it["folder"], "src": it["import_src"]})
+            if it["folder"]:
+                new_folders |= {it["folder"]} | set(_parent_folders(it["folder"]))
+        entries = _trim_entries(entries)
+        _save_db(entries, sorted(new_folders))
+        if created:
+            _broadcast_refresh()
+        return web.json_response({"ok": True, "created": created, "skipped": skipped,
+                                  "failed": failed, "free": max(0, MAX_ENTRIES - len(entries)),
+                                  "total": len(items)})
 
     @routes.post("/prompt_library/favorite")
     @_locked
