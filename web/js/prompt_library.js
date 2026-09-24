@@ -145,7 +145,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.58-png-files";
+const PL_JS_VERSION = "1.59-outs-independent";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -2288,8 +2288,9 @@ const reload = async () => {
                             st.outsActiveFolder = fs.path;
                         }
                     }
-                    if (selWidget) selWidget.value = e.id;
-                    st.anchorEntry = e.id;
+                    // v1.59: карточка «Выходов» (папки-вывода или слота) НЕ пишет в
+                    // основной выход и НЕ снимает выделение — просмотр идёт панелью,
+                    // привязка/переключение — только через активный вывод слота.
                     await st.fillDetail(e.id);
                     // НЕ трогаем selFolder: остаёмся в «Выходах», как в обычном режиме
                     renderTree(); render();
@@ -2353,8 +2354,7 @@ const reload = async () => {
                     }
                     const e = st.entries.find((x) => x.id === slot.id);
                     if (e) {
-                        if (selWidget) selWidget.value = e.id;
-                        st.anchorEntry = e.id;
+                        // v1.59: строка карточки-слота не трогает основной выход
                         st.fillDetail(e.id).then(() => { renderTree(); render(); });
                     } else {
                         renderTree(); render();
@@ -2585,8 +2585,17 @@ const reload = async () => {
                         }
                         // Обычный клик при наличии меток — снять весь выбор (как в проводнике)
                         if (st.markEntries.size || st.markFolders.size) st.clearMarks();
-                        if (selWidget) selWidget.value = e.id;
-                        st.anchorEntry = e.id; // обычный клик ставит якорь для Shift-диапазона
+                        // v1.59: карточка, подключённая к «Выходы» (прямо слотом
+                        // или папкой с ней), НЕ пишет в основной выход и НЕ снимает
+                        // выделение с неподключённых промптов — «Выходы» работают
+                        // независимо от выбранной записи. Панель просмотра при этом
+                        // открывается (fillDetail не трогает selWidget).
+                        const cardSlot = st.outSlotOfEntry(e.id);
+                        const folderBound = st.outSlotOfFolder(e.folder);
+                        if (!cardSlot && !folderBound) {
+                            if (selWidget) selWidget.value = e.id;
+                            st.anchorEntry = e.id; // обычный клик ставит якорь для Shift-диапазона
+                        }
                         // v1.44 (§40): открыта папка-слот и кликнули карточку —
                         // слот сразу выводит её (перезапись active_id → cache-key
                         // меняется → нода переисполняется).

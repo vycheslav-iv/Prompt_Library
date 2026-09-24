@@ -2358,9 +2358,13 @@ await run("slots: папка-вывод — карточки с превью, к
   await nonActive.onclick({});
   check("клик переключил active_id на e10", st.outSlotOfFolder("ПапкаA").active_id === "e10");
   check("selFolder не поменялся — из «Выходов» никуда не уходим", st.selFolder === "__outs", st.selFolder);
-  check("запись выбрана — панель промпта снизу открыта",
-    st.selWidget.value === "e10" && st.detail.style.display === "flex",
-    `sel=${st.selWidget.value}, detail=${st.detail.style.display}`);
+  // v1.59 (§независимость): клик по карточке в «Выходах» переключает только
+  // активный вывод папки-слота (провод), но НЕ трогает основной выход и не
+  // снимает выделение с не подключённого промпта. selWidget остаётся "e11"
+  // (он не подключён к «Выходы»), панель открыта для просмотра.
+  check("карточка «Выходов» НЕ трогает основной выход (selWidget остался e11), просмотр открыт",
+    st.selWidget.value === "e11" && st.detail.style.display === "flex" && st.detailId === "e10",
+    `sel=${st.selWidget.value}, detail=${st.detail.style.display}, detailId=${st.detailId}`);
   st.render();
   const newActive = st.list.children.filter((c) => c.children[0] && c.children[0].tagName === "IMG")
     .find((c) => String(c.style.cssText).includes("background:#1c3525"));
@@ -2395,6 +2399,51 @@ await run("slots: папка-вывод — карточки с превью, к
     st.list.children[0] === headEl && st.list.children.indexOf(listCard) > 0);
   st.viewSel.value = "large";
   st.render();
+});
+
+// v1.59 (§независимость): «Выходы» не дышат в основной выход. В ОБЫЧНОЙ галерее
+// карточка, подключённая слотом (или лежащая в папке-выводе), при клике НЕ пишет
+// в selWidget (основной промпт 1) и НЕ снимает выделение с неподключённых
+// промптов — она лишь открывает панель просмотра. Неподключённая карточка
+// по-прежнему выбирается обычным кликом.
+await run("v1.59: карточки «Выходов» и папки-выводов не трогают основной выход в обычной галерее", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.folders.push("Фото", "Видео");
+  st.entries.push(mkSlotEntry("e1", "Фото"), mkSlotEntry("e2", "Фото"), mkSlotEntry("e3", "Видео"));
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  // Основной выход смотрит на НЕ подключённую запись e3 («Видео»).
+  st.selWidget.value = "e3";
+  // Карточка e1 подключена слотом на доп. выход; папка «Фото» — папкой-выводом.
+  st.plDrop({ kind: "entry", id: "e1" }, "__outs");
+  st.plDrop({ kind: "folder", path: "Фото" }, "__outs");
+  st.renderTree(); st.render();
+  const cardE1 = st.list.children.find((c) => ftext(c).includes("e1"));
+  check("в обычной галерее есть карточка e1 (подключённая к «Выходы»)", !!cardE1,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  await cardE1.onclick({});
+  check("клик по подключённой карточке НЕ пишет в основной выход (selWidget остался e3), только просмотр",
+    st.selWidget.value === "e3" && st.detailId === "e1" && st.detail.style.display === "flex",
+    `sel=${st.selWidget.value}, id=${st.detailId}, d=${st.detail.style.display}`);
+  // Карточка из папки-вывода (e2 тоже в «Фото»): тот же принцип.
+  const cardE2 = st.list.children.find((c) => ftext(c).includes("e2"));
+  check("есть карточка e2 (лежит в папке-выводе «Фото»)", !!cardE2,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  await cardE2.onclick({});
+  check("клик по карточке из папки-вывода тоже не трогает основной выход (selWidget=e3)",
+    st.selWidget.value === "e3", `sel=${st.selWidget.value}`);
+  check("просмотр e2 открыт", st.detailId === "e2" && st.detail.style.display === "flex",
+    `id=${st.detailId}, d=${st.detail.style.display}`);
+  // Неподключённая карточка обязана выбираться как раньше (регрессия обычного клика).
+  const cardE3 = st.list.children.find((c) => ftext(c).includes("e3"));
+  check("есть карточка e3 (не подключена)", !!cardE3,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  await cardE3.onclick({});
+  check("клик по НЕ подключённой карточке по-прежнему выбирает её в основной выход",
+    st.selWidget.value === "e3", `sel=${st.selWidget.value}`);
 });
 
 // v1.45.3 (два скриншота пользователя):

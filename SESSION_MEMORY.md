@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (v1.58, 2026-09-23)
+# Память сессии — Prompt Library (v1.59, 2026-09-24)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,105 +7,87 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-- **Импорт доведён до конца (v1.56 → v1.57)**: у «📥 Импорт» все 4 источника.
-  v1.56 — папка `.md` с обложками (разбор шапки экспорта, цель из проводника,
-  дедуп по нормализованному тексту, лимит до записи, обложка возвращает граф
-  через `_workflow_chunk_from_bytes`).
-  v1.57 — **PNG** (промпт из чанка `workflow` внутри файла: `pngChunks`
-  tEXt/iTXt — длина сверяется с остатком буфера, **CRC не проверяется**,
-  iTXt несжатый; `promptFromGraph`/`promptFromWorkflow`), **HTML-галерея**
-  (`parseGalleryHtml` — round-trip БЕЗ машинного блока в экспорт), **текст**
-  (`.txt/.md`, диалог «Абзацы / Строки / Весь файл»). Все три сходятся в единый
-  `st.importRun(items, tree, extra)` — рефакторинг .md-потока. **Сервер не менялся.**
-- **Аудит v1.57** (документация + код), 3 кодовых фикса:
-  1. `promptFromGraph` перебирает сэмплеры — первый с рабочим `positive`
-     (`SamplerCustomAdvanced` без `positive` пропускается, не глушит разбор);
-  2. PNG-импорт шлёт граф в `items.workflow` (сервер пишет его в
-     `workflows/{id}.json`) — тяжёлые PNG >4МБ со сжатой обложкой «Параметры
-     генерации» НЕ теряют (обложка ≤4МБ — граф дополнительно из обложки, §49.5);
-  3. гард `rep === null` в `importRun` — честное «создано 0» вместо падения.
-  + правки документации (пикер = `showDirectoryPicker`, факты `pngChunks`).
-- **Закоммичено и запушено**: `24675b6` v1.56+v1.57 (+ аудит-фиксы), last push.
-- Проверки: смоук **115 фаз** ✅ (3 красных ДО фиксов), Python 430/430 ✅,
-  аудит 21 роут ✅, `check.py` ЗЕЛЁНЫЙ. `sync.py` — рабочая копия синхронизирована.
+- **v1.59: «Выходы» независимы от основного выхода.** По отчёту пользователя:
+  записи/папки, подключённые в «🔌 Выходы», при клике выдавали себя через
+  ОСНОВНОЙ выход `prompt_1` и снимали выделение с выбранного неподключённого
+  промпта. Фикс — в трёх местах `web/js/prompt_library.js` (см. §2):
+  1. обычная карточка галереи — запись в `selWidget`/`anchorEntry` ТОЛЬКО если
+     `!outSlotOfEntry(e.id) && !outSlotOfFolder(e.folder)` (прогард `cardSlot`/
+     `folderBound`; механика `active_id` папки-вывода — вне гарда, работает всегда);
+  2. `makeOutCard` — убраны запись `selWidget`/`anchorEntry`, осталась только
+     механика `active_id` папки-вывода + `fillDetail` + `outsActiveFolder`;
+  3. `slotOutRow` (карточка под «Выходы») — та же чистая версия через `fillDetail`.
+  Клик по «Выходам»: подсветка + просмотр панелью, а `prompt_1` хранит последний
+  НЕподключённый выбор обычной галереи. Смена `active_id` папки-вывода дальше
+  меняет cache-key → перепрогон.
+- **Красные проверки ДО фикса**: 3 новые фазы смоука (`v1.59: «Выходы» не трогают
+  основной выход`) падали (3 × `ASSERT FAIL`: карточка папки-вывода — `selWidget`
+  должна остаться `e11`; слот «Выходов» — остаётся `e3`; обычная карточка из
+  папки-вывода — `e3`). После фикса — зелёные, смоук **118 фаз** ✅.
+- **Итог**: смоук 118 ✅, `check.py --strict` ЗЕЛЁНЫЙ (логика ноды, JS-смоук,
+  статический аудит, check.json), sync ✅ (сообщили пользователю: перезапустить
+  ComfyUI). `PL_JS_VERSION = "1.59-outs-independent"`.
+- **SPEC + память + коммит/пуш** (этот файл). Коммит: 26db85d (v1.58) → новый
+  v1.59.
 
 ## 2. Итоговое состояние кода
 
-**Python** (`prompt_library_node.py`): НЕ МЕНЯЛСЯ в v1.57. Роут импорта —
-`/prompt_library/import` (:2415), `_norm_import_text` (:393), `_add_entry` с
-хвостовыми `created_at/favorite/pinned/import_src`, `attach_preview` (:2243) с
-`_workflow_chunk_from_bytes` (граф из обложки ≤4МБ). Запись графа —
-`workflows/{id}.json`. Тесты 430/430.
+**Python** (`prompt_library_node.py`): НЕ МЕНЯЛСЯ в v1.59 (фикс чисто
+фронтендовый). Роут импорта `/prompt_library/import` (:2415), `_norm_import_text`
+(:393), `attach_preview` (:2243). Тесты 430/430.
 
-**JS** (`web/js/prompt_library.js`, `PL_JS_VERSION = "1.58-png-files"`, :148):
-- `st.importPickPng` (:3454) — БОЛЬШЕ не открывает сразу пикер папки: сначала
-  панель-выбор (паттерн `st.uiPanel` §50.6): «📂 Папка со всеми PNG» →
-  `st.importPngFromFolder()` (прежний `showDirectoryPicker`-путь) / «🖼 Отдельные
-  файлы (один или несколько)» → `st.pickPngFiles()` — скрытый
-  `input type="file" accept="image/png,.png" multiple` (паттерн текстового импорта
-  §50.4, работает в ЛЮБОМ браузере, а не только Chrome/Edge как
-  `showDirectoryPicker`); «✖ Отмена» закрывает без импорта.
-- Общие PNG-хелперы (вынесены из дублирования папка/файлы):
-  `st._fileToBytes(file)` — чтение в `Uint8Array` (arrayBuffer, фолбэк FileReader,
-  `null` на ошибке); `st.pngItemFromBuf(buf)` (район :3660) — разбор чанка
-  (tEXt/iTXt, пакетный `src` = title, обложка, граф в workflow через §50.3);
-  `st.importPngFromFiles(files)` — уникализация `src` (`used` Set → `_2`, `_3`),
-  `importRun(items, false)`, отчёт «создано N / дубликатов M» + тост; коллизия
-  `src` (два `Первое.png`) → уникальный `Первое_2.png`, иначе серверное эхо
-  `bySrc` перезаписал бы первую обложку второй.
-- Меню «📥 Импорт»: `importPickPng` (:3454) = панель-выбор; `importPickText`
-  (:3477), `st.importPngFromFiles` (район :36xx), `st.importPngFromFolder`
-  (:3604) — отрефакторен на общие хелперы; `pickPngFiles` (:36xx).
-- `st.pickPngFiles` — скрытый `input` с `accept="image/png,.png"` removed через
-  `setTimeout` 2000 (как текстовый импорт); multiple → `importPngFromFiles`.
-- Меню импорта: `st.importStart` + `importGuard` (★/Выходы — отказ, :3428) +
-  `importPickTree/Png/Html/Text` (:3437-:3477).
-- ОБЩИЙ ПОТОК: `importSummary` (:3278) → `importRun(items, tree, extra)` (:3293) —
-  пакетный POST, прогресс, заливка обложек по одной `st.coverDataUrl(it._cover)`,
-  `plRefreshLocal`+`reload`, отчёт «создано N / дубликатов M / без текста K»;
-  гард `rep === null` → `{}`.
-- PNG-блок: `pngChunks` (:3511), `promptFromGraph` (:3549, перебор сэмплеров,
-  positive-цепочка `inputs.text` до глубины 4, фолбэк CLIPTextEncode),
-  `promptFromWorkflow` (:3579), `importPngFromFolder` (:3604, `showDirectoryPicker` +
-  рекурсивный обход всех `*.png`; `workflow` = api (chunks.prompt) || ui (chunks.workflow);
-  обложка = файл; граф в записи).
-- HTML-блок: `_htmlUnesc`, `_htmlRelDecode`, `parseGalleryHtml`, `collectImportHtml`,
-  `importHtmlFromFolder` (:3731, src `htmlRel#idx`).
-- Текст: `textSplitDialog` (:3823), `textEntries` (para/line/whole),
-  `importTextRun` (:3839) — **возвращает `st.importRun(items,false)`**.
+**JS** (`web/js/prompt_library.js`, `PL_JS_VERSION = "1.59-outs-independent"`, :148):
+- КЛИК-ХЕНДЛЕРЫ (правка v1.59): обычный `card.onclick` — запись в основной выход
+  `if (!cardSlot && !folderBound)`; `makeOutCard` (~:2229-2297) — без
+  `selWidget`/`anchorEntry`, с `writeOutSlots`/`applyOutSockets`/`outsActiveFolder`;
+  `slotOutRow` (карточка под «Выходы», ~:2307-2360) — `fillDetail().then(renderTree+render)`.
+- Хелперы слотов: `readOutSlots`, `outSlotOfEntry` (~:1289), `outSlotOfFolder`
+  (~:1290), `folderActOf` (~:1383), `applyOutSockets` (~:1332), `plDrop` (:1850).
+- `fillDetail` (~:2901) ставит `detailId` + панель `display:flex`, НЕ трогает
+  `selWidget` — панель просмотра открывается без смены основного выхода.
+- Строка версии: `PL_JS_VERSION` (:148); видна в тулбаре `verTag` (:271).
+- Импорт (v1.56–v1.58, без изменений): `st.importPickPng` (:3454, панель-выбор
+  «папка/файлы»), `pickPngFiles` (:36xx), `importPngFromFiles` (район :36xx,
+  уникализация `src`), `pngChunks` (:3511), `promptFromGraph` (:3549, перебор
+  сэмплеров, глубина ≤4), `importPngFromFolder` (:3604), HTML (:3731), текст
+  `textSplitDialog` (:3823) / `importTextRun` (:3839, возвращает
+  `st.importRun(items,false)`), единый `importRun` (:3293).
 
-**Тесты**: `_smoke_prompt_library.mjs` 115 фаз (v1.57-фазы ~:3308-:3440; PNG-хелперы
-`crcDummy/rawPngChunk/pngTexT/pngITxt/makePng` ~:3317; sandbox TextDecoder/TextEncoder :218),
-`_test_prompt_library.py` 430, `_audit_prompt_library.mjs` 21 роут; живая
-`_probe_live_dom.py` (требует питон ComfyUI — `python_embeded`, на системном нет websockets).
+**Тесты**: `_smoke_prompt_library.mjs` 118 фаз. Новые v1.59-фазы — в районе
+папки-вывода (~:2311-2402, переписана; затем новая фаза обычной галереи после
+:2402, перед `// v1.45.3`) — матчеры `ftext(c).includes("e1"/"e2"/"e3")`, заголовок
+карточки = `e.head || ""`. Регрессионный страж «категории: смена папки не снимает
+выбранную запись» (~:2686-2705) — проходит. `_test_prompt_library.py` 430,
+`_audit_prompt_library.mjs` 21 роут; живая `_probe_live_dom.py` (требует питон
+ComfyUI — `python_embeded`).
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- **«создано 2» при двух записях с ОДНИМ src**: `importTextRun` НЕ возвращал
-  promise `importRun` → фаза проверяла hint до отчёта → `return` обязателен
-  (правило на async-хелперы импорта!); эталон — по `rep.created.length`, сервер
-  дедуплицирует по ТЕКСТУ (§50.5).
-- **Заблуждения в документации** (исправлены аудитом): «CRC-аргумент zip» —
-  выдумка, CRC просто пропускается (`p += len + 4`); «диалог файлов» — на деле
-  `showDirectoryPicker` + рекурсивный обход; «PNG >4МБ теряют граф» — теперь
-  граф в записи, терялась только обложка-чанк.
-- Более раннее (v1.44–v1.55) — в стр. памятях в `SESSION_MEMORY-history/`.
+- **«Выходы» писали в основной выход**: общий клик-хендлер всегда ставил
+  `selWidget.value = e.id` + `st.anchorEntry = e.id`, это дублировало и в
+  `makeOutCard`, и в `slotOutRow`. Решение — прогард по принадлежности к «Выходам»
+  (`outSlotOfEntry`/`outSlotOfFolder`) для основного пути галереи и полное снятие
+  записи `selWidget` с карточек «Выходов»/папок-вывода (просмотр — только панелью
+  через `fillDetail`).
+- Дальше (v1.56–v1.58) — уроки б. ранних версий: async-хелперы импорта обязаны
+  возвращать promise; отчёт «создано N» = `rep.created.length`; `pngChunks` CRC не
+  проверяет; граф записи — в `items.workflow`. Ранние сессии — в
+  `SESSION_MEMORY-history/`.
 
 ## 4. Что важно не сломать при продолжении работы
 
-- **Async-хелперы импорта обязаны ВОЗВРАЩАТЬ promise** (`importTextRun`, любые
-  новые) — иначе смоук-фаза проверяет состояние ноды раньше времени.
-- **Отчёт «создано N» = `rep.created.length`** — не items.length (сервер
-  дедуплицирует по тексту; частичную запись не менять).
-- **`st.importRun`** — единая точка импорта; .md/PNG/HTML/текст зовут её; сервер
-  не трогать (роут/`_add_entry`/лимит работают). Граф записи — в `items.workflow`.
-- Меню импорта: `importGuard` ПЕРВЫМ (★/Выходы — отказ словами); «Без категории»
-  — диалог «плоско / структура» (importTreeDefault).
-- Семантика: HTML `folder` из карточки — как есть; PNG — `folder:""`,
-  `media:"image"`, обложка = файл; текст — `folder:""`, `media:null`.
-- `pngChunks`/`promptFromGraph` — глубина цепочек ≤4 (защита от циклов), фолбэк
-  единственный CLIPTextEncode, пустой граф → `""` (не выдумывать).
+- **"Выходы" ↔ основной выход: НЕ ВОЗВРАЩАТЬ** запись `selWidget`/`anchorEntry`
+  в `makeOutCard`/`slotOutRow` — это возвращает баг v1.59 (карточки «Выходов»
+  снова будут выводиться через `prompt_1`).
+- Прогард в обычной карточке: `cardSlot`/`folderBound` вычисляются ДО записи
+  `selWidget`; механика `active_id` папки-вывода — вне гарда (папки-вывода должны
+  переключаться кликом в ЛЮБОМ случае).
+- `fillDetail` — единственный способ «открыть просмотр» без смены основного выхода.
+- Регрессионный страж «категории: смена папки» (~:2686-2705) — обычный клик по
+  НЕподключённой карточке обязан по-прежнему ставить `selWidget.value`.
 - Python-правки видны только после **перезапуска ComfyUI**; JS — **Ctrl+F5**.
+- `check.py --strict` ПЕРЕД «готово» (правило проекта, работает: логика ноды +
+  JS-смоук + аудит + check.json).
 
 ## 5. Следующие шаги (идеи, не сделано)
 
@@ -117,10 +99,11 @@
 
 ## 6. Связанные файлы
 
-- `Prompt_Library/SPECIFICATION.md` — §17 (состояние), §18.4 (высоты), §40.6 (иконки),
-  §41–§48, **§49 (импорт .md), §50 (импорт PNG/HTML/текст)**, хроника §15 (записи 48–49).
+- `Prompt_Library/SPECIFICATION.md` — §17 (состояние, v1.59 добавлен), **§50.8**
+  (механика независимости «Выходы»), §40.6 (мультивывод/иконки), §49–§50 (импорт),
+  хроника §15 (запись 51).
 - `Prompt_Library/README.md` — карта и правила для пользователя (раздел «📥 Импорт»).
-- `Prompt_Library/SESSION_MEMORY-history/` — снапшот прежней памяти:
-  `2026-09-23-v1.57.md` (перед этой перезаписью); ранние — по датам/версиям.
-- Скилы: `comfyui-workflow-graph-parsing`, `comfyui-negative-result-audit`,
-  `comfyui-dom-widget-sizing`, `comfyui-frontend-sources`.
+- `Prompt_Library/SESSION_MEMORY-history/` — `2026-09-24-pre-v1.59.md` (снапшот v1.58);
+  ранние — по датам/версиям.
+- Скилы: `comfyui-negative-result-audit`, `comfyui-node-testing`,
+  `comfyui-frontend-sources`, `comfyui-dom-widget-sizing`.
