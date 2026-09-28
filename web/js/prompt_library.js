@@ -97,6 +97,12 @@ function plCardTitle(e, outNum, dense) {
 // мутации (POST) перечитываем базу у всех, кроме инициатора — он обновляет себя
 // сам. Никаких таймеров и наблюдателей: только вызовы из хендлеров (st.apiPost).
 const plLiveStates = new Set();
+// v1.62: сессионный кэш окна «Протестировать / ➕ Добавить промпт» (§51.9).
+// Окно живёт только пока жив DOM ноды; при переключении воркфлоу нода
+// пересоздаётся и текст/открытость пропадали. Храним {text, title, visible}
+// по id ноды (id восстанавливается из файла воркфлоу) в памяти страницы:
+// сессия переживает смену графа и умирает на перезагрузке страницы.
+const plInputSession = new Map();
 
 function plRefreshLocal(except) {
     for (const s of [...plLiveStates]) {
@@ -145,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.61-quick-test";
+const PL_JS_VERSION = "1.62-input-session";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -316,6 +322,10 @@ app.registerExtension({
             // v1.61: зеркало текста → скрытый виджет quick_test (на провод 1),
             // рамка и статус. Вызывается на ввод, открытие/закрытие окна и
             // после сохранения (текст очищен = тест выключен).
+            // v1.62: запись сессионного состояния окна теста. Заглушка объявлена
+            // ДО updateQuickTest (который вызывает её), а реальная реализация
+            // назначена ниже, после «let inputVisible» — иначе TDZ на inputVisible.
+            let saveInputSession = () => {};
             const updateQuickTest = () => {
                 const q = inputText.value;
                 const active = !!(inputVisible && q && q.trim());
@@ -325,6 +335,10 @@ app.registerExtension({
                     ? "⚡ ТЕСТ АКТИВЕН: этот текст идёт на провод «промпт» вместо выбранной карточки. Нажмите 💾, чтобы сохранить."
                     : "Окно открыто. Введите текст — он пойдёт на провод «промпт» (тест), 💾 — сохранить.";
                 inputStatus.style.color = active ? "#4caf50" : "#93a1af";
+                // v1.62: центральная точка персистентности — вызывается на ввод,
+                // открытие/закрытие окна и после сохранения (текст очищен), то
+                // есть покрывает все пути изменения состояния окна.
+                try { saveInputSession(); } catch (e) { /* silent */ }
             };
             inputText.oninput = () => { try { updateQuickTest(); } catch (e) { /* silent */ } };
             // Ручное превью с диска (без провода): файл → даунскейл до 512px
@@ -403,6 +417,23 @@ app.registerExtension({
             const readAttachedPreview = () => st.readPreviewFile(attachedFile);
 
             let inputVisible = false;
+            // v1.62: реальная реализация saveInputSession — замыкает переменные
+            // окна. Всегда пишет ТЕКУЩЕЕ состояние целиком (в т.ч. «закрыто и
+            // пусто»): если пользователь закрыл окно или сохранил (текст очищен),
+            // запись перезаписывается — старый черновик не «воскреснет» при
+            // возврате в воркфлоу. Ключ — id ноды (восстанавливается из файла).
+            saveInputSession = () => {
+                try {
+                    const key = String(this.id ?? "");
+                    if (!key) return;
+                    plInputSession.set(key, {
+                        text: inputText.value,
+                        title: inputTitle.value,
+                        visible: inputVisible,
+                    });
+                } catch (e) { /* silent */ }
+            };
+            inputTitle.oninput = () => { try { saveInputSession(); } catch (e) { /* silent */ } };
             inputToggle.onclick = () => {
                 inputVisible = !inputVisible;
                 inputArea.style.display = inputVisible ? "flex" : "none";
@@ -922,6 +953,31 @@ app.registerExtension({
             this._pl = st;
             plLiveStates.add(st);
             st.version = PL_JS_VERSION;
+
+            // v1.62: восстановить сессионное состояние окна теста ({text,title,
+            // visible}) после пересоздания ноды (смена воркфлоу и возврат).
+            // Вызывается из onConfigure ПОСЛЕ очистки quick_test (см. там).
+            st.restoreInputSession = () => {
+                try {
+                    const key = String(this.id ?? "");
+                    if (!key) return;
+                    const s = plInputSession.get(key);
+                    if (!s) return;
+                    inputText.value = s.text || "";
+                    inputTitle.value = s.title || "";
+                    const wasVisible = inputVisible;
+                    inputVisible = !!s.visible;
+                    inputArea.style.display = inputVisible ? "flex" : "none";
+                    inputToggle.style.background = inputVisible ? "#2c4a73" : "#2a2a2a";
+                    if (inputVisible && !wasVisible) st.panelOpened?.();
+                    else if (!inputVisible && wasVisible) st.shrinkBack?.();
+                    // Зеркало на провод «промпт» и статус-строка (быть открытым —
+                    // не значит активным: текст мог быть пустым).
+                    try { updateQuickTest(); } catch (e) { /* silent */ }
+                    // Vue: высотой владеет layout, подгонять его из JS не надо.
+                    if (!st._vuePanes) st.syncNodeSize?.();
+                } catch (e) { /* silent */ }
+            };
 
             // --- Подхват: выбор узла-источника (v1.25) ----------------------
             // Кандидаты — узлы верхнего уровня графа, которые могут отдать
@@ -4783,6 +4839,12 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
                 const qw = this.widgets?.find((w) => w.name === "quick_test");
                 if (qw && qw.value) qw.value = "";
             } catch (e) { /* silent */ }
+            // v1.62: РАЗРЕШИТЬ сессионное состояние окна теста. Порядок важен:
+            // выше quick_test очищен (v1.61 — чужие восстановленные значения
+            // не перебивают карточку), теперь вернём наше вхождение, если есть.
+            // На свежей странице кэш пуст → no-op; после смены воркфлоу и
+            // возврата — текст, название и открытость окна возвращаются.
+            try { this._pl?.restoreInputSession?.(); } catch (e) { /* silent */ }
             requestAnimationFrame(() => {
                 try { this._pl?.applyPaneLayout?.(); } catch (e) { /* silent */ }
                 try { this._pl?.applyNodeMinWidth?.(); } catch (e) { /* silent */ }

@@ -3799,6 +3799,89 @@ await run("v1.57: текстовый файл — разбиение на зап
   }
 });
 
+// --- v1.62: сессионный кэш окна «Протестировать / ➕ Добавить промпт» ---------
+// Регресс: смена воркфлоу (пересоздание ноды + onConfigure) раньше теряла текст
+// и название из окна ручного ввода. Теперь — сессионный Map по id ноды.
+await run("v1.62: смена воркфлоу не теряет текст/название/открытость окна ввода", async () => {
+  const SID = 901;
+
+  // Первая нода: окно открыто, текст назван и введён — запись ушла в кэш.
+  const node1 = makeNode();
+  node1.id = SID;
+  const qwA = { name: "quick_test", value: "" };
+  node1.widgets.push(qwA);
+  proto.onNodeCreated.call(node1);
+  const st1 = node1._pl;
+  const ta1 = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st1.dText).pop();
+  const toggle1 = walkDom(st1.root).find((el) => el.tagName === "BUTTON"
+    && String(el.textContent).includes("Протестировать"));
+  check("v1.62: toggle найден в DOM ноды", !!ta1 && !!toggle1, String(toggle1?.textContent));
+
+  toggle1.onclick();                                  // открыли окно
+  ta1.value = "короткий тест промпта";
+  st1.inputTitle.value = "Заголовок сессии";
+  ta1.oninput();                                      // updateQuickTest → saveInputSession
+  st1.inputTitle.oninput();
+  check("v1.62: на проводе quick_test активен ВНУТРИ первой ноды", qwA.value === "короткий тест промпта", qwA.value);
+
+  // Смена воркфлоу: новая нода с ТЕМ ЖЕ id, onNodeCreated + onConfigure.
+  const node2 = makeNode();
+  node2.id = SID;
+  const qwB = { name: "quick_test", value: "" };
+  node2.widgets.push(qwB);
+  proto.onNodeCreated.call(node2);
+  const st2 = node2._pl;
+  proto.onConfigure.call(node2, {
+    widgets_values: ["📥 Запись", "", "Fs/FAS"],
+    widgets_values_named: { mode: "📥 Запись", selected: "", save_folder: "Fs/FAS" },
+  });
+  const ta2 = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st2.dText).pop();
+
+  check("v1.62: текст вернулся в новую ноду", ta2.value === "короткий тест промпта", JSON.stringify(ta2.value));
+  check("v1.62: название вернулось", st2.inputTitle.value === "Заголовок сессии", JSON.stringify(st2.inputTitle.value));
+  check("v1.62: окно снова открыто (inputArea flex)",
+    ta2.parentNode.style.display === "flex", String(ta2.parentNode.style.display));
+  check("v1.62: зеркало на провод восстановлено после onConfigure",
+    qwB.value === "короткий тест промпта", qwB.value);
+
+  // Свежий id — кэш пуст, окно остаётся закрытым (no-op, без падений).
+  const node3 = makeNode();
+  node3.id = 902;
+  const qwC = { name: "quick_test", value: "" };
+  node3.widgets.push(qwC);
+  proto.onNodeCreated.call(node3);
+  const st3 = node3._pl;
+  proto.onConfigure.call(node3, {
+    widgets_values: ["📥 Запись", "", ""],
+    widgets_values_named: { mode: "📥 Запись", selected: "", save_folder: "" },
+  });
+  const ta3 = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st3.dText).pop();
+  check("v1.62: свежий id — окно закрыто (не flex)", ta3.parentNode.style.display !== "flex", JSON.stringify(ta3.parentNode.style.display));
+  check("v1.62: свежий id — текст пуст", ta3.value === "", JSON.stringify(ta3.value));
+  check("v1.62: свежий id — провод пуст", qwC.value === "", qwC.value);
+
+  // Закрытие окна перезаписывает запись: после возврата окно закрыто, но текст
+  // сохранён в поле (на провод не идёт — окно закрыто = quick_test пуст).
+  toggle1.onclick();                                  // закрыли в первой ноде
+  check("v1.62: после закрытия quick_test пуст", qwA.value === "", qwA.value);
+  const node4 = makeNode();
+  node4.id = SID;
+  const qwD = { name: "quick_test", value: "" };
+  node4.widgets.push(qwD);
+  proto.onNodeCreated.call(node4);
+  const st4 = node4._pl;
+  proto.onConfigure.call(node4, {
+    widgets_values: ["📥 Запись", "", ""],
+    widgets_values_named: { mode: "📥 Запись", selected: "", save_folder: "" },
+  });
+  const ta4 = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st4.dText).pop();
+  check("v1.62: закрытое окно восстановилось закрытым",
+    ta4.parentNode.style.display === "none", String(ta4.parentNode.style.display));
+  check("v1.62: текст при закрытом окне тоже восстанавливается",
+    ta4.value === "короткий тест промпта", JSON.stringify(ta4.value));
+  check("v1.62: закрытое окно = провод пуст", qwD.value === "", qwD.value);
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");
