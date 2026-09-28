@@ -145,7 +145,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.59-outs-independent";
+const PL_JS_VERSION = "1.60-cover-final-output";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -1773,17 +1773,30 @@ const reload = async () => {
                         if (!pool) return;
                         const im = pool[0] || {};
                         const shot = { filename: im.filename, subfolder: im.subfolder || "", type: im.type || "output" };
-                        // Первый файл прогона — в запас (и в ожидание, если оно есть)
-                        if (!st.runImages.has(d.prompt_id)) {
+                        // Файл прогона для обложки. Раньше в запас шёл ПЕРВЫЙ файл
+                        // прогона: в img2img-пайплайнах (Qwen-Image и т.п.) первым
+                        // часто исполняется PreviewImage ЗАГРУЖЕННОГО кадра (type
+                        // "temp"), и обложкой записи становился вход, а не итог.
+                        // Теперь в запас идёт САМАЯ ПОЗДНЯЯ картинка, но output
+                        // (SaveImage/SavePreviewImage) всегда сильнее temp-превью:
+                        // превью не перезаписывает уже сохранённый сейв.
+                        const runPrev = st.runImages.get(d.prompt_id);
+                        const replace = !runPrev
+                            || shot.type === "output"
+                            || runPrev.type !== "output";
+                        if (replace) {
+                            const freshKey = !st.runImages.has(d.prompt_id);
                             st.runImages.set(d.prompt_id, shot);
-                            while (st.runImages.size > PL_PENDING_LIMIT) {
-                                const first = st.runImages.keys().next().value;
-                                if (first === undefined) break;
-                                st.runImages.delete(first);
+                            if (freshKey) {
+                                while (st.runImages.size > PL_PENDING_LIMIT) {
+                                    const first = st.runImages.keys().next().value;
+                                    if (first === undefined) break;
+                                    st.runImages.delete(first);
+                                }
                             }
                         }
                         const rec = st.pendingPreview.get(d.prompt_id);
-                        if (rec && !rec.image) rec.image = shot;
+                        if (rec && (!rec.image || replace)) rec.image = shot;
                     } catch (e) { /* silent */ }
                 };
                 const plDone = (ev) => {

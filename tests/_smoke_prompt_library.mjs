@@ -809,6 +809,51 @@ await run("preview: автоподхват обложки из прогона", 
   } finally { sandbox.fetch = origFetch; }
 });
 
+// v1.60: в img2img-пайплайне (Qwen-Image и т.п.) ПЕРВЫМ с картинкой часто
+// отчитывается PreviewImage ЗАГРУЖЕННОГО кадра (type "temp"), а итоговый
+// SavePreviewImage/SaveImage (type "output") приходит позже. До фикса в запас
+// шёл первый файл прогона — обложкой записи становился ВХОД. Теперь в запас и в
+// ожидание идёт САМАЯ ПОЗДНЯЯ картинка с приоритетом output над temp-превью.
+await run("preview: итог (output) побеждает ранний temp-превью кадра (v1.60)", async () => {
+  const node = makeNode();
+  node.id = -1;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  node.id = 51;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    return jsonResponse({ ok: true, preview: "previews/e4.png" });
+  };
+  try {
+    // 1. наша нода сохранила запись (картинок ещё нет)
+    apiStub.dispatch("executed", { node: "51", prompt_id: "r1", output: { saved_id: ["e0"] } });
+    // 2. ПЕРВЫМ с картинкой отчитывается превью загруженного кадра (temp)
+    apiStub.dispatch("executed", { node: "60", prompt_id: "r1",
+      output: { images: [{ filename: "ref_preview.png", subfolder: "", type: "temp" }] } });
+    check("первым в запас легла превью-картинка кадра",
+      st.runImages.get("r1")?.filename === "ref_preview.png",
+      JSON.stringify(st.runImages.get("r1")));
+    // 3. итоговый SavePreviewImage приходит ПОЗЖЕ (output) — он и есть обложка
+    apiStub.dispatch("executed", { node: "61", prompt_id: "r1",
+      output: { images: [{ filename: "final.png", subfolder: "", type: "output" }] } });
+    check("output-файл СМЕНИЛ запас (temp не выигрывает у итога)",
+      st.runImages.get("r1")?.filename === "final.png",
+      JSON.stringify(st.runImages.get("r1")));
+    apiStub.dispatch("execution_success", { prompt_id: "r1" });
+    await new Promise((r) => setImmediate(r));
+    const post = posts.find((p) => p.url.includes("/prompt_library/attach_preview"));
+    check("обложка записи — ИТОГ прогона, а не превью загруженного кадра",
+      post && post.body.id === "e0" && post.body.filename === "final.png"
+      && post.body.type === "output",
+      JSON.stringify(post?.body));
+    check("запас прогона очищен", st.runImages.size === 0);
+  } finally { sandbox.fetch = origFetch; }
+});
+
 await run("preview: onRemoved снимает exec-слушатели", async () => {
   const node = makeNode();
   proto.onNodeCreated.call(node);
