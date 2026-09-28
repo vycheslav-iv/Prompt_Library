@@ -145,7 +145,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.60-cover-final-output";
+const PL_JS_VERSION = "1.61-quick-test";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -194,6 +194,16 @@ app.registerExtension({
                 slotsOutW.hidden = true;
                 slotsOutW.options && (slotsOutW.options.hideInPanel = true);
                 slotsOutW.computeSize = () => [0, -4];
+            }
+            // v1.61: быстрое тестирование промпта — текст из окна «Протестировать /
+            // ➕ Добавить промпт» идёт на провод 1, пока окно открыто и текст
+            // непустой. Значение зеркалит JS (см. updateQuickTest), сам виджет
+            // только персистится; окно закрыто = `` (на провод ничего не идёт).
+            const quickTestW = this.widgets?.find((w) => w.name === "quick_test");
+            if (quickTestW) {
+                quickTestW.hidden = true;
+                quickTestW.options && (quickTestW.options.hideInPanel = true);
+                quickTestW.computeSize = () => [0, -4];
             }
 
 
@@ -275,8 +285,8 @@ app.registerExtension({
 
             // Кнопка-тогл ручного ввода + область ввода
             const inputToggle = document.createElement("button");
-            inputToggle.textContent = "➕ Добавить промпт";
-            inputToggle.title = "Показать/скрыть окно ручного ввода промпта";
+            inputToggle.textContent = "Протестировать / ➕ Добавить промпт";
+            inputToggle.title = "Открыть окно: текст пойдёт на провод «промпт» (тест), пока окно открыто; ➕ — сохранить в библиотеку";
             inputToggle.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;flex-shrink:0;";
 
             const inputArea = document.createElement("div");
@@ -298,6 +308,25 @@ app.registerExtension({
             inputSaveBtn.style.cssText = "width:100%;background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px;cursor:pointer;font-size:12px;";
             inputArea.appendChild(inputTitle);
             inputArea.appendChild(inputText);
+            // v1.61: динамическая строка статуса режима «тест» — показывает,
+            // что непустой текст пойдёт на провод 1, пока окно открыто.
+            const inputStatus = document.createElement("div");
+            inputStatus.style.cssText = "font-size:11px;line-height:1.3;color:#93a1af;";
+            inputArea.appendChild(inputStatus);
+            // v1.61: зеркало текста → скрытый виджет quick_test (на провод 1),
+            // рамка и статус. Вызывается на ввод, открытие/закрытие окна и
+            // после сохранения (текст очищен = тест выключен).
+            const updateQuickTest = () => {
+                const q = inputText.value;
+                const active = !!(inputVisible && q && q.trim());
+                if (quickTestW) quickTestW.value = active ? q : "";
+                inputArea.style.borderColor = active ? "#4caf50" : "#4a9eff";
+                inputStatus.textContent = active
+                    ? "⚡ ТЕСТ АКТИВЕН: этот текст идёт на провод «промпт» вместо выбранной карточки. Нажмите 💾, чтобы сохранить."
+                    : "Окно открыто. Введите текст — он пойдёт на провод «промпт» (тест), 💾 — сохранить.";
+                inputStatus.style.color = active ? "#4caf50" : "#93a1af";
+            };
+            inputText.oninput = () => { try { updateQuickTest(); } catch (e) { /* silent */ } };
             // Ручное превью с диска (без провода): файл → даунскейл до 512px
             // через canvas прямо в браузере → маленький PNG dataURL на сервер.
             const inputAttachRow = document.createElement("div");
@@ -380,6 +409,9 @@ app.registerExtension({
                 inputToggle.style.background = inputVisible ? "#2c4a73" : "#2a2a2a";
                 if (inputVisible) st.panelOpened?.();
                 else st.shrinkBack?.();
+                // v1.61: при закрытии окна тест выключается (quick_test = ""),
+                // при открытии — текст из textarea снова зеркалится на провод.
+                try { updateQuickTest(); } catch (e) { /* silent */ }
                 // Vue: высоту ноды владеет layout (computeLayoutSize + CSS-цепочка),
                 // подгонять её из JS не нужно и вредно (SPEC §22.9).
                 if (!st._vuePanes) st.syncNodeSize?.();
@@ -428,6 +460,8 @@ app.registerExtension({
                             inputSaveBtn.textContent = "✅ Сохранено";
                             inputText.value = "";
                             inputTitle.value = "";
+                            // v1.61: текст очищен — тест выключен (рамка, статус, зеркало).
+                            try { updateQuickTest(); } catch (e) { /* silent */ }
                         }
                         attachedFile = null;
                         try { inputFile.value = ""; } catch (e) { /* silent */ }
@@ -4740,6 +4774,14 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
                     const sw = st.outSlotsWidget?.();
                     if (sw && sw.value !== sv) sw.value = sv || "";
                 }
+            } catch (e) { /* silent */ }
+            // v1.61: quick_test живёт только пока окно «Протестировать / ➕ Добавить
+            // промпт» открыто в этой сессии. При загрузке графа окно закрыто, значит
+            // любой восстановленный текст (из PNG widgets_values) выключаем — иначе
+            // он перебивал бы карточку на проводе после каждого открытия воркфлоу.
+            try {
+                const qw = this.widgets?.find((w) => w.name === "quick_test");
+                if (qw && qw.value) qw.value = "";
             } catch (e) { /* silent */ }
             requestAnimationFrame(() => {
                 try { this._pl?.applyPaneLayout?.(); } catch (e) { /* silent */ }

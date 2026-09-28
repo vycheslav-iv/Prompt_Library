@@ -1787,6 +1787,11 @@ class PromptLibrary:
                 # v1.44 (§40, мультивывод): JSON-привязки доп. выходов. Скрытый
                 # виджет — значение пишет JS по дропам в категории «Выходы».
                 "slots_out": ("STRING", {"multiline": False, "default": "[]"}),
+                # v1.61: быстрый тест промпта из окна «Добавить промпт» (JS).
+                # Непустой текст перебивает карточку и входящий провод на
+                # выходе 1, пока окно открыто; сам в базу не пишется.
+                # Скрытый виджет — значение зеркалит JS, пока окно открыто.
+                "quick_test": ("STRING", {"multiline": False, "default": ""}),
             },
             "optional": {
                 "source": ("*", {}),
@@ -1855,17 +1860,17 @@ class PromptLibrary:
             return float("nan")
         return None
 
-    def execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", source=None, image=None,
+    def execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", source=None, image=None,
                 extra_pnginfo=None, unique_id=None, **kwargs):
         # Весь прогон узла держит общий с HTTP-роутами замок (§25.3.2): execute()
         # исполняется в потоке ComfyUI, а роуты — в event loop; без замка их циклы
         # «load -> mutate -> save» могли наложиться и потерять чужое изменение
         # (например, только что созданную вручную запись или удаление).
         with _DB_LOCK:
-            return self._execute(mode, selected, save_folder, pickup, slots_out, source, image,
+            return self._execute(mode, selected, save_folder, pickup, slots_out, quick_test, source, image,
                                  extra_pnginfo, unique_id, **kwargs)
 
-    def _execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", source=None, image=None,
+    def _execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", source=None, image=None,
                  extra_pnginfo=None, unique_id=None, **kwargs):
         # mode может прийти как список (ComfyUI COMBO через map-over-list) —
         # приводим к строке, как уже делаем для pickup.
@@ -1922,7 +1927,17 @@ class PromptLibrary:
             out_text = ""
         sel = (selected or "").strip()
         dirty = False
-        if (issue or both) and sel:
+        # 1.1. Быстрый тест (v1.61): текст из окна «Добавить промпт» крутится на
+        # основном проводе, пока окно открыто. Непустой quick_test перебивает и
+        # карточку, и входящий провод; счётчики выдачи карточки НЕ трогает и в
+        # базу сам не пишется (сохранение — кнопкой в окне, через роуты).
+        quick = ""
+        if quick_test is not None and isinstance(quick_test, str):
+            quick = quick_test.strip()
+        if quick:
+            out_text = quick
+            display = quick
+        elif (issue or both) and sel:
             for e in entries:
                 if e.get("id") == sel:
                     out_text = e.get("prompt", "")
@@ -2021,9 +2036,10 @@ class PromptLibrary:
                     for node_data in workflow["nodes"]:
                         if str(node_data.get("id")) == str(unique_id):
                             # Порядок = порядок INPUT_TYPES required:
-                            # mode, selected, save_folder, pickup, slots_out
+                            # mode, selected, save_folder, pickup, slots_out,
+                            # quick_test (quick_test — v1.61)
                             # (prompt-виджет удалён в v1.7; slots_out — v1.44)
-                            node_data["widgets_values"] = [mode, selected, save_folder, pickup, slots_out]
+                            node_data["widgets_values"] = [mode, selected, save_folder, pickup, slots_out, quick_test]
                             break
             except Exception:
                 pass
@@ -2031,7 +2047,9 @@ class PromptLibrary:
         # Подсказка о неочевидном поведении выхода (совместимость со старыми
         # графами, где «Запись» стояла в разрыв перед CLIP).
         notice = ""
-        if mode == self.MODE_WRITE and out_linked:
+        if quick:
+            notice = "⚡ Тест: на провод идёт текст из окна «Добавить промпт»."
+        elif mode == self.MODE_WRITE and out_linked:
             notice = ("Режим «Запись»: провод от выхода подключён — текст идёт сквозь, "
                       "как раньше. Отключите провод, чтобы нода только сохраняла.")
         elif pickup_blocked:

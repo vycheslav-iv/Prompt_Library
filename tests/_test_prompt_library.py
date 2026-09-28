@@ -197,8 +197,8 @@ res = node.execute(mode=node.MODE_WRITE, selected="", save_folder="Фото",
 check("«Запись»: выход пуст + ui на месте", res["result"][1] == "" and "ui" in res,
       str(res["result"]))
 check("входной текст обрезан", res["ui"]["text"] == ["Портрет девушки"])
-check("PNG-патч записал widgets_values позиционно (5 значений, v1.44)",
-      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото", "", ""],
+check("PNG-патч записал widgets_values позиционно (6 значений, v1.44+v1.61)",
+      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото", "", "", ""],
       str(workflow["nodes"][0]["widgets_values"]))
 check("чужой node id не тронут", len(workflow["nodes"]) == 1)
 entries, folders = mod._load_db()
@@ -928,7 +928,7 @@ check("подхват: подсказка о том, почему вход не 
       "не сохраняется" in (res_pick["ui"]["mode_notice"][0] or ""),
       str(res_pick["ui"]["mode_notice"]))
 check("подхват: PNG-патч несёт pickup 4-м значением, slots_out 5-м",
-      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_BOTH, "", "Подхват", "1622", ""],
+      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_BOTH, "", "Подхват", "1622", "", ""],
       str(wf_pick["nodes"][0]["widgets_values"]))
 # Без подхвата поведение прежнее (pickup="")
 res_off = node3.execute(mode=node3.MODE_WRITE, selected="", save_folder="", pickup="",
@@ -1647,7 +1647,7 @@ wf27 = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
 node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out=slots27,
                extra_pnginfo={"workflow": wf27}, unique_id=7)
 check("27: PNG-патч несёт slots_out 5-м значением",
-      wf27["nodes"][0]["widgets_values"] == [node27.MODE_ISSUE, "", "", "", slots27],
+      wf27["nodes"][0]["widgets_values"] == [node27.MODE_ISSUE, "", "", "", slots27, ""],
       str(wf27["nodes"][0]["widgets_values"]))
 
 # Выдача + слоты одновременно: prompt_out своим, слоты своими
@@ -2467,6 +2467,63 @@ if _IMP in handlers:
     r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": many_items[:free]}))
     check("ровно по свободным местам импорт проходит", r["status"] == 200
           and len(r["json"].get("created", [])) == free, str(r)[:200])
+
+
+# --- 48. quick_test: текст окна «Добавить промпт» на основной провод ---------
+print("\n48. Быстрый тест (quick_test, v1.61)")
+node48 = mod.PromptLibrary()
+# База-среда: одна запись-карточка + счётчик использований
+node48.execute(mode=node48.MODE_WRITE, selected="", save_folder="Квик",
+               source="карточка-для-квика", extra_pnginfo=None, unique_id=1)
+_e48 = _entry("карточка-для-квика")
+check("48: среда — карточка есть", _e48 is not None)
+_use_before = _e48.get("use_count", 0) if _e48 else 0
+
+# 1. Quick перебивает карточку: ws = «выдача» + selected + quick.
+res48q = node48.execute(mode=node48.MODE_ISSUE, selected=_e48["id"] if _e48 else "",
+                        save_folder="", quick_test="быстрый текст прогона",
+                        source="входящий-источник", extra_pnginfo=None, unique_id=1)
+check("48: quick выдаёт свой текст на провод 1 (выше карточки и source)",
+      res48q["result"][1] == "быстрый текст прогона", str(res48q["result"][:3]))
+check("48: quick — путь категории пуст (карточка не выбрана)",
+      res48q["result"][0] == "", str(res48q["result"][0]))
+
+# 2. Счётчик выдачи при quick НЕ растёт (карточка не «выдавалась»).
+_e48_after = _entry("карточка-для-квика")
+check("48: use_count карточки не растёт при тесте",
+      (_e48_after.get("use_count", 0) if _e48_after else 0) == _use_before)
+
+# 3. Quick работает и в «Запись» (без провода на выходе): текст всё равно идёт.
+res48w = node48.execute(mode=node48.MODE_WRITE, selected="", save_folder="",
+                        quick_test="квик в записи", source=None,
+                        extra_pnginfo=None, unique_id=1)
+check("48: quick в режиме «Запись» выдаёт текст (мимо пустого out_text)",
+      res48w["result"][1] == "квик в записи", str(res48w["result"][1]))
+
+# 4. Quick сам по себе НЕ создаёт записи (сохранение — только кнопкой в окне).
+_entries_before = len(mod._load_db()[0])
+res48x = node48.execute(mode=node48.MODE_WRITE, selected="", save_folder="Квик",
+                        quick_test="не сохраняется", source=None,
+                        extra_pnginfo=None, unique_id=1)
+check("48: quick не автосохраняется в базу",
+      len(mod._load_db()[0]) == _entries_before, str(len(mod._load_db()[0])))
+check("48: и `text` в UI несёт квик (а не пусто)",
+      res48x["ui"]["text"] == ["не сохраняется"], str(res48x["ui"]["text"]))
+
+# 5. Пустой/пробельный quick = прежнее поведение.
+res48e = node48.execute(mode=node48.MODE_ISSUE, selected=_e48["id"] if _e48 else "",
+                        save_folder="", quick_test="   ", source=None,
+                        extra_pnginfo=None, unique_id=1)
+check("48: пустой quick -> выдача карточки как раньше",
+      res48e["result"][1] == "карточка-для-квика", str(res48e["result"][1]))
+
+# 6. PNG-патч несёт quick_test 6-м значением (порядок INPUT_TYPES required).
+wf48 = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
+node48.execute(mode=node48.MODE_ISSUE, selected="", save_folder="Фото", slots_out="[]",
+               quick_test="квик-в-png", extra_pnginfo={"workflow": wf48}, unique_id=7)
+check("48: PNG-патч несёт quick_test 6-м значением",
+      wf48["nodes"][0]["widgets_values"] == [node48.MODE_ISSUE, "", "Фото", "", "[]", "квик-в-png"],
+      str(wf48["nodes"][0]["widgets_values"]))
 
 
 # --- итог -------------------------------------------------------------------
