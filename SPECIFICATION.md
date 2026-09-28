@@ -4437,3 +4437,36 @@ payload PNG-импорта несёт `workflow` (граф записи); рас
 DOM-поля») во всех трёх копиях: `.opencode/skills/`, `.kilo/skills/`,
 `.agents/skills/`. Скиллы — в корне бандла (`F:\AI_projects\Custom_node_ComfyUI\`),
 не в git-репозитории Prompt_Library.
+
+## 51.8. Сессионный кэш окна ввода (v1.62, 2026-09-28)
+
+Проблема, найденная в живом ComfyUI: после переключения воркфлоу туда-обратно
+текст и открытость окна «Протестировать / ➕ Добавить промпт» терялись — при
+создании ноды окно прежней сессии не возвращалось (текст ещё жил в закрытом кэше
+ComfyUI и не попадал на провод).
+
+Решение — модульный `Map` `plInputSession` по id ноды (+провод-адреса трека не
+нужны: ключ — строка `this.id`):
+
+- **Запись** — заглушка `saveInputSession()` объявлена в `onNodeCreated` до
+  `updateQuickTest()` (`web/js/prompt_library.js:~325`), вызывается в конце
+  `updateQuickTest()`, реальная реализация замыкает `inputVisible`/`inputText`/
+  `inputTitle` и пишет `{ text, title, visible }` в `plInputSession` (v1.62,
+  `:~420`). Повод записи — `inputText.oninput`/`inputTitle.oninput`/toggle.
+- **Чтение** — `st.restoreInputSession()` (`:~960`): в `onConfigure` ПОСЛЕ
+  блока очистки `quick_test` (v1.61, «чужие восстановленные значения не
+  перебивают карточку»). Восстанавливает `inputText.value`, `inputTitle.value`,
+  `inputVisible` + `inputArea.style.display` + фон toggle, зовёт
+  `updateQuickTest()` (зеркало на провод) и `syncNodeSize()` (canvas)/layout
+  (Vue не трогает — высотой владеет layout).
+- **Свежий id (кэш пуст)** — `restoreInputSession` no-op, окно остаётся
+  закрытым. **Закрытое окно** — запись с `visible:false`, после возврата окно
+  закрыто, но текст в поле сохранён; `quick_test` пуст (окно закрыто = не на
+  проводе).
+- Кэш НЕ чистится в `onRemoved` — список открытых окон живёт в рамки одной
+  страницы, пользовательский id стабилен между пересозданиями ноды.
+
+Проверки: регресс-фаза v1.62 в `tests/_smoke_prompt_library.mjs` (4 подфазы:
+запись→пересоздание ноды→restore текста/названия/открытости/зеркала; свежий id
+— закрыто и пусто; закрытие окна → закрытым и вернулось, провод пуст). Смоук
+120 фаз ✅, аудит чист, `check.py --strict` ЗЕЛЁНЫЙ.
