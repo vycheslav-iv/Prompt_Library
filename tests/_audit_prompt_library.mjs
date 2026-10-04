@@ -158,5 +158,52 @@ const badNum = Object.entries(outNames).slice(2).filter(([k, v]) => !String(v).i
 if (badNum.length) bad(`номер в имени доп. выхода ≠ индексу: ${JSON.stringify(badNum)}`);
 else ok("имена доп. выходов несут свой индекс («промпт N» ↔ выход N)");
 
+console.log("F. Архитектура хранения: два слоя (§24.2/§24.3/§52.5)");
+// Запись должна оставаться лёгкой: только ссылки. Граф — файлом workflows/{id}.json
+// (через _attach_workflow), превью — файлом previews/{id}.png с чанком workflow.
+// Регрессия, пойманная 2026-10-04: /import передавал граф в _add_entry, а тот пишет
+// его ПРЯМО в запись → library.json пухнет вчетверо (замер 276.2 КБ против 2.0 КБ на
+// одной картинке), чанк workflow в превью перестаёт быть UI-графом → drag&drop и
+// «Параметры генерации» молча пусты.
+
+// F1. Ни один production-путь не отдаёт граф в _add_entry (поле inline).
+const addEntryCalls = [...py.matchAll(/_add_entry\(([\s\S]{0,600}?)\)\s*\n/g)].map((m) => m[1]);
+const inlineWriters = addEntryCalls.filter((c) => /(workflow\s*=\s*it\[|workflow\s*=\s*wf\b|workflow\s*=\s*body\[|workflow\s*=\s*rec\[)/.test(c));
+if (inlineWriters.length) {
+  bad(`граф уходит в _add_entry (${inlineWriters.length} шт.) — он пишется ПРЯМО в запись вместо workflows/{id}.json (§52.5)`);
+} else ok("ни один production-путь не кладёт граф в _add_entry (запись остаётся лёгкой)");
+
+// F2. Все пути, несущие граф, идут через _attach_workflow.
+// Считаем ВСЕ вызовы, а не только начинающиеся с новой строки: два из четырёх
+// стоят внутри `if ...:` (прогон и attach_preview), и «по началу строки»
+// дало бы ложное падение. Само определение функции вычитаем.
+const attachAll = (py.match(/_attach_workflow\s*\(/g) || []).length;
+const attachSites = attachAll - 1; // −1 на `def _attach_workflow(...)`
+if (attachSites < 4) {
+  bad(`ожидались 4 пути через _attach_workflow (прогон, save_pickup, attach_preview, /import) — найдено ${attachSites}`);
+} else ok(`все пути, несущие граф, идут через _attach_workflow (${attachSites} вызова)`);
+
+// F3. Запись не содержит inline-графа в схеме (§4.2) и умеет его читать для легаси.
+if (!/"workflow"\s*:/.test(py)) bad("в записи нет поля workflow — сломана обратная совместимость легаси (§24.3)");
+else ok("поле workflow в записи ещё есть — легаси-графы читаются");
+
+// F4. В JS в запись уходит UI-граф, а не API-граф (§52.1/§52.2).
+if (!/workflow\s*=\s*ui\s*\|\|\s*api/.test(js)) {
+  bad("pngItemFromBuf кладёт в запись не UI-граф (ожидалось `workflow = ui || api`) — drag&drop и «Параметры генерации» будут пустыми");
+} else ok("в запись уходит UI-граф (ui || api)");
+if (/if\s*\(!api\s*&&\s*chunks\.workflow\)/.test(js)) {
+  bad("чанк workflow снова читается только когда нет API-графа — при обоих чанках воркфлоу не переносится (§52.2)");
+} else ok("чанк workflow читается независимо от наличия API-графа");
+
+// F5. Разбор чанка только через jsonLoose: Python-json пишет bare NaN (§52.3).
+if (/chunks\.prompt\)\s*;?\s*$/.test(js) && /JSON\.parse\(\s*chunks\.prompt\s*\)/.test(js)) {
+  bad("чанк prompt разбирается строгим JSON.parse — bare NaN из is_changed уронит импорт");
+} else ok("чанк prompt разбирается через jsonLoose (bare NaN переживает)");
+
+// F6. Пустой промпт у картинок — в failed, имя файла в промпт НЕ подставляется (§49).
+if (/media\s+in\s*\(\s*["']image["']\s*,\s*["']video["']\s*\)[\s\S]{0,120}prompt\s*=\s*title/.test(py)) {
+  bad("пустой промпт у media=image/video подменяется именем файла — это ломает отчёт и маскирует битый чанк (§49)");
+} else ok("пустой промпт идёт в failed независимо от типа (§49)");
+
 console.log(`\n=== ${fail ? "НАЙДЕНО ПРОБЛЕМ: " + fail : "аудит чист"}`);
 process.exit(fail ? 1 : 0);

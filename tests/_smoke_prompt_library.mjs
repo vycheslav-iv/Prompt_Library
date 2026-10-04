@@ -3474,6 +3474,92 @@ await run("v1.57: PNG — разбор чанков и положительны�
     st.promptFromGraph(g5) === "нашёл второй сэмплер", String(st.promptFromGraph(g5)));
 });
 
+// v1.63: реальная причина «импортируется имя файла, а не промпт» (2026-10-04,
+// отчёт пользователя на Krea2_Raw_00001_.png). Python-json (json.dumps) пишет
+// в поле is_changed токен NaN БЕЗ кавычек — такой чанк prompt невалиден по
+// RFC 8259, и строгий JSON.parse на нём падает. Разбор в pngItemFromBuf был
+// обёрнут в try/catch, который молча оставлял prompt пустым, а серверный
+// фолбэк подставлял имя файла. Проверка ДО фикса: при bare-NaN в чанке
+// импорт отдаёт пустой промпт.
+await run("v1.63: чанк prompt с bare NaN (is_changed) — промпт не теряется", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const graph = {
+    "5": { class_type: "KSampler", inputs: { positive: ["6", 0] } },
+    "6": { class_type: "CLIPTextEncode", inputs: { text: "охота в лесу, 17 век" } },
+    // Ровно то, что кладёт в PNG Python-json: [NaN] без кавычек
+    "2004": { class_type: "PromptLibrary", inputs: {}, is_changed: [0] },
+  };
+  const raw = JSON.stringify(graph).replace('"is_changed":[0]', '"is_changed":[NaN]');
+  let strictOk = true;
+  try { JSON.parse(raw); } catch (e) { strictOk = false; }
+  check("v1.63: прибор верен — чанк с bare NaN действительно невалиден",
+    !strictOk, "JSON.parse не упал, тест не воспроизводит причину");
+
+  const parsed = st.pngItemFromBuf(new Uint8Array(makePng([pngTexT("prompt", raw)])));
+  check("v1.63: промпт извлечён несмотря на bare NaN (обход графа не молчит)",
+    parsed.prompt === "охота в лесу, 17 век", JSON.stringify(parsed.prompt));
+  check("v1.63: граф записи тоже пришёл (is_changed: [NaN] -> null)",
+    parsed.workflow && parsed.workflow["2004"]
+      && parsed.workflow["2004"].is_changed
+      && parsed.workflow["2004"].is_changed[0] === null,
+    JSON.stringify(parsed.workflow && parsed.workflow["2004"]));
+});
+
+// Токен NaN внутри ТЕКСТА промпта — законная часть строки, её нельзя вырезать:
+// санитайзер обязан пропускать содержимое строковых литералов.
+await run("v1.63: слово NaN внутри текста промпта не вырезается санитайзером", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const graph = {
+    "5": { class_type: "KSampler", inputs: { positive: ["6", 0] } },
+    "6": { class_type: "CLIPTextEncode", inputs: { text: "небо NaN и Infinity, стена NaN" } },
+    "2004": { class_type: "PromptLibrary", inputs: {}, is_changed: [0] },
+  };
+  const raw = JSON.stringify(graph).replace('"is_changed":[0]', '"is_changed":[NaN]');
+  const parsed = st.pngItemFromBuf(new Uint8Array(makePng([pngTexT("prompt", raw)])));
+  check("v1.63: NaN/Infinity внутри строки остались в промпте",
+    parsed.prompt === "небо NaN и Infinity, стена NaN", JSON.stringify(parsed.prompt));
+});
+
+// v1.64: воркфлоу при импорте НЕ переносился (отчёт пользователя: перетаскивание
+// картинки из библиотеки в ComfyUI не открывает воркфлоу).
+// Повреждён контракт поля `workflow`: в запись клали API-граф (чанк `prompt`),
+// тогда как её ждут ВСЕ потребители UI-граф:
+//   • чанк "workflow" в превью библиотеки читает ComfyUI при drag&drop;
+//   • _gen_meta («Параметры генерации») читает nodes/widgets_values;
+//   • _workflow_chunk_from_bytes достаёт именно UI-граф.
+// Замер на реальном файле: в чанке оказывались ключи 1522/1523/1524 (id узлов),
+// nodes/links отсутствовали, _gen_meta возвращала {}.
+await run("v1.64: в запись уходит UI-граф, промпт берётся из API-графа", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const api = {
+    "5": { class_type: "KSampler", inputs: { positive: ["6", 0] } },
+    "6": { class_type: "CLIPTextEncode", inputs: { text: "промпт для карточки" } },
+  };
+  const ui = {
+    nodes: [
+      { id: 5, type: "KSampler", inputs: [{ name: "positive", link: 10 }], widgets: [] },
+      { id: 6, type: "CLIPTextEncode", inputs: [{ name: "text", link: 11 }], widgets: ["промпт для карточки", ""] },
+    ],
+    links: [[10, 6, 0, 5, "CONDITIONING"], [11, 6, 0, 6, "STRING"]],
+  };
+  const png = makePng([pngTexT("prompt", JSON.stringify(api)), pngITxt("workflow", JSON.stringify(ui))]);
+  const parsed = st.pngItemFromBuf(new Uint8Array(png));
+  check("v1.64: промпт взят из API-графа (positive-цепочка сэмплера)",
+    parsed.prompt === "промпт для карточки", JSON.stringify(parsed.prompt));
+  check("v1.64: в запись ушёл UI-граф — drag&drop откроет воркфлоу",
+    !!(parsed.workflow && Array.isArray(parsed.workflow.nodes) && parsed.workflow.nodes.length === 2),
+    "workflow=" + JSON.stringify(parsed.workflow).slice(0, 120));
+  check("v1.64: UI-граф приоритетнее API-графа, даже когда оба чанка в PNG",
+    parsed.workflow && Array.isArray(parsed.workflow.links) && !parsed.workflow["1524"],
+    "workflow=" + JSON.stringify(parsed.workflow).slice(0, 120));
+});
+
 await run("v1.57: импорт PNG — запись с промптом, сам PNG обложкой (raw)", async () => {
   const node = mkSlotNode();
   const st = node._pl;

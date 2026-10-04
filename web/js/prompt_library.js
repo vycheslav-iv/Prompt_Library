@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.62-input-session";
+const PL_JS_VERSION = "1.65-html-gallery-workflow";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -3661,48 +3661,282 @@ const reload = async () => {
                 }
                 return out;
             };
-            // Положительный промпт из API-графа (чанк prompt): каждый узел
-            // /sampler/i по очереди → inputs.positive → следуем по inputs.text
-            // (строка ИЛИ ссылка [id, idx]) до глубины 4; берём первый рабочий
-            // результат (сэмплер без positive — например SamplerCustomAdvanced —
-            // пропускается, а не глушит разбор). Без результата — единственный
-            // CLIPTextEncode с непустым текстом. Не нашлось — "".
+            // Положительный промпт из API-графа (чанк prompt): находим сэмплер,
+            // который реально исполнялся, и идём по связи positive → источник текста.
+            // Граф в чанке prompt — это API-формат {id: {class_type, inputs: {...}}},
+            // где inputs содержит ИЛИ прямые значения ИЛИ ссылки [from_node_id, from_output_idx].
+            // Обходим граф от positive входа сэмплера до узла с текстом (CLIPTextEncode,
+            // TextConcat, PrimitiveText и т.д.), следуя ТОЛЬКО по проводам.
             st.promptFromGraph = (graph) => {
                 const g = graph || {};
                 const ids = Object.keys(g);
-                const textVia = (pos) => {
-                    if (!Array.isArray(pos)) return null;
-                    let nodeId = String(pos[0]);
-                    const seen = new Set();
-                    let depth = 0;
-                    while (nodeId && g[nodeId] && !seen.has(nodeId) && depth < 4) {
-                        seen.add(nodeId);
-                        const t = (g[nodeId].inputs || {}).text;
-                        if (typeof t === "string") return t;
-                        if (Array.isArray(t) && t.length) { nodeId = String(t[0]); depth++; }
-                        else return null;
+                if (!ids.length) return "";
+
+                // Вспомогательная: получить значение входа узла
+                const getInputVal = (node, key) => (node?.inputs || {})[key];
+
+                // Разобрать значение входа → {type: "direct"|"link", value}
+                const parseInput = (val) => {
+                    if (val === undefined || val === null) return null;
+                    if (Array.isArray(val) && val.length === 2 && typeof val[0] === "string" && typeof val[1] === "number") {
+                        return { type: "link", value: val };
                     }
+                    if (typeof val === "string") return { type: "direct", value: val };
                     return null;
                 };
+
+                // Рекурсивный обход узла по его ТИПУ (не по output index).
+                // Когда мы приходим в узел по проводу, смотрим его class_type и извлекаем текст
+                // из соответствующих входов/виджетов.
+                const traceNode = (nodeId, seen = new Set(), depth = 0) => {
+                    if (depth > 8 || !nodeId || seen.has(nodeId)) return null;
+                    seen.add(nodeId);
+                    const node = g[nodeId];
+                    if (!node) return null;
+
+                    const nType = (node.class_type || "").toLowerCase();
+
+                    // 1. Текстовые узлы: CLIPTextEncode, Primitive, Text и им подобные
+                    // У них текст лежит в inputs.text (прямое значение или ссылка) или в widgets_values[0]
+                    if (nType.includes("cliptextencode") || nType.includes("primitive") || nType === "text") {
+                        // inputs.text — прямое значение
+                        const textVal = getInputVal(node, "text");
+                        const parsed = parseInput(textVal);
+                        if (parsed?.type === "direct" && parsed.value.trim()) return parsed.value.trim();
+                        // inputs.text — ссылка на другой узел
+                        if (parsed?.type === "link") return traceNode(parsed.value[0], seen, depth + 1);
+                        // inputs.prompt (иногда встречается)
+                        const promptVal = getInputVal(node, "prompt");
+                        const parsedP = parseInput(promptVal);
+                        if (parsedP?.type === "direct" && parsedP.value.trim()) return parsedP.value.trim();
+                        if (parsedP?.type === "link") return traceNode(parsedP.value[0], seen, depth + 1);
+                        // widgets_values[0] (на случай, если API-граф содержит виджеты)
+                        const wv = node.widgets_values;
+                        if (Array.isArray(wv) && wv.length && typeof wv[0] === "string" && wv[0].trim()) {
+                            return wv[0].trim();
+                        }
+                        return null;
+                    }
+
+                    // 2. Конкатенаторы: TextConcat, JoinText, StringConcat, AnyConcat и т.п.
+                    // У них несколько входов: text, text_1, text_2, text_a, text_b, text_input...
+                    if (nType.includes("concat") || nType.includes("join")) {
+                        const parts = [];
+                        for (const [k, v] of Object.entries(node.inputs || {})) {
+                            if (/^text/.test(k)) { // text, text_1, text_a, text_input, etc.
+                                const p = parseInput(v);
+                                if (p?.type === "direct" && p.value.trim()) parts.push(p.value.trim());
+                                else if (p?.type === "link") {
+                                    const nested = traceNode(p.value[0], seen, depth + 1);
+                                    if (nested) parts.push(nested);
+                                }
+                            }
+                        }
+                        if (parts.length) return parts.join(" ");
+                        return null;
+                    }
+
+                    // 3. Переключатели: Switch, Condition, Select и т.п.
+                    // Берём первый непустой текстовый вход
+                    if (nType.includes("switch") || nType.includes("select") || nType.includes("condition")) {
+                        for (const [k, v] of Object.entries(node.inputs || {})) {
+                            if (/^(input_|text|prompt)/i.test(k)) {
+                                const p = parseInput(v);
+                                if (p?.type === "direct" && p.value.trim()) return p.value.trim();
+                                if (p?.type === "link") {
+                                    const nested = traceNode(p.value[0], seen, depth + 1);
+                                    if (nested) return nested;
+                                }
+                            }
+                        }
+                        return null;
+                    }
+
+                    // 4. Любой другой узел — пробуем стандартные текстовые входы
+                    // (на случай нестандартных нод, которые выдают текст)
+                    for (const key of ["text", "prompt", "positive", "negative"]) {
+                        const p = parseInput(getInputVal(node, key));
+                        if (p?.type === "direct" && p.value.trim()) return p.value.trim();
+                        if (p?.type === "link") {
+                            const nested = traceNode(p.value[0], seen, depth + 1);
+                            if (nested) return nested;
+                        }
+                    }
+
+                    // 5. Последний шанс: widgets_values[0]
+                    const wv = node.widgets_values;
+                    if (Array.isArray(wv) && wv.length && typeof wv[0] === "string" && wv[0].trim()) {
+                        return wv[0].trim();
+                    }
+
+                    return null;
+                };
+
+                // 1. Пробуем каждый сэмплер по очереди — берём первый, у которого есть positive
                 const samplers = ids.filter((id) => /sampler/i.test(g[id].class_type || ""));
                 for (const sid of samplers) {
-                    const t = textVia(g[sid].inputs && g[sid].inputs.positive);
-                    if (t) return t;
+                    const positiveVal = getInputVal(g[sid], "positive");
+                    const parsed = parseInput(positiveVal);
+                    if (parsed?.type === "link") {
+                        const text = traceNode(parsed.value[0], new Set(), 0);
+                        if (text) return text;
+                    } else if (parsed?.type === "direct" && parsed.value.trim()) {
+                        return parsed.value.trim();
+                    }
                 }
-                const enc = ids.filter((id) => /cliptextencode/i.test(g[id].class_type || "")
-                    && typeof (g[id].inputs || {}).text === "string"
-                    && String(g[id].inputs.text).trim() !== "");
-                return enc.length === 1 ? g[enc[0]].inputs.text : "";
+
+                // 2. Фолбэк: если сэмплеров нет или у них нет positive — ищем любой CLIPTextEncode/Primitive с текстом
+                for (const id of ids) {
+                    const node = g[id];
+                    const nType = (node.class_type || "").toLowerCase();
+                    if (nType.includes("cliptextencode") || nType.includes("primitive") || nType === "text") {
+                        const direct = parseInput(getInputVal(node, "text"));
+                        if (direct?.type === "direct" && direct.value.trim()) return direct.value.trim();
+                        const directP = parseInput(getInputVal(node, "prompt"));
+                        if (directP?.type === "direct" && directP.value.trim()) return directP.value.trim();
+                        const wv = node.widgets_values;
+                        if (Array.isArray(wv) && wv.length && typeof wv[0] === "string" && wv[0].trim()) {
+                            return wv[0].trim();
+                        }
+                    }
+                }
+
+                // 3. Фолбэк: любой узел с прямым текстовым входом
+                for (const id of ids) {
+                    const node = g[id];
+                    for (const key of ["text", "prompt"]) {
+                        const p = parseInput(getInputVal(node, key));
+                        if (p?.type === "direct" && p.value.trim()) return p.value.trim();
+                    }
+                }
+
+                return "";
             };
-            // Положительный промпт из UI-графа (чанк workflow): первый
-            // CLIPTextEncode с непустым первым виджетом (widgets могут не
-            // совпадать по индексу с inputs — текст живёт в widgets[0]).
+            // Положительный промпт из UI-графа (чанк workflow): формат {nodes:[], links:[]}.
+            // В UI-графе связи идут через links: [link_id, from_id, from_slot, to_id, type].
+            // У узла в inputs есть поле link, ссылающееся на link_id.
+            // Идём от сэмплера по links к источнику текста (CLIPTextEncode → widgets[0]).
             st.promptFromWorkflow = (ui) => {
                 const nodes = (ui && ui.nodes) || [];
-                const enc = nodes.find((n) => /cliptextencode/i.test(n.type || "")
-                    && Array.isArray(n.widgets) && n.widgets.length
-                    && typeof n.widgets[0] === "string" && n.widgets[0].trim() !== "");
-                return enc ? enc.widgets[0] : "";
+                const links = (ui && ui.links) || [];
+                if (!nodes.length || !links.length) return "";
+
+                const nodeById = {};
+                for (const n of nodes) if (n.id != null) nodeById[n.id] = n;
+
+                // link_id -> {fromId, fromSlot, toId}
+                const linkById = {};
+                for (const l of links) {
+                    if (!Array.isArray(l) || l.length < 4) continue;
+                    const [linkId, fromId, fromSlot, toId] = l;
+                    linkById[linkId] = { fromId, fromSlot, toId };
+                }
+
+                const samplers = nodes.filter((n) => /sampler/i.test(n.type || ""));
+                const trace = (nodeId, seen = new Set(), depth = 0) => {
+                    if (depth > 8 || !nodeId || seen.has(nodeId)) return null;
+                    seen.add(nodeId);
+
+                    const node = nodeById[nodeId];
+                    if (!node) return null;
+                    const nType = (node.type || "").toLowerCase();
+
+                    // СВОЙ текст узла — раньше, чем уход по проводу (v1.63).
+                    // Узел-источник текста (PromptKeeper, Primitive, degg-ноды с
+                    // полем `text`) держит значение в widgets_values_named.text /
+                    // widgets[0]; уходить дальше по его входам нельзя — иначе
+                    // обход соскальзывает по чужой ветке и приносит текст
+                    // ПОСТОРОННЕЙ ноды (замер 2026-10-04 на реальном файле:
+                    // вместо промпта охотника приходил промпт про медведя —
+                    // через input `source` того же PromptKeeper).
+                    const ownNamed = node.widgets_values_named;
+                    if (ownNamed && typeof ownNamed.text === "string" && ownNamed.text.trim()) {
+                        return ownNamed.text.trim();
+                    }
+                    const ownWidgets = node.widgets;
+                    if (Array.isArray(ownWidgets) && ownWidgets.length
+                        && typeof ownWidgets[0] === "string" && ownWidgets[0].trim()
+                        && (nType.includes("text") || nType.includes("prompt") || nType.includes("string"))) {
+                        return ownWidgets[0].trim();
+                    }
+
+                    // Если это CLIPTextEncode/Primitive/Text — забираем текст из widgets[0]
+                    // ИЛИ из входа text с link (если widgets пусты)
+                    if (nType.includes("cliptextencode") || nType.includes("primitive") || nType === "text") {
+                        if (Array.isArray(node.widgets) && node.widgets.length && typeof node.widgets[0] === "string" && node.widgets[0].trim()) {
+                            return node.widgets[0].trim();
+                        }
+                        // Widgets пусты — ищем вход text с link
+                        for (const inp of node.inputs || []) {
+                            if (inp && inp.name === "text" && inp.link != null) {
+                                const link = linkById[inp.link];
+                                if (link) {
+                                    const nested = trace(link.fromId, seen, depth + 1);
+                                    if (nested) return nested;
+                                }
+                            }
+                        }
+                    }
+
+                    // TextConcat/Join — собираем тексты со всех входов, у которых есть link
+                    if (nType.includes("concat") || nType.includes("join")) {
+                        const parts = [];
+                        for (const inp of node.inputs || []) {
+                            if (inp && inp.link != null) {
+                                const link = linkById[inp.link];
+                                if (link) {
+                                    const nested = trace(link.fromId, seen, depth + 1);
+                                    if (nested) parts.push(nested);
+                                }
+                            }
+                        }
+                        if (parts.length) return parts.join(" ");
+                    }
+
+                    // Conditional/Switch/Select — пробуем первый вход с link
+                    if (nType.includes("switch") || nType.includes("select") || nType.includes("condition")) {
+                        for (const inp of node.inputs || []) {
+                            if (inp && inp.link != null) {
+                                const link = linkById[inp.link];
+                                if (link) {
+                                    const nested = trace(link.fromId, seen, depth + 1);
+                                    if (nested) return nested;
+                                }
+                            }
+                        }
+                    }
+
+                    // Любой другой узел — идём ТОЛЬКО по входам с текстовым именем.
+                    // Раньше здесь брался первый вход с link подряд, и обход
+                    // уезжал в соседнюю ветку (input `source`/`*` ведёт не в
+                    // текст, а в чужой узел) — в импорт попадал текст
+                    // ПОСТОРОННЕЙ ноды вместо промпта сэмплера (v1.63).
+                    for (const inp of node.inputs || []) {
+                        if (inp && inp.link != null
+                            && typeof inp.name === "string" && /text|prompt|string/i.test(inp.name)) {
+                            const link = linkById[inp.link];
+                            if (link) {
+                                const nested = trace(link.fromId, seen, depth + 1);
+                                if (nested) return nested;
+                            }
+                        }
+                    }
+
+                    return null;
+                };
+
+                for (const s of samplers) {
+                    // Найти вход positive у сэмплера (по name)
+                    const posInput = (s.inputs || []).find((inp) => inp && inp.name === "positive");
+                    if (posInput && posInput.link != null) {
+                        const link = linkById[posInput.link];
+                        if (link) {
+                            const text = trace(link.fromId);
+                            if (text) return text;
+                        }
+                    }
+                }
+                return "";
             };
             // Обход папки: все *.png (вложенные — тоже), rel-путь от корня.
             st.collectImportPng = async (dirHandle) => {
@@ -3734,10 +3968,60 @@ const reload = async () => {
                     }));
                 } catch (e) { return null; }
             };
+            // Мягкий разбор JSON из PNG-чанка (v1.63).
+            //
+            // Чанк `prompt` пишет Python (json.dumps) и в поле `is_changed`
+            // кладёт токен `NaN` БЕЗ кавычек — это невалидный JSON по RFC 8259,
+            // и строгий JSON.parse на нём падает (реальный файл
+            // output/Космос/Планеты/Krea2_Raw_00001_.png, замер 2026-10-04).
+            // Разбор был обёрнут в try/catch, который молча оставлял промпт
+            // пустым, а серверный фолбэк подставлял имя файла — отсюда
+            // «импортировалось изображение, а вместо промпта название».
+            //
+            // Строгий разбор пробуем ПЕРВЫМ: нормальный файл идёт без
+            // санитайзера вообще. Только если он упал — заменяем NaN/Infinity
+            // (мусор в is_changed для промпта не значит) на null и пробуем снова.
+            // Сканер идёт посимвольно и пропускает содержимое строковых
+            // литералов, поэтому слово «NaN» или «Infinity» ВНУТРИ текста
+            // промпта остаётся целым.
+            st.jsonLoose = (text) => {
+                try { return JSON.parse(text); }
+                catch (e) { /* строгий разбор не прошёл — чиним ниже */ }
+                const s = String(text ?? "");
+                let out = "";
+                let inStr = false, esc = false;
+                for (let i = 0; i < s.length; i++) {
+                    const ch = s[i];
+                    if (inStr) {
+                        out += ch;
+                        if (esc) esc = false;
+                        else if (ch === "\\") esc = true;
+                        else if (ch === '"') inStr = false;
+                        continue;
+                    }
+                    if (ch === '"') { inStr = true; out += ch; continue; }
+                    const rest = s.slice(i);
+                    let len = 0;
+                    if (rest.startsWith("NaN")) len = 3;
+                    else if (rest.startsWith("Infinity")) len = 8;
+                    else if (rest.startsWith("-Infinity")) len = 9;
+                    if (len) {
+                        const after = s[i + len];
+                        // Токен ровно на этом месте: следующий символ не часть имени
+                        if (after === undefined || !/[0-9A-Za-z_.]/.test(after)) {
+                            out += "null"; i += len - 1; continue;
+                        }
+                    }
+                    out += ch;
+                }
+                return JSON.parse(out);
+            };
             // Разбор PNG-чанков в запись: apи-граф → положительный промпт (или
             // UI-граф → widgets), граф уходит в запись (а не только в обложку):
             // на PNG тяжелее 4МБ обложка сжимается и чанк теряется, а «Параметры
             // генерации» берутся из графа записи. Одинаково для папки и файлов.
+            // Разбор чанка — через jsonLoose: голый NaN из is_changed ронял
+            // JSON.parse, и импорт молча терял промпт (v1.63).
             st.pngItemFromBuf = (buf) => {
                 let prompt = "";
                 let workflow = null;
@@ -3746,16 +4030,31 @@ const reload = async () => {
                         const chunks = st.pngChunks(buf);
                         let api = null, ui = null;
                         if (chunks.prompt) {
-                            const p = JSON.parse(chunks.prompt);
+                            const p = st.jsonLoose(chunks.prompt);
                             if (p && typeof p === "object" && !Array.isArray(p)) api = p;
                         }
-                        if (!api && chunks.workflow) {
-                            const u = JSON.parse(chunks.workflow);
+                        if (chunks.workflow) {
+                            // Без guard `!api`: чанк workflow нужно читать ВСЕГДА,
+                            // даже когда чанк prompt уже разобран. Guard был причиной
+                            // того, что UI-граф в запись не попадал никогда (v1.64) —
+                            // при обоих чанках `ui` оставался null.
+                            const u = st.jsonLoose(chunks.workflow);
                             if (u && typeof u === "object" && !Array.isArray(u)) ui = u;
                         }
                         prompt = st.promptFromGraph(api || {});
                         if (!prompt && ui) prompt = st.promptFromWorkflow(ui);
-                        workflow = api || ui || null;
+                        // В запись кладём UI-граф, а не API-граф (v1.64). Поле
+                        // `workflow` читают три потребителя, и все ждут UI-формат:
+                        //   • чанк "workflow" в превью библиотеки — по нему ComfyUI
+                        //     открывает воркфлоу при перетаскивании картинки;
+                        //   • _gen_meta («Параметры генерации») читает nodes/widgets_values;
+                        //   • _workflow_chunk_from_bytes достаёт именно UI-граф.
+                        // API-граф (чанк `prompt`) тут бесполезен: его ключи — id узлов,
+                        // nodes/links нет, поэтому и drag&drop, и параметры были пусты
+                        // (замер 2026-10-04 на output/Космос/Планеты/Krea2_Raw_00001_.png).
+                        // Если чанка `workflow` в PNG нет — берём API-граф, лучше хоть
+                        // что-то (и карточка не останется вовсе без графа).
+                        workflow = ui || api || null;
                     } catch (e) { /* чанк есть, но не JSON — оставляем пусто */ }
                 }
                 return { prompt, workflow };
@@ -3944,15 +4243,24 @@ const reload = async () => {
                     // Путь изображений в карточках относится к папке html-файла —
                     // пересчитываем в путь от корня обхода.
                     const htmlDir = h.rel.split("/").slice(0, -1).join("/");
-                    cards.forEach((c, idx) => {
-                        if (!(c && c.title && String(c.prompt || "").trim())) return;
+                    for (let idx = 0; idx < cards.length; idx++) {
+                        const c = cards[idx];
+                        if (!(c && c.title && String(c.prompt || "").trim())) continue;
                         let key = htmlDir ? htmlDir + "/" + c.relImg : c.relImg;
                         if (!found.images.has(key) && c.relImg) key = c.relImg;
+                        const coverFile = found.images.get(key);
+                        let workflow = null;
+                        if (coverFile) {
+                            // Читаем workflow из PNG-чанка (как при импорте PNG файлов)
+                            const buf = await st._fileToBytes(coverFile);
+                            const parsed = st.pngItemFromBuf(buf);
+                            workflow = parsed.workflow;
+                        }
                         items.push({ title: c.title, prompt: c.prompt, folder: c.folder,
                             created_at: c.created_at, favorite: c.favorite,
                             media: c.media || null, src: h.rel + "#" + (idx + 1),
-                            _cover: found.images.get(key) || null });
-                    });
+                            workflow, _cover: coverFile || null });
+                    }
                 }
                 if (!items.length) {
                     st.setExportProgress(false);

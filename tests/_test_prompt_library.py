@@ -2403,6 +2403,28 @@ if _IMP in handlers:
     ]}))
     check("элемент без текста идёт в failed с причиной",
           r["json"].get("failed") and r["json"]["failed"][0].get("reason") == "empty", str(r))
+    # Тот же контракт для КАРТИНОК: §49 — «мусорные элементы (пустой текст) идут
+    # в failed, а не в запись». Слепой детектор выше проверял элемент без media,
+    # поэтому подстановка имени файла в промпт для media=image/video проходила
+    # незамеченной: импорт молча создавал карточку «имя файла = промпт» — ровно
+    # то, из-за чего поломка NaN не была видна сутки.
+    r_img = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+        {"title": "Krea2_Raw_00001_.png", "prompt": "", "media": "image",
+         "src": "Krea2_Raw_00001_.png"},
+    ]}))
+    check("картинка без промпта — в failed, а не запись с именем файла",
+          r_img["status"] == 400
+          and r_img["json"].get("failed")
+          and r_img["json"]["failed"][0].get("reason") == "empty",
+          str(r_img))
+    check("имя файла в промпт не подставляется (в базе нет такой записи)",
+          not any(e.get("prompt") == "Krea2_Raw_00001_"
+                  for e in mod._load_db()[0]), str(r_img))
+    r_img2 = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+        {"title": "С картинкой", "prompt": "настоящий промпт", "media": "image"},
+    ]}))
+    check("с промптом картинка импортируется обычным порядком",
+          r_img2["status"] == 200 and r_img2["json"].get("created"), str(r_img2))
     r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [{"prompt": "  "}]}))
     check("пакет целиком из пустышек не пишется (400)", r["status"] == 400, str(r))
     r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": []}))
@@ -2451,6 +2473,29 @@ if _IMP in handlers:
         check("PNG без чанка не выдумывает граф (и не падает)",
               r["status"] == 200 and mod._entry_workflow(_e49b) is None, str(r))
         check("превью при этом сохранилось", bool(_e49b.get("preview")), str(_e49b.get("preview")))
+
+        # (з) ИМПОРТ с графом в самом items.workflow — это путь PNG-импорта: клиент
+        # уже достал граф из чанка и прислал его в items. Граф обязан лечь ФАЙЛОМ
+        # workflows/{id}.json, как и положено новой записи с v1.40 (§24.2).
+        # Раньше он уезжал прямо в запись (`_add_entry(..., workflow=...)`) — это
+        # ровно то раздувание базы, ради которого снимок вынесли в отдельный файл
+        # (замер 2026-09-21: 12.1 МБ из 18.6 МБ на 36 снимков), причём на PNG
+        # UI-граф вчетверо тяжелее API-графа.
+        _wf49z = {"nodes": [
+            {"id": 1, "type": "KSampler", "widgets_values": [0, "euler", "beta", 12, 1, 1]},
+            {"id": 2, "type": "CLIPTextEncode", "widgets_values": ["текст из items"]},
+        ], "links": []}
+        r = h("POST", "/prompt_library/import", Req({"target": "__all", "items": [
+            {"title": "Граф в items", "prompt": "текст с графом в items",
+             "workflow": _wf49z}]}))
+        _id49z = r["json"]["created"][0]["id"]
+        _e49z = next(e for e in mod._load_db()[0] if e["id"] == _id49z)
+        check("импорт с workflow: граф лёг ФАЙЛОМ, база не раздута",
+              _e49z.get("workflow_file") == f"workflows/{_id49z}.json"
+              and not _e49z.get("workflow"),
+              f"file={_e49z.get('workflow_file')} inline={bool(_e49z.get('workflow'))}")
+        check("импорт с workflow: граф читается обратно без потерь",
+              mod._entry_workflow(_e49z) == _wf49z, str(mod._entry_workflow(_e49z))[:90])
     except ImportError as exc:  # PIL нет — проверять нечего, но и молчать нельзя
         check(f"(к) блок с обложкой пропущен: {exc}", False, "PIL нужен для превью")
 

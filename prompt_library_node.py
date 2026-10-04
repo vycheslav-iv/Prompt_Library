@@ -2477,6 +2477,14 @@ try:
                 continue
             prompt = str(raw.get("prompt") or "").strip()
             title = str(raw.get("title") or "").strip()
+            media = str(raw.get("media") or "").strip().lower()
+            if media not in ("image", "video"):
+                media = None
+            # Пустой текст — мусор, и мусор идёт в failed (§49), независимо от
+            # типа: подставлять имя файла в промпт нельзя. Такой «фолбэк» стоил
+            # нам сутки невидимой поломки — PNG без чанка prompt импортировался
+            # «успешно» с промптом-именем файла, и настоящая причина (битый
+            # разбор чанка) не всплывала ни в отчёте, ни в консоли.
             if not prompt:
                 failed.append({"title": title, "reason": "empty"})
                 continue
@@ -2495,9 +2503,6 @@ try:
                                 "reason": "batch"})
                 continue
             batch.add(key)
-            media = str(raw.get("media") or "").strip().lower()
-            if media not in ("image", "video"):
-                media = None
             wf = raw.get("workflow")
             to_add.append({
                 "prompt": prompt,
@@ -2525,9 +2530,14 @@ try:
         created = []
         new_folders = set(folders)
         for it in to_add:
+            # Граф НЕ передаём в _add_entry: он лёг бы прямо в запись, а база
+            # перечитывается целиком на каждое действие (§25.3.1), а снимок
+            # весит сотни КБ (v1.40 вынес его в workflows/{id}.json именно за
+            # это). Импорт с графом в items.workflow — путь PNG-импорта, и он
+            # обходил эту схему, раздувая library.json на размер снимка.
             entry_id, was_new = _add_entry(
                 entries, it["prompt"], it["folder"], title=it["title"],
-                media=it["media"], workflow=it["workflow"],
+                media=it["media"],
                 created_at=it["created_at"], favorite=it["favorite"],
                 import_src=it["import_src"])
             if not was_new:
@@ -2537,6 +2547,12 @@ try:
                 skipped.append({"title": it["title"] or _auto_title(it["prompt"]),
                                 "exists_id": entry_id, "reason": "db"})
                 continue
+            # Тот же путь, что у новых записей из прогона: отдельный файл.
+            # _attach_workflow сама вернёт inline, если файл положить не удалось
+            # (правленный вручную id, нет прав) — лучше старое хранение, чем
+            # молчаливая потеря воркфлоу (§24.2).
+            if isinstance(it["workflow"], dict):
+                _attach_workflow(entries, entry_id, it["workflow"])
             # src возвращаем клиенту: по нему он привязывает обложки к созданным
             # записям (порядок created не совпадает с порядком items — часть
             # элементов ушла в skipped/failed).
