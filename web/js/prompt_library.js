@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.66-executed-prompt";
+const PL_JS_VERSION = "1.67-executed-keeper";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -3667,7 +3667,7 @@ const reload = async () => {
             // где inputs содержит ИЛИ прямые значения ИЛИ ссылки [from_node_id, from_output_idx].
             // Обходим граф от positive входа сэмплера до узла с текстом (CLIPTextEncode,
             // TextConcat, PrimitiveText и т.д.), следуя ТОЛЬКО по проводам.
-            st.promptFromGraph = (graph) => {
+            st.promptFromGraph = (graph, ui) => {
                 const g = graph || {};
                 const ids = Object.keys(g);
                 if (!ids.length) return "";
@@ -3712,6 +3712,32 @@ const reload = async () => {
                     return null;
                 };
 
+                // v1.67: узел-«подхват» (PromptKeeper) перезаписывает свой
+                // widgets_values[0] ФАКТИЧЕСКИМ выходом при прогоне
+                // (prompt_keeper_node.py:34: `node_data["widgets_values"] = [text]`),
+                // а чанк `prompt` снимается на ПОСТАНОВКЕ в очередь и хранит
+                // ПРЕДпрогонное значение виджета — то есть промпт ПРОШЛОГО прогона.
+                // Поэтому для такого узла авторитетен UI-граф: замер на файлах
+                // пользователя (2026-10-05, эталон — 701 файл, где positive-цепочка
+                // кончается на PromptKeeper) дал 677 расхождений ровно на один
+                // прогон, и отчёт «импортировался не тот промпт» — про это.
+                const KEEPER_RE = /keeper/i;
+                const uiNodeById = {};
+                for (const n of (ui?.nodes || [])) if (n && n.id != null) uiNodeById[n.id] = n;
+                // Исполненный выход подхвата из UI-графа (pos 0 — его единственный виджет).
+                const keeperRuntimeText = (nodeId) => {
+                    const n = uiNodeById[nodeId];
+                    if (!n) return null;
+                    const wv = n.widgets_values;
+                    if (!Array.isArray(wv) || !wv.length) return null;
+                    return (typeof wv[0] === "string" && wv[0].trim()) ? wv[0].trim() : null;
+                };
+                // Подключён ли сквозной вход `source` (только тогда виджет в чанке
+                // `prompt` может быть предпрогонным: у PromptKeeper `source`
+                // ПЕРЕОПРЕДЕЛЯЕТ `text`, см. его process()).
+                const hasSourceWire = (node) => Object.entries(node.inputs || {})
+                    .some(([k, v]) => /^source$/i.test(k) && parseInput(v)?.type === "link");
+
                 // Рекурсивный обход узла по его ТИПУ (не по output index).
                 // Когда мы приходим в узел по проводу, смотрим его class_type и извлекаем текст
                 // из соответствующих входов/виджетов.
@@ -3729,6 +3755,15 @@ const reload = async () => {
 
                     const isConcat = /concat|join/.test(nType);
                     const isSwitch = /switch|select|condition/.test(nType);
+
+                    // v1.67: подхват с подключённым `source` — его фактический выход
+                    // лежит в UI-графе (см. keeperRuntimeText). Раньше сюда
+                    // подставлялся виджет из чанка `prompt` — значение ПРОШЛОГО прогона.
+                    // UI-графа нет — оставляем прежнее поведение (своё значение).
+                    if (KEEPER_RE.test(nType) && hasSourceWire(node)) {
+                        const rt = keeperRuntimeText(nodeId);
+                        if (rt) return rt;
+                    }
 
                     // v1.63: СВОЁ значение узла раньше чужого провода (иначе обход
                     // соскальзывал по служебному входу `source` в соседний узел).
@@ -3845,6 +3880,18 @@ const reload = async () => {
                     const node = nodeById[nodeId];
                     if (!node) return null;
                     const nType = (node.type || "").toLowerCase();
+
+                    // v1.67: подхват с подключённым `source` — widgets_values[0]
+                    // перезаписан ФАКТИЧЕСКИМ выходом узла при прогоне
+                    // (prompt_keeper_node.py:34), а widgets_values_named.text —
+                    // предпрогонное значение. Авторитетно первое.
+                    if (/keeper/i.test(nType)) {
+                        const wv = node.widgets_values;
+                        const wired = (node.inputs || []).some((i) => i && i.name === "source" && i.link != null);
+                        if (wired && Array.isArray(wv) && typeof wv[0] === "string" && wv[0].trim()) {
+                            return wv[0].trim();
+                        }
+                    }
 
                     // СВОЙ текст узла — раньше, чем уход по проводу (v1.63).
                     // Узел-источник текста (PromptKeeper, Primitive, degg-ноды с
@@ -4046,7 +4093,9 @@ const reload = async () => {
                             const u = st.jsonLoose(chunks.workflow);
                             if (u && typeof u === "object" && !Array.isArray(u)) ui = u;
                         }
-                        prompt = st.promptFromGraph(api || {});
+                        // v1.67: UI-граф передаём вторым аргументом — только в нём
+                        // лежит ФАКТИЧЕСКИЙ выход узлов-подхватов (PromptKeeper).
+                        prompt = st.promptFromGraph(api || {}, ui || null);
                         // v1.66: чанк `prompt` — ИСПОЛНЕННЫЙ слой, он авторитетен.
                         // Чанк `workflow` — холст, и его виджет запросто лежит СТАРЫМ
                         // (замер 2026-10-05 на Ужасы/Монстры/Krea2_Raw_00249_.png:

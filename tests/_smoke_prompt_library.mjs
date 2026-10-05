@@ -4058,9 +4058,82 @@ await run("v1.66: свитч сабграфа не ломает поиск вх�
     "1717:1709": { class_type: "CLIPTextEncode",
       inputs: { text: "чужая ветка сабграфа" } },
   };
-  check("v1.66: исполненное значение узла важнее чужих веток и провода `source`",
+  // v1.67 уточнил правило: у подхвата с проводом `source` исполненный текст берётся
+  // из UI-графа, и здесь (граф передан без ui) работает запасной путь — свой виджет.
+  check("v1.66/1.67: без UI-графа — виджет узла, а не чужая ветка сабграфа",
     st.promptFromGraph(api) === "исполненный промпт болота",
     JSON.stringify(st.promptFromGraph(api)));
+});
+
+
+// --- v1.67: PromptKeeper пишет ИСПОЛНЕННЫЙ текст в UI-граф, а чанк `prompt` ---
+// --- хранит предпрогонный виджет. Отчёт пользователя (2026-10-05): ---------
+// импортировался промпт ЧУЖОГО прогона. Форма реального файла
+// output/Космос/Планеты/Krea2_Raw_00696_.png (газовый гигант):
+//   чанк prompt  → 1622 PromptKeeper.text = «…low orbit… Earth…» (что лежало в
+//                  виджете ДО прогона — прошлый промпт);
+//   чанк workflow→ 1622 widgets_values[0] = «…uncharted gas giant…» — сюда
+//                  prompt_keeper_node.py:34 записал ФАКТИЧЕСКИЙ выход узла.
+// Замер на файлах пользователя: 677 из 701 расходились (сдвиг на один прогон).
+const KEEPER_STALE = "A sweeping cinematic wide shot from a low orbit perspective looking down at the curved limb of Earth";
+const KEEPER_DONE = "A sweeping cinematic wide shot of a serene, uncharted gas giant orbiting close to its star";
+const keeperApi = {
+  "1524": { class_type: "KSampler", inputs: { positive: ["1522", 0], negative: ["1523", 0] } },
+  "1522": { class_type: "CLIPTextEncode", inputs: { text: ["1622", 0], clip: ["1515:1520", 0] } },
+  "1622": { class_type: "PromptKeeper", inputs: { text: KEEPER_STALE, source: ["1625", 0] } },
+  "1625": { class_type: "ComfySwitchNode",
+    inputs: { switch: ["1692", 0], on_false: ["1679", 0], on_true: ["1685", 0] } },
+  "1679": { class_type: "ComfySwitchNode",
+    inputs: { switch: ["1690", 0], on_false: ["1919", 0], on_true: ["1680", 0] } },
+  "1919": { class_type: "PromptKeeper", inputs: { text: "Космос. Планеты", source: ["2004", 1] } },
+  "2004": { class_type: "PromptLibrary",
+    inputs: { mode: "📤📥 Выдача + запись", selected: "e60c058790", pickup: "1622", slots_out: "[]" } },
+  "1692": { class_type: "PrimitiveBoolean", inputs: { value: false } },
+};
+const keeperUi = {
+  nodes: [
+    { id: 1622, type: "PromptKeeper", title: "Итоговый Promt",
+      inputs: [{ name: "source", type: "*", link: 1 }],
+      widgets_values: [KEEPER_DONE],
+      widgets_values_named: { text: KEEPER_STALE } },
+    { id: 1919, type: "PromptKeeper", inputs: [{ name: "source", type: "*", link: 2 }],
+      widgets_values: ["MASTER STYLE text"], widgets_values_named: { text: "Космос. Планеты" } },
+    { id: 1522, type: "CLIPTextEncode", inputs: [{ name: "text", type: "STRING", link: 3 }],
+      widgets_values: [""] },
+  ],
+  links: [[3, 1622, 0, 1522, 1, "STRING"]],
+};
+
+await run("v1.67: PromptKeeper — исполненный текст берётся из UI-графа, не из чанка prompt", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const got = st.promptFromGraph(keeperApi, keeperUi);
+  check("v1.67: в запись ушёл текст ПОСЛЕДНЕГО прогона (газовый гигант), а не предпрогонный виджет",
+    got === KEEPER_DONE, JSON.stringify(got));
+});
+
+await run("v1.67: PromptKeeper без UI-графа — предпрогонное значение, а не чужая ветка свитча", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const got = st.promptFromGraph(keeperApi);
+  check("v1.67: без UI-графа остался виджет узла (не «Космос. Планеты» из ветки source)",
+    got === KEEPER_STALE, JSON.stringify(got));
+});
+
+await run("v1.67: PromptKeeper с неподключённым source — своё значение (оба графа сходятся)", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const api = {
+    "1524": { class_type: "KSampler", inputs: { positive: ["1522", 0] } },
+    "1522": { class_type: "CLIPTextEncode", inputs: { text: ["1622", 0] } },
+    "1622": { class_type: "PromptKeeper", inputs: { text: "ручной промпт" } },
+  };
+  const ui = { nodes: [{ id: 1622, type: "PromptKeeper", widgets_values: ["ручной промпт"] }], links: [] };
+  check("v1.67: неподключённый source — берётся свой текст",
+    st.promptFromGraph(api, ui) === "ручной промпт", JSON.stringify(st.promptFromGraph(api, ui)));
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
