@@ -3968,6 +3968,101 @@ await run("v1.62: смена воркфлоу не теряет текст/на�
   check("v1.62: закрытое окно = провод пуст", qwD.value === "", qwD.value);
 });
 
+// --- v1.66: промпт импорта из ИСПОЛНЕННОГО слоя (чанк prompt) на реальных формах ---
+// Отчёт пользователя (2026-10-05): «при загрузке изображения в библиотеку
+// импортируется не тот промпт, по которому сгенерировано изображение».
+// Замер на его собственных файлах (1139 PNG в output/): у 160 из них (14 %)
+// обход positive-цепочки возвращал ПУСТО, поэтому запись либо не создавалась
+// (`без текста`), либо промпт подхватывался из UI-графа/превью — а там лежит
+// УСТАРЕВШИЙ виджет холста. Пример, где видно оба слоя сразу:
+//   output/Ужасы/Монстры/Krea2_Raw_00249_.png
+//     чанк prompt  → PromptKeeper.text = «A wide-angle… mist-laden wetland…» (исполнено)
+//     чанк workflow→ тот же PromptKeeper.widgets_values[0] = «A low-angle documentary…» (старое)
+// Причина пустого обхода: цепочка positive проходит сквозь узлы, которые
+// детектор не знал — PreviewAny (сквозной вход `source`), ComfySwitchNode
+// (ветки on_false/on_true, а не input_*), TextGenerate/LLM (его ВЫХОД в файле
+// не лежит — тупик, а не источник) — и сквозь текстовые узлы, у которых
+// значение лежит во входе `value` (PrimitiveStringMultiline), а не `text`/`prompt`.
+// Проверка падала ДО правки: все три случая возвращали "".
+await run("v1.66: промпт import берётся из исполненной ветки (примитив → value)", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  const api = {
+    "5": { class_type: "KSampler", inputs: { positive: ["6", 0] } },
+    "6": { class_type: "CLIPTextEncode", inputs: { text: ["9", 0], clip: ["7", 0] } },
+    "9": { class_type: "PrimitiveStringMultiline", inputs: { value: "прямой промпт примитива" } },
+  };
+  check("v1.66: значение текстового примитива (вход `value`) найдено",
+    st.promptFromGraph(api) === "прямой промпт примитива",
+    JSON.stringify(st.promptFromGraph(api)));
+});
+
+await run("v1.66: цепочка проходит PreviewAny и свитчи, LLM — тупик, не источник", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  // Форма реального output/Пейзажи/Водопады/Krea2_turbo_00377_.png:
+  //   KSampler → Krea2StyleSemanticConditioning.prompt → PreviewAny.source →
+  //   свитч → { ветка LLM TextGenerate | примитив с промптом }
+  const api = {
+    "70": { class_type: "KSampler", inputs: { positive: ["798", 0] } },
+    "798": { class_type: "Krea2StyleSemanticConditioning",
+      inputs: { prompt: ["779", 0], clip: ["54", 0], style_image: ["735", 0] } },
+    "779": { class_type: "PreviewAny", inputs: { source: ["780", 0] } },
+    "780": { class_type: "ComfySwitchNode",
+      inputs: { switch: ["781", 0], on_false: ["64", 0], on_true: ["777", 0] } },
+    "64": { class_type: "ComfySwitchNode",
+      inputs: { switch: ["61", 0], on_false: ["59", 0], on_true: ["63", 0] } },
+    "59": { class_type: "PreviewAny", inputs: { source: ["67", 0] } },
+    "67": { class_type: "ComfySwitchNode",
+      inputs: { switch: ["62", 0], on_false: ["58", 0], on_true: ["66", 0] } },
+    "58": { class_type: "PrimitiveStringMultiline", inputs: { value: ["769", 0] } },
+    "769": { class_type: "PrimitiveStringMultiline",
+      inputs: { value: "водопад в тропическом лесу" } },
+    // Выход LLM в PNG не пишется — из него промпт взять нельзя.
+    "66": { class_type: "TextGenerate", inputs: { prompt: ["57", 0], clip: ["734", 0] } },
+    "57": { class_type: "StringConcatenate",
+      inputs: { string_a: ["65", 0], string_b: ["58", 0] } },
+    "65": { class_type: "PrimitiveStringMultiline",
+      inputs: { value: "You are an expert prompt engineer for text-to-image models." } },
+    "777": { class_type: "StringConcatenate",
+      inputs: { string_a: ["64", 0], string_b: ["814", 0] } },
+    "814": { class_type: "ImpactSwitch", inputs: { input1: ["776", 0] } },
+    "776": { class_type: "PrimitiveStringMultiline",
+      inputs: { value: "\n\n[MASTER STYLE]\n\nArt-directed photographic realism" } },
+  };
+  const got = st.promptFromGraph(api);
+  check("v1.66: сквозь PreviewAny и свитчи дошёл до промпта из ветки",
+    got === "водопад в тропическом лесу", JSON.stringify(got));
+  check("v1.66: системный промпт LLM и [MASTER STYLE] в запись не попали",
+    !/expert prompt engineer/.test(got) && !/MASTER STYLE/.test(got), JSON.stringify(got));
+});
+
+await run("v1.66: свитч сабграфа не ломает поиск входа сэмплера", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  // Форма реального output/Ужасы/Монстры/Krea2_Raw_00249_.png: positive сэмплера
+  // приходит на свитч ВНУТРИ сабграфа (id вида "1717:1711").
+  const api = {
+    "1524": { class_type: "KSampler", inputs: { positive: ["1717:1711", 0] } },
+    "1717:1711": { class_type: "ComfySwitchNode",
+      inputs: { switch: ["1717:1708", 0], on_false: ["1522", 0], on_true: ["1717:1709", 0] } },
+    "1522": { class_type: "CLIPTextEncode",
+      inputs: { text: ["1622", 0], clip: ["1515:1520", 0] } },
+    "1622": { class_type: "PromptKeeper",
+      inputs: { text: "исполненный промпт болота", source: ["1625", 0] } },
+    "1625": { class_type: "ComfySwitchNode",
+      inputs: { switch: ["1692", 0], on_false: ["1679", 0], on_true: ["1685", 0] } },
+    "1717:1709": { class_type: "CLIPTextEncode",
+      inputs: { text: "чужая ветка сабграфа" } },
+  };
+  check("v1.66: исполненное значение узла важнее чужих веток и провода `source`",
+    st.promptFromGraph(api) === "исполненный промпт болота",
+    JSON.stringify(st.promptFromGraph(api)));
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");

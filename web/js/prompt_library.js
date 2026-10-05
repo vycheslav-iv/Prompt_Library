@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.65-html-gallery-workflow";
+const PL_JS_VERSION = "1.66-executed-prompt";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -3685,89 +3685,102 @@ const reload = async () => {
                     return null;
                 };
 
+                // Текстовое имя входа узла (v1.66). Раньше список был жёстким
+                // (text/prompt/positive/negative), и значение текстовых примитивов
+                // ComfyUI (`PrimitiveString`/`PrimitiveStringMultiline` — их вход
+                // называется `value`) не находилось вовсе: в PNG лежит только оно,
+                // а промпт импортировался пустым (замер 2026-10-05: 160 из 1139
+                // файлов пользователя — пусто). Суффикс обязателен через `_`/цифру,
+                // чтобы настройка вида `texture`/`style_strength` не сошла за текст.
+                const TEXT_KEY_RE = /^(text|prompt|string|value|content|positive|input)(_\w+|\d+)?$/i;
+                // Узел, чей ВЫХОД — сгенерированный текст (LLM/Ollama/TextGenerate):
+                // в PNG его нет. Это ТУПИК, а не источник — иначе в запись уходил бы
+                // системный промпт, поданный на вход такого узла.
+                const GENERATOR_RE = /generate|ollama|llm|chatgpt/i;
+                // Своё значение узла: первая direct-строка в текстовом входе либо
+                // widgets_values[0] (если граф пришёл вместе с виджетами).
+                const ownTextOf = (node) => {
+                    for (const [k, v] of Object.entries(node.inputs || {})) {
+                        if (!TEXT_KEY_RE.test(k)) continue;
+                        const p = parseInput(v);
+                        if (p?.type === "direct" && p.value.trim()) return p.value.trim();
+                    }
+                    const wv = node.widgets_values;
+                    if (Array.isArray(wv) && wv.length && typeof wv[0] === "string" && wv[0].trim()) {
+                        return wv[0].trim();
+                    }
+                    return null;
+                };
+
                 // Рекурсивный обход узла по его ТИПУ (не по output index).
                 // Когда мы приходим в узел по проводу, смотрим его class_type и извлекаем текст
                 // из соответствующих входов/виджетов.
                 const traceNode = (nodeId, seen = new Set(), depth = 0) => {
-                    if (depth > 8 || !nodeId || seen.has(nodeId)) return null;
+                    if (depth > 12 || !nodeId || seen.has(nodeId)) return null;
                     seen.add(nodeId);
                     const node = g[nodeId];
                     if (!node) return null;
 
                     const nType = (node.class_type || "").toLowerCase();
 
-                    // 1. Текстовые узлы: CLIPTextEncode, Primitive, Text и им подобные
-                    // У них текст лежит в inputs.text (прямое значение или ссылка) или в widgets_values[0]
-                    if (nType.includes("cliptextencode") || nType.includes("primitive") || nType === "text") {
-                        // inputs.text — прямое значение
-                        const textVal = getInputVal(node, "text");
-                        const parsed = parseInput(textVal);
-                        if (parsed?.type === "direct" && parsed.value.trim()) return parsed.value.trim();
-                        // inputs.text — ссылка на другой узел
-                        if (parsed?.type === "link") return traceNode(parsed.value[0], seen, depth + 1);
-                        // inputs.prompt (иногда встречается)
-                        const promptVal = getInputVal(node, "prompt");
-                        const parsedP = parseInput(promptVal);
-                        if (parsedP?.type === "direct" && parsedP.value.trim()) return parsedP.value.trim();
-                        if (parsedP?.type === "link") return traceNode(parsedP.value[0], seen, depth + 1);
-                        // widgets_values[0] (на случай, если API-граф содержит виджеты)
-                        const wv = node.widgets_values;
-                        if (Array.isArray(wv) && wv.length && typeof wv[0] === "string" && wv[0].trim()) {
-                            return wv[0].trim();
-                        }
-                        return null;
+                    // v1.66: генератор текста — тупик (его выхода в файле нет).
+                    // Соседнюю ветку переключателя обойдём — там авторский промпт.
+                    if (GENERATOR_RE.test(nType)) return null;
+
+                    const isConcat = /concat|join/.test(nType);
+                    const isSwitch = /switch|select|condition/.test(nType);
+
+                    // v1.63: СВОЁ значение узла раньше чужого провода (иначе обход
+                    // соскальзывал по служебному входу `source` в соседний узел).
+                    // У конкатенатора своего текста нет (его строки — разделители),
+                    // у переключателя — тоже: там только bool/ветки.
+                    if (!isConcat && !isSwitch) {
+                        const own = ownTextOf(node);
+                        if (own) return own;
                     }
 
-                    // 2. Конкатенаторы: TextConcat, JoinText, StringConcat, AnyConcat и т.п.
-                    // У них несколько входов: text, text_1, text_2, text_a, text_b, text_input...
-                    if (nType.includes("concat") || nType.includes("join")) {
+                    // Ссылки узла по порядку объявления входов: сначала текстовые,
+                    // затем прочие — сквозные узлы (PreviewAny/Reroute) держат
+                    // значение в `source`, а не в текстовом имени.
+                    const linkedText = [];
+                    const linkedAny = [];
+                    for (const [k, v] of Object.entries(node.inputs || {})) {
+                        const p = parseInput(v);
+                        if (p?.type !== "link") continue;
+                        (TEXT_KEY_RE.test(k) ? linkedText : linkedAny).push(p.value[0]);
+                    }
+
+                    // Конкатенатор: собираем тексты всех своих входов.
+                    if (isConcat) {
                         const parts = [];
-                        for (const [k, v] of Object.entries(node.inputs || {})) {
-                            if (/^text/.test(k)) { // text, text_1, text_a, text_input, etc.
-                                const p = parseInput(v);
-                                if (p?.type === "direct" && p.value.trim()) parts.push(p.value.trim());
-                                else if (p?.type === "link") {
-                                    const nested = traceNode(p.value[0], seen, depth + 1);
-                                    if (nested) parts.push(nested);
-                                }
-                            }
+                        for (const nid of [...linkedText, ...linkedAny]) {
+                            const nested = traceNode(nid, seen, depth + 1);
+                            if (nested) parts.push(nested);
                         }
-                        if (parts.length) return parts.join(" ");
-                        return null;
+                        return parts.length ? parts.join(" ") : null;
                     }
 
-                    // 3. Переключатели: Switch, Condition, Select и т.п.
-                    // Берём первый непустой текстовый вход
-                    if (nType.includes("switch") || nType.includes("select") || nType.includes("condition")) {
-                        for (const [k, v] of Object.entries(node.inputs || {})) {
-                            if (/^(input_|text|prompt)/i.test(k)) {
-                                const p = parseInput(v);
-                                if (p?.type === "direct" && p.value.trim()) return p.value.trim();
-                                if (p?.type === "link") {
-                                    const nested = traceNode(p.value[0], seen, depth + 1);
-                                    if (nested) return nested;
-                                }
-                            }
-                        }
-                        return null;
-                    }
-
-                    // 4. Любой другой узел — пробуем стандартные текстовые входы
-                    // (на случай нестандартных нод, которые выдают текст)
-                    for (const key of ["text", "prompt", "positive", "negative"]) {
-                        const p = parseInput(getInputVal(node, key));
-                        if (p?.type === "direct" && p.value.trim()) return p.value.trim();
-                        if (p?.type === "link") {
-                            const nested = traceNode(p.value[0], seen, depth + 1);
+                    // Переключатель: состояние (bool) в API-графе не читается (это не
+                    // строка), поэтому пробуем ВСЕ ветки по порядку и берём первую
+                    // с текстом. Раньше здесь проверялись только имена input_*/text*,
+                    // и на `on_false`/`on_true` обход обрывался пустым ответом.
+                    if (isSwitch) {
+                        for (const nid of [...linkedText, ...linkedAny]) {
+                            const nested = traceNode(nid, seen, depth + 1);
                             if (nested) return nested;
                         }
+                        return null;
                     }
 
-                    // 5. Последний шанс: widgets_values[0]
-                    const wv = node.widgets_values;
-                    if (Array.isArray(wv) && wv.length && typeof wv[0] === "string" && wv[0].trim()) {
-                        return wv[0].trim();
+                    // Обычный узел: идём по своим текстовым входам.
+                    for (const nid of linkedText) {
+                        const nested = traceNode(nid, seen, depth + 1);
+                        if (nested) return nested;
                     }
+
+                    // Сквозной узел (PreviewAny/Reroute/…): единственная ссылка без
+                    // текстового имени — это продолжение той же цепочки.
+                    if (linkedAny.length === 1) return traceNode(linkedAny[0], seen, depth + 1);
 
                     return null;
                 };
@@ -3785,29 +3798,21 @@ const reload = async () => {
                     }
                 }
 
-                // 2. Фолбэк: если сэмплеров нет или у них нет positive — ищем любой CLIPTextEncode/Primitive с текстом
+                // 2. Фолбэк: если сэмплеров нет или у них нет positive — берём первый
+                // текстовый узел (CLIPTextEncode/Primitive/Text) со своим значением.
                 for (const id of ids) {
                     const node = g[id];
                     const nType = (node.class_type || "").toLowerCase();
-                    if (nType.includes("cliptextencode") || nType.includes("primitive") || nType === "text") {
-                        const direct = parseInput(getInputVal(node, "text"));
-                        if (direct?.type === "direct" && direct.value.trim()) return direct.value.trim();
-                        const directP = parseInput(getInputVal(node, "prompt"));
-                        if (directP?.type === "direct" && directP.value.trim()) return directP.value.trim();
-                        const wv = node.widgets_values;
-                        if (Array.isArray(wv) && wv.length && typeof wv[0] === "string" && wv[0].trim()) {
-                            return wv[0].trim();
-                        }
-                    }
+                    if (!(nType.includes("cliptextencode") || nType.includes("primitive") || nType === "text")) continue;
+                    const own = ownTextOf(node);
+                    if (own) return own;
                 }
 
-                // 3. Фолбэк: любой узел с прямым текстовым входом
+                // 3. Фолбэк: любой узел со своим текстовым значением
+                // (`text`/`prompt`/`value`/`string*` — как у примитивов ComfyUI).
                 for (const id of ids) {
-                    const node = g[id];
-                    for (const key of ["text", "prompt"]) {
-                        const p = parseInput(getInputVal(node, key));
-                        if (p?.type === "direct" && p.value.trim()) return p.value.trim();
-                    }
+                    const own = ownTextOf(g[id]);
+                    if (own) return own;
                 }
 
                 return "";
@@ -4042,7 +4047,17 @@ const reload = async () => {
                             if (u && typeof u === "object" && !Array.isArray(u)) ui = u;
                         }
                         prompt = st.promptFromGraph(api || {});
-                        if (!prompt && ui) prompt = st.promptFromWorkflow(ui);
+                        // v1.66: чанк `prompt` — ИСПОЛНЕННЫЙ слой, он авторитетен.
+                        // Чанк `workflow` — холст, и его виджет запросто лежит СТАРЫМ
+                        // (замер 2026-10-05 на Ужасы/Монстры/Krea2_Raw_00249_.png:
+                        //  чанк prompt   → PromptKeeper.text = «A wide-angle… mist-laden
+                        //                  wetland…» (то, чем сгенерировано);
+                        //  чанк workflow → тот же PromptKeeper.widgets_values[0] =
+                        //                  «A low-angle documentary…» (прошлый прогон)).
+                        // Поэтому фолбэк на UI-граф — ТОЛЬКО когда чанка `prompt` нет
+                        // вовсе: подставить старое значение вместо правильного хуже,
+                        // чем честное «промпта нет» (§49/§52.6).
+                        if (!prompt && ui && !api) prompt = st.promptFromWorkflow(ui);
                         // В запись кладём UI-граф, а не API-граф (v1.64). Поле
                         // `workflow` читают три потребителя, и все ждут UI-формат:
                         //   • чанк "workflow" в превью библиотеки — по нему ComfyUI
