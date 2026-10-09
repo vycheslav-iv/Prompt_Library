@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (v1.67, 2026-10-05)
+# Память сессии — Prompt Library (v1.68, 2026-10-09)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,50 +7,60 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-Сначала исправили v1.66 (импорт PNG — обход positive-цепочки: `value`-входы
-примитивов, свитчи, сквозные `PreviewAny`/`Reroute`, узлы-генераторы как тупик;
-пустой промпт 161 → 4). **Пользователь проверил живьём и нашёл, что промпт всё
-равно чужой** (`Krea2_Raw_00696_.png`: импортировался «Земля с низкой орбиты»,
-а картинка — газовый гигант). Причина найдена замером и исправлена в v1.67.
+Пользователь: после подключения новой ноды `Degg_Images_Save_Compare` в воркфлоу
+«Krea2_MY3» перестали сохраняться превью (обложки) записей. Причина найдена:
+нода отдаёт файлы под СВОИМ ключом `degg_compare_images` (осознанно — свой холст
+сравнения), а `plExecuted` собирал обложку только из `images`/`video`/`gifs` →
+`attach_preview` не вызывался. Фикс — на стороне Prompt_Library (generic-фолбэк
+по любому ключу output), Degg-ноду не трогали. Красная фаза смоука (3 ASSERT FAIL)
+→ 130 зелёных; живую приёмку пользователь подтвердил («правка работает»).
+Дополнительно скил `comfyui-deferred-capture` дополнен (§3, §5 #17, §6,
+Provenance; три копии синхронизированы).
 
 ## 2. Итоговое состояние кода
 
-- `web/js/prompt_library.js:154` — `PL_JS_VERSION = "1.67-executed-keeper"`
-- `web/js/prompt_library.js:3670` — `st.promptFromGraph(graph, ui)` — второй аргумент UI-граф
-- `web/js/prompt_library.js:3724` — `KEEPER_RE` / `keeperRuntimeText()` / `hasSourceWire()` — фактический выход подхвата берётся из UI-графа
-- `web/js/prompt_library.js:3763` — keeper-правило в `traceNode` (до «своё значение раньше провода»)
-- `web/js/prompt_library.js:3859` — `st.promptFromWorkflow(ui)`: у `keeper` с проводом `source` сначала `widgets_values[0]` (факт), потом `widgets_values_named.text` (предпрогон)
-- `web/js/prompt_library.js:4098` — `pngItemFromBuf` передаёт `ui` в `promptFromGraph`
+- `web/js/prompt_library.js:154` — `PL_JS_VERSION = "1.68-custom-key-preview"`
+- `web/js/prompt_library.js:1865-1881` — пул обложки: известные пулы
+  `images`/`video`/`gifs`, затем generic-фолбэк `Object.values(d.output)` — массив
+  объектов с `filename`, `type:"output"` важнее temp; известные пулы побеждают
+- `tests/_smoke_prompt_library.mjs:862-910` — красная→зелёная фаза «файлы
+  прогона под СВОИМ ключом сторонней ноды (v1.68)»; всего **130 фаз**
+- `SPECIFICATION.md:4823` — §56 (v1.68)
 - `prompt_library_node.py` — не менялся
-- `tests/_smoke_prompt_library.mjs` — +3 фазы v1.67 (красные ДО правки: 1 ASSERT FAIL), всего 129 фаз
-- `SPECIFICATION.md` — §54 (v1.66) + **пометка, что §54 ошибочна для узлов-подхватов**, §55 (v1.67)
+- Коммит `bdde862` запушен в `master`; рабочая копия синхронизирована (`sync.py`)
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- **v1.66 ошибочно объявила чанк `prompt` авторитетным для промпта.** `PromptKeeper.process()` (`prompt_keeper_node.py:34`) при прогоне пишет в свой `widgets_values[0]` ФАКТИЧЕСКИЙ выход, а чанк `prompt` снят на постановке в очередь → хранит значение ПРОШЛОГО прогона. Для узлов-подхватов правда в UI-графе
-- Признак «узел писал в себя»: `widgets_values[0]` ≠ `widgets_values_named.text` в UI-графе
-- `sed`/inherеdoc с обратными слэшами ломаются в этом окружении — писать скрипты файлом через `write_file`
+- **Сторонние ноды сохранения отдают файлы под своими ключами `ui`** — править
+  их нельзя (кастомный ключ = осознанно, чтобы не рисовать штатное превью).
+  Лечить на ПОТРЕБИТЕЛЕ: пул обложек обязан сканировать любой ключ output.
+- **Хук `commit-msg` блокирует сообщение, называющее файл, которого нет в diff**
+  («проверки ЗЕЛЁНЫЕ» через имя `check.py`) — переформулировать без имени файла,
+  не `--no-verify`.
 
 ## 4. Что важно не сломать при продолжении работы
 
-- **Узел-«подхват» (`PromptKeeper`) с подключённым `source`: промпт — из UI-графа** (`widgets_values[0]`), НЕ из чанка `prompt`. Иначе импортируется промпт прошлого прогона
-- Остальные узлы — как в §54: `prompt` (API-граф) авторитетен; фолбэк на UI-граф только без чанка `prompt`
-- Пустой промпт для media=image/video → `failed`, имя файла не подставлять
-- Архитектура двух слоёв: workflow только через `_attach_workflow` → `workflows/{id}.json`
-- `jsonLoose` обязателен для чанка `prompt` (Python пишет bare `NaN`)
+- **Не «чинить» Degg, добавляя ему `images`** — вернёт двойное превью; чинить
+  только пул на стороне Prompt_Library
+- Известные пулы (`images`/`video`/`gifs`) при конфликте побеждают generic
+- Правила §54/§55 (промпт подхвата из UI-графа, `prompt` авторитетен для остальных)
+- Пустой промпт для media=image/video → `failed`
+- `jsonLoose` обязателен для чанка `prompt`; архитектура двух слоёв через `_attach_workflow`
 - `PL_JS_VERSION` обновлять при каждой правке JS-логики
 - Тесты — только в `Prompt_Library/tests/`; `sync.py` их не копирует
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-- Живая приёмка после перезапуска: импорт `Космос/Планеты/Krea2_Raw_00696_.png` должен дать газовый гигант
-- Прочие узлы, пишущие в себя (`extra_pnginfo`), пока не найдены — если встретится, правило обобщается
-- Знание вынесено в скил `comfyui-workflow-graph-parsing` (правило 6 переписано + ловушка 12)
+- Прочие узлы-подхваты с `extra_pnginfo` (пишут в себя) пока не найдены —
+  если встретится, правило §55 обобщается
+- Идея: авто-скан `return {"ui": {...}}` сторонних нод как красная проверка
+  пула (ожидание: каждый файловый ключ покрыт известным или generic-пулом)
 
 ## 6. Связанные файлы
 
-- `web/js/prompt_library.js` — `promptFromGraph` (:3670), `promptFromWorkflow` (:3859), `pngItemFromBuf` (:4077)
-- `../Prompt_Keeper/prompt_keeper_node.py` — `process()`: `if source is not None: text = str(source)` и запись в `widgets_values`
-- `SPECIFICATION.md` — §54 (v1.66, с пометкой об ошибке), §55 (v1.67)
-- `tests/_smoke_prompt_library.mjs`, `tests/_audit_prompt_library.mjs`, `tests/_test_prompt_library.py`
-- `.agents/skills/comfyui-workflow-graph-parsing/SKILL.md` (дубли в `.kilo/`, `.opencode/`)
+- `web/js/prompt_library.js` — `plExecuted` (~:1794), пул обложки :1865
+- `tests/_smoke_prompt_library.mjs` — фаза v1.68 :862
+- `SPECIFICATION.md` — §56 (v1.68); §54–§55 — промпт подхвата
+- `../Degg_Images_Save_Compare/degg_images_save_compare.py:233` — источник ключа
+- `../.opencode/skills/comfyui-deferred-capture/SKILL.md` (+`.kilo/`, `.agents/`) —
+  дополнен: §3 custom-key pool, §5 #17
