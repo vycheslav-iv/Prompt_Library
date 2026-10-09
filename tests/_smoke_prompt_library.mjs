@@ -854,6 +854,64 @@ await run("preview: итог (output) побеждает ранний temp-пр�
   } finally { sandbox.fetch = origFetch; }
 });
 
+// v1.68: сторонняя нода сохранения (Degg Images Save/Compare) отдаёт файлы
+// под СВОИМ ключом `degg_compare_images` — она сознательно не использует
+// `images`, чтобы не включать штатное превью ноды. Пул обложек обязан видеть
+// файлы ЛЮБОГО ключа output, а не только images/video/gifs — иначе запись
+// создаётся, а обложка не прикрепляется («в прогоне нет файлов-превью»).
+await run("preview: файлы прогона под СВОИМ ключом сторонней ноды (v1.68)", async () => {
+  const node = makeNode();
+  node.id = -1;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  node.id = 70;
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    return jsonResponse({ ok: true, preview: "previews/e8.png" });
+  };
+  try {
+    // 1. наша нода сохранила запись
+    apiStub.dispatch("executed", { node: "70", prompt_id: "c1", output: { saved_id: ["e8"] } });
+    // 2. Degg Images Save/Compare отчитался о файле ПОД СВОИМ КЛЮЧОМ
+    //    (в output нет ни images, ни video, ни gifs)
+    apiStub.dispatch("executed", { node: "88", prompt_id: "c1",
+      output: { degg_compare_images: [{ filename: "cmp_out.png", subfolder: "", type: "output" }],
+                degg_open_path: ["C:/out/cmp_out.png"] } });
+    check("файл под своим ключом лег в запас прогона",
+      st.runImages.get("c1")?.filename === "cmp_out.png",
+      JSON.stringify(st.runImages.get("c1")));
+    // 3. прогон завершён — обложка обязана приклеиться
+    apiStub.dispatch("execution_success", { prompt_id: "c1" });
+    await new Promise((r) => setImmediate(r));
+    const post = posts.find((p) => p.url.includes("/prompt_library/attach_preview"));
+    check("attach_preview вызван для чужого ключа",
+      !!post, JSON.stringify(posts.map((p) => p.url)));
+    check("payload: запись + файл сторонней ноды",
+      post && post.body.id === "e8" && post.body.filename === "cmp_out.png",
+      JSON.stringify(post?.body));
+    check("запас прогона очищен", st.runImages.size === 0);
+
+    // 4. штатный images по-прежнему в приоритете, если ключей несколько
+    posts.length = 0;
+    apiStub.dispatch("executed", { node: "70", prompt_id: "c2", output: { saved_id: ["e9"] } });
+    apiStub.dispatch("executed", { node: "88", prompt_id: "c2",
+      output: { images: [{ filename: "std.png", subfolder: "", type: "output" }],
+                degg_compare_images: [{ filename: "degg.png", subfolder: "", type: "temp" }] } });
+    check("стандартный images не затирается чужим ключом",
+      st.runImages.get("c2")?.filename === "std.png",
+      JSON.stringify(st.runImages.get("c2")));
+    apiStub.dispatch("execution_success", { prompt_id: "c2" });
+    await new Promise((r) => setImmediate(r));
+    const post2 = posts.find((p) => p.url.includes("/prompt_library/attach_preview"));
+    check("обложка — стандартный images при наличии обоих ключей",
+      post2 && post2.body.filename === "std.png", JSON.stringify(post2?.body));
+  } finally { sandbox.fetch = origFetch; }
+});
+
 await run("preview: onRemoved снимает exec-слушатели", async () => {
   const node = makeNode();
   proto.onNodeCreated.call(node);

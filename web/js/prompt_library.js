@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.67-executed-keeper";
+const PL_JS_VERSION = "1.68-custom-key-preview";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -1857,9 +1857,26 @@ const reload = async () => {
                         // (+ animated: true — так отдаёт PreviewVideo), но сторонние
                         // ноды (VHS и подобные) — в `video`/`gifs`. Раньше читался
                         // только `images`, и видео-прогон оставался без обложки.
+                        // v1.68: сторонние НОДЫ СОХРАНЕНИЯ (Degg Images Save/Compare
+                        // и подобные) сознательно отдают файлы под СВОИМИ ключами
+                        // (degg_compare_images), чтобы не включать штатное превью
+                        // ноды — без фолбэка запись создавалась, а обложка не
+                        // прикреплялась («в прогоне нет файлов-превью»).
                         const pools = [d.output && d.output.images, d.output && d.output.video,
                                        d.output && d.output.gifs];
-                        const pool = pools.find((p) => Array.isArray(p) && p.length && p[0] && p[0].filename);
+                        let pool = pools.find((p) => Array.isArray(p) && p.length && p[0] && p[0].filename);
+                        if (!pool && d.output && typeof d.output === "object") {
+                            // Ищем файлы в ЛЮБОМ ключе output; среди чужих ключей
+                            // итог (type "output") важнее temp-превью.
+                            let tempPool = null;
+                            for (const v of Object.values(d.output)) {
+                                if (!Array.isArray(v) || !v.length || !v[0]
+                                    || typeof v[0] !== "object" || !v[0].filename) continue;
+                                if ((v[0].type || "output") === "output") { pool = v; break; }
+                                if (!tempPool) tempPool = v;
+                            }
+                            if (!pool) pool = tempPool;
+                        }
                         if (!pool) return;
                         const im = pool[0] || {};
                         const shot = { filename: im.filename, subfolder: im.subfolder || "", type: im.type || "output" };
