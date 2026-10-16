@@ -11,6 +11,7 @@
     python tests/_probe_live_dom.py --panel         # + открыть панель свойств
     python tests/_probe_live_dom.py --audit-writer --canvas   # кто пишет widget.width (§37.9)
     python tests/_probe_live_dom.py --export-row     # ряд действий влезает на MIN_W? (v1.52)
+    python tests/_probe_live_dom.py --subfolders     # подпапки: видны, вход, вывод (v1.69, §57)
     python tests/_probe_live_dom.py --url http://127.0.0.1:8188/
 
 ⚠️ Научено горьким опытом (§37.7): ловушка/аудит имеют смысл ТОЛЬКО когда нода
@@ -405,6 +406,105 @@ CREATE_NODE_JS = r"""
 })()
 """
 
+# v1.69 (§57): живой опыт подпапок — на РЕАЛЬНОЙ базе пользователя (в ней есть
+# категории с записями И подпапками) и в живом DOM ноды. Состав: карточки
+# подпапок в списке категории, вход в подпапку, путь + ⬆ в шапке, вход в подпапку
+# внутри папки-вывода, карточка подпапки как активный вывод слота, возврат ⬅,
+# и уборка за собой (слот отвязывается, дерево возвращается во «Всё»).
+SUBFOLDERS_JS = r"""
+(() => {
+  const n = window.__plProbeNode;
+  if (!n || !n._pl) return { error: 'нет ноды или состояния (_pl)' };
+  const st = n._pl;
+  const out = { jsVersion: st.version,
+                mode: window.LiteGraph && window.LiteGraph.vueNodesMode ? 'vue' : 'canvas' };
+  const txt = (el) => String((el && el.textContent) || '').replace(/\s+/g, ' ').trim();
+  const kids = (el) => Array.from((el && el.children) || []);
+  const rect = (el) => { const r = el.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height) }; };
+  const isFolderCard = (c) => txt(c).indexOf('📁') >= 0;
+  const isEntryCard = (c) => !isFolderCard(c) && !!c.querySelector('img, div');
+
+  // 1. Реальная категория, у которой есть и записи, и подпапки.
+  const cand = st.allFolders().filter((f) => st.subfoldersOf(f).length
+      && st.entries.filter((e) => e.folder === f).length);
+  out.candidates = cand.length;
+  const P = cand[0];
+  if (!P) return Object.assign(out, { error: 'в базе нет категории с записями и подпапками' });
+  out.parent = P;
+  out.parentSubfolders = st.subfoldersOf(P);
+  const child = st.subfoldersOf(P)[0];
+  st.selFolder = P; st.syncSaveFolder(); st.renderTree(); st.render();
+
+  const listEl = st.list;
+  out.listInDom = !!(listEl && document.contains(listEl));
+  const cards = kids(listEl);
+  const subCards = cards.filter(isFolderCard);
+  const entryCards = cards.filter(isEntryCard);
+  out.subCardsVisible = subCards.length;
+  out.subCardTexts = subCards.map((c) => txt(c).slice(0, 60));
+  out.ownEntries = st.entries.filter((e) => e.folder === P).length;
+  out.entryCardsVisible = entryCards.length;
+  if (subCards.length) { out.subCardRect = rect(subCards[0]); out.subCardDraggable = subCards[0].draggable === true; }
+  if (entryCards.length) out.entryCardRect = rect(entryCards[0]);
+  out.subfoldersFirst = (subCards.length && entryCards.length)
+      ? cards.indexOf(subCards[subCards.length - 1]) < cards.indexOf(entryCards[0]) : null;
+
+  // 2. Клик по подпапке — вход внутрь.
+  if (subCards.length) subCards[0].click();
+  out.afterEnterSelFolder = st.selFolder;
+  out.entered = st.selFolder === child;
+  out.childEntries = st.entries.filter((e) => e.folder === child).length;
+  out.childEntryCards = kids(listEl).filter(isEntryCard).length;
+
+  // 3. Путь в шапке списка и возврат ⬆ (строка шапки не выросла).
+  const nav = st.headNav;
+  out.navText = nav ? txt(nav) : null;
+  out.navRect = nav ? rect(nav) : null;
+  out.headRowRect = nav && nav.parentElement ? rect(nav.parentElement) : null;
+  const up = nav ? kids(nav).filter((c) => txt(c).indexOf('⬆') >= 0)[0] : null;
+  out.upShown = !!up;
+  if (up) up.click();
+  out.upGoesToParent = st.selFolder === P;
+
+  // 4. «Выходы»: папка-вывод P → подпапка → карточка внутри неё.
+  st.selFolder = '__all'; st.render();
+  st.plDrop({ kind: 'folder', path: P }, '__outs');
+  st.selFolder = '__outs'; st.outsActiveFolder = P; st.outsBrowsePath = P;
+  st.renderTree(); st.render();
+  const sub2 = kids(listEl).filter(isFolderCard);
+  out.outsSubCards = sub2.length;
+  if (sub2.length) sub2[0].click();
+  out.outsBrowseAfterEnter = st.outsBrowsePath;
+  out.outsBrowseIsChild = st.outsBrowsePath === child;
+  out.stayedInOuts = st.selFolder === '__outs' && st.outsActiveFolder === P;
+  const head2 = kids(listEl).filter((c) => txt(c).indexOf('решает, что уходит') >= 0)[0];
+  out.outsHeadText = head2 ? txt(head2).slice(0, 140) : null;
+  const back = head2 ? kids(head2).filter((c) => txt(c).indexOf('⬅') >= 0)[0] : null;
+  out.backShown = !!back;
+  const eIn = st.entries.filter((e) => e.folder === st.outsBrowsePath)[0];
+  const cardIn = kids(listEl).filter(isEntryCard)[0];
+  out.cardInSubfolder = !!cardIn;
+  if (cardIn && eIn) cardIn.click();
+  const slot = st.outSlotOfFolder(P);
+  out.slotActiveId = slot ? slot.active_id : null;
+  out.subfolderEntryId = eIn ? eIn.id : null;
+  out.subfolderEntryBecameOutput = !!(slot && eIn && slot.active_id === eIn.id);
+  if (back) back.click();
+  out.browseAfterBack = st.outsBrowsePath;
+  out.backWorks = st.outsBrowsePath === P;
+
+  // 5. Убрать следы опыта: отвязать слот, вернуть «Всё».
+  const arr = st.readOutSlots();
+  const i = arr.findIndex((s) => s.kind === 'folder' && s.path === P);
+  if (i >= 0) st.unbindOutSlot(arr[i].i);
+  st.selFolder = '__all'; st.outsActiveFolder = ''; st.outsBrowsePath = '';
+  st.syncSaveFolder(); st.renderTree(); st.render();
+  out.cleaned = st.readOutSlots().every((s) => !(s.kind === 'folder' && s.path === P));
+  return out;
+})()
+"""
+
 OPEN_PANEL_JS = r"""
 (() => {
   const n = window.__plProbeNode;
@@ -706,6 +806,9 @@ async def main() -> int:
                          "(панель ×3, зум, ресайз ноды) — кто запишет width, тот и писатель")
     ap.add_argument("--export-row", action="store_true",
                     help="замер ряда действий (.pl-export-row): влезает ли он на MIN_W ноды")
+    ap.add_argument("--subfolders", action="store_true",
+                    help="живой опыт подпапок (v1.69, §57): карточки подпапок в списке, "
+                         "вход в подпапку, ⬆/⬅, вывод из карточки подпапки — на реальной базе")
     ap.add_argument("--audit-writer", action="store_true",
                     help="аудит ПИСАТЕЛЯ widget.width (v1.31, §37.9): канвас-режим, "
                          "выделение ноды через canvas.selectNodes, ловушка со снятым "
@@ -887,6 +990,62 @@ async def main() -> int:
                             f" (осталось {[k['w'] for k in atmin['kids'] if k['text'] == soft[0].split(' ')[0]][0]:.0f}px)"
                             if soft else "")
                     print(f"→ ВЕРДИКТ: зелёное — кнопки целы, запас {atmin.get('free')}px{tail}")
+
+            if args.subfolders:
+                print("\n=== ПОДПАПКИ: живой опыт на реальной базе (v1.69, §57) ===")
+                await wait_for(
+                    cdp,
+                    "!!(window.__plProbeNode && window.__plProbeNode._pl "
+                    "&& window.__plProbeNode._pl.list "
+                    "&& document.contains(window.__plProbeNode._pl.list))",
+                    60, "our list в живом DOM")
+                sub = await cdp.eval(SUBFOLDERS_JS)
+                print(json.dumps(sub, ensure_ascii=False, indent=2))
+                fails = []
+                if sub.get("error"):
+                    fails.append("опыт не выполнен: " + str(sub["error"]))
+                else:
+                    if (sub.get("subCardsVisible") or 0) < 1:
+                        fails.append("в открытой категории нет карточек подпапок")
+                    elif sub.get("entryCardsVisible") != sub.get("ownEntries"):
+                        fails.append(f"карточек записей категории {sub.get('entryCardsVisible')}, "
+                                     f"а в базе {sub.get('ownEntries')} (пропали или подмешались чужие)")
+                    if sub.get("subfoldersFirst") is False:
+                        fails.append("подпапки стоят после записей, а не перед ними")
+                    if not sub.get("entered"):
+                        fails.append("клик по карточке подпапки не открыл её")
+                    if sub.get("childEntries") and (sub.get("childEntryCards") or 0) < 1:
+                        fails.append("в открытой подпапке не видно её карточек")
+                    if not sub.get("upShown") or not sub.get("upGoesToParent"):
+                        fails.append("⬆ в шапке не вернул в родительскую категорию")
+                    if (sub.get("outsSubCards") or 0) < 1:
+                        fails.append("в папке-выводе «Выходов» не видно подпапок")
+                    if not sub.get("outsBrowseIsChild"):
+                        fails.append("вход в подпапку папки-вывода не сработал")
+                    if not sub.get("stayedInOuts"):
+                        fails.append("вход в подпапку выбросил из «Выходов»")
+                    if not sub.get("subfolderEntryBecameOutput"):
+                        fails.append("карточка подпапки не стала активным выводом папки-вывода")
+                    if not sub.get("backShown") or not sub.get("backWorks"):
+                        fails.append("⬅ в папке-выводе не вернул на уровень выше")
+                    if not sub.get("cleaned"):
+                        fails.append("опыт не убрал за собой привязку выхода")
+                print("\n=== СВОДКА подпапок ===")
+                print(f"  категория «{sub.get('parent')}» → подпапка «"
+                      f"{(sub.get('parentSubfolders') or ['—'])[0]}» | режим: {sub.get('mode')}")
+                print(f"  в списке категории: подпапок {sub.get('subCardsVisible')}, "
+                      f"записей {sub.get('entryCardsVisible')} (в базе {sub.get('ownEntries')})")
+                print(f"  подпапка вошла: {sub.get('entered')} | ⬆ вернул: {sub.get('upGoesToParent')}")
+                print(f"  папка-вывод: подпапок {sub.get('outsSubCards')}, вход "
+                      f"{sub.get('outsBrowseAfterEnter')}, из «Выходов» не выкинуло: "
+                      f"{bool(sub.get('stayedInOuts'))}, карточка подпапки стала выводом: "
+                      f"{bool(sub.get('subfolderEntryBecameOutput'))}, ⬅ назад: {bool(sub.get('backWorks'))}")
+                print(f"  геометрия: карточка подпапки {sub.get('subCardRect')}, "
+                      f"карточка записи {sub.get('entryCardRect')}, "
+                      f"шапка списка {sub.get('headRowRect')} (ожидание h=22)")
+                print(f"  путь в шапке: {sub.get('navText')}")
+                print("→ ВЕРДИКТ: " + ("КРАСНОЕ — " + "; ".join(fails) if fails
+                                     else "ЗЕЛЁНОЕ — подпапки видны, открываются и дают вывод"))
 
             if args.panel:
                 trigger = await cdp.eval(OPEN_PANEL_JS)

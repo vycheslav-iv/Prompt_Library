@@ -4194,6 +4194,142 @@ await run("v1.67: PromptKeeper с неподключённым source — сво
     st.promptFromGraph(api, ui) === "ручной промпт", JSON.stringify(st.promptFromGraph(api, ui)));
 });
 
+// --- v1.69 (§57): подпапки — видны и открываются ----------------------------
+// Отчёт пользователя (2026-10-17): «папка Космос — подпапок вообще не видно,
+// нельзя зайти внутрь и подключить карточку из подпапки».
+// Проверяем: (1) в открытой категории подпапки стоят карточками, клик заходит
+// внутрь; (2) в «🔌 Выходах» внутри папки-вывода видны подпапки, вход в них, и
+// клик по карточке подпапки решает, что уходит в провод; (3) карточка из
+// подпапки папки-вывода привязывается к ней и в обычной галерее.
+const fsCard = (st, words) => st.list.children.find((c) => {
+  const t = ftext(c);
+  return words.every((w) => t.includes(w));
+});
+
+await run("v1.69: подпапки категории — карточками, клик заходит внутрь", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("k1", "Космос"), mkSlotEntry("k2", "Космос/Планеты"),
+    mkSlotEntry("k3", "Земля"));
+  st.folders.push("Космос", "Космос/Планеты", "Земля");
+  st.selFolder = "Космос";
+  st.renderTree(); st.render();
+  const texts = () => st.list.children.map((c) => ftext(c));
+  const sub = fsCard(st, ["📁", "Планеты"]);
+  check("v1.69: в категории видна её подпапка карточкой (📁 Планеты)", !!sub,
+    texts().join(" ; ") || "—");
+  check("v1.69: подпапки этой категории найдены по дереву (только прямые дети)",
+    JSON.stringify(st.subfoldersOf("Космос")) === JSON.stringify(["Космос/Планеты"]),
+    JSON.stringify(st.subfoldersOf("Космос")));
+  check("v1.69: список категории не подмешивает карточки подпапки и чужих папок",
+    texts().some((t) => t.includes("k1")) && !texts().some((t) => t.includes("k2"))
+      && !texts().some((t) => t.includes("k3")), texts().join(" ; ") || "—");
+  check("v1.69: у карточки-подпапки видно число записей внутри",
+    !!sub && ftext(sub).includes("записей: 1"), sub ? ftext(sub) : "нет карточки");
+  if (sub) sub.onclick({});
+  check("v1.69: клик по подпапке открыл её (selFolder = Космос/Планеты)",
+    st.selFolder === "Космос/Планеты", String(st.selFolder));
+  check("v1.69: внутри подпапки видна её карточка k2",
+    texts().some((t) => t.includes("k2")), texts().join(" ; ") || "—");
+  // Крошки в шапке списка: возврат на уровень выше без похода в проводник.
+  const up = st.headNav ? st.headNav.children.find((c) => ftext(c).includes("⬆")) : null;
+  check("v1.69: в шапке списка есть возврат на уровень выше (⬆)", !!up,
+    st.headNav ? ftext(st.headNav) : "нет шапки-крошек");
+  if (up) {
+    up.onclick({ preventDefault() {}, stopPropagation() {} });
+    check("v1.69: ⬆ вернул в родительскую категорию «Космос»",
+      st.selFolder === "Космос", String(st.selFolder));
+  }
+});
+
+await run("v1.69: «Выходы» — подпапки папки-вывода и вывод из подпапки", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.entries.push(mkSlotEntry("k1", "Космос"), mkSlotEntry("k2", "Космос/Планеты"));
+  st.folders.push("Космос", "Космос/Планеты");
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  st.plDrop({ kind: "folder", path: "Космос" }, "__outs");
+  st.selFolder = "__outs";
+  st.outsActiveFolder = "Космос";
+  st.renderTree(); st.render();
+  const texts = () => st.list.children.map((c) => ftext(c));
+  const sub = fsCard(st, ["📁", "Планеты"]);
+  check("v1.69: внутри папки-вывода видны её подпапки", !!sub,
+    texts().join(" ; ") || "—");
+  if (sub) sub.onclick({});
+  check("v1.69: вход в подпапку не выкинул из «Выходов» и не сменил папку-вывод",
+    st.selFolder === "__outs" && st.outsActiveFolder === "Космос",
+    `sel=${st.selFolder}, fs=${st.outsActiveFolder}`);
+  check("v1.69: показаны карточки подпапки (k2), а не записи верхней папки",
+    texts().some((t) => t.includes("k2")) && !texts().some((t) => t.includes("k1")),
+    texts().join(" ; ") || "—");
+  const cardK2 = st.list.children.find((c) => ftext(c).includes("k2"));
+  check("v1.69: карточка подпапки — обычная карточка вывода (с выбором)", !!cardK2,
+    texts().join(" ; ") || "—");
+  if (cardK2) await cardK2.onclick({});
+  check("v1.69: клик по карточке подпапки сделал её активным выводом папки-вывода",
+    !!st.outSlotOfFolder("Космос") && st.outSlotOfFolder("Космос").active_id === "k2",
+    JSON.stringify(st.readOutSlots()));
+  // Возврат живёт в шапке папки-вывода (та же строка, что подсказка про провод).
+  const outHead = st.list.children.find((c) => ftext(c).includes("решает, что уходит"));
+  const back = outHead ? outHead.children.find((c) => ftext(c).includes("⬅")) : null;
+  check("v1.69: в папке-выводе есть возврат из подпапки (⬅) и вход в неё виден в шапке",
+    !!back && ftext(outHead).includes("подпапка"),
+    outHead ? ftext(outHead) : texts().join(" ; ") || "—");
+  if (back) {
+    back.onclick({ preventDefault() {}, stopPropagation() {} });
+    check("v1.69: возврат показал снова записи самой папки-вывода (k1)",
+      texts().some((t) => t.includes("k1")), texts().join(" ; ") || "—");
+  }
+});
+
+await run("v1.69: карточка подпапки привязывается к папке-выводу предка", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.entries.push(mkSlotEntry("k1", "Космос"), mkSlotEntry("k2", "Космос/Планеты"));
+  st.folders.push("Космос", "Космос/Планеты");
+  st.selWidget.value = "k1"; // основной выход смотрит на запись верхней папки
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  st.plDrop({ kind: "folder", path: "Космос" }, "__outs");
+  check("v1.69: подпапка считается частью ветки папки-вывода",
+    !!st.folderSlotForPath("Космос/Планеты") && st.folderSlotForPath("Космос/Планеты").path === "Космос",
+    JSON.stringify(st.readOutSlots()));
+  check("v1.69: чужая ветка не считается частью папки-вывода",
+    !st.folderSlotForPath("Земля"), "«Земля» сматчилась с папкой-выводом «Космос»");
+  st.selFolder = "Космос/Планеты";
+  st.renderTree(); st.render();
+  const cardK2 = st.list.children.find((c) => ftext(c).includes("k2"));
+  check("v1.69: в подпапке видна карточка k2", !!cardK2,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  if (cardK2) await cardK2.onclick({});
+  check("v1.69: клик по карточке подпапки переключил вывод папки-вывода «Космос»",
+    !!st.outSlotOfFolder("Космос") && st.outSlotOfFolder("Космос").active_id === "k2",
+    JSON.stringify(st.readOutSlots()));
+  check("v1.69: основной выход не тронут (карточка принадлежит папке-выводу)",
+    st.selWidget.value === "k1", String(st.selWidget.value));
+  check("v1.69: карточка подпапки несёт маркер активного вывода (🔌)",
+    !!st.folderActOf("k2"), "маркера активного вывода нет");
+  check("v1.69: привязка папки-вывода наследует выделение и из подпапки",
+    (() => {
+      const n2 = mkSlotNode();
+      const s2 = n2._pl;
+      addSlotEnv(n2);
+      s2.selWidget = n2.widgets.find((w) => w.name === "selected");
+      s2.entries.push(mkSlotEntry("m1", "Космос/Планеты"));
+      s2.folders.push("Космос", "Космос/Планеты");
+      s2.selWidget.value = "m1";
+      s2.plDrop({ kind: "folder", path: "Космос" }, "__outs");
+      return !!s2.outSlotOfFolder("Космос") && s2.outSlotOfFolder("Космос").active_id === "m1";
+    })());
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");
