@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.71.1-out-green-navigator";
+    const PL_JS_VERSION = "1.72.6-green-select-explorer";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -177,6 +177,16 @@ app.registerExtension({
                 selWidget.hidden = true;
                 selWidget.options && (selWidget.options.hideInPanel = true);
                 selWidget.computeSize = () => [0, -4];
+            }
+            // v1.72 (§60): active — единственный драйвер основного выхода
+            // (selected теперь только выделение панели). Скрыт тем же способом,
+            // что и selected: значением управляет список/дерево (dblclick-
+            // активация), в панели свойств поле не нужно.
+            const activeW = this.widgets?.find((w) => w.name === "active");
+            if (activeW) {
+                activeW.hidden = true;
+                activeW.options && (activeW.options.hideInPanel = true);
+                activeW.computeSize = () => [0, -4];
             }
             const saveFolderW = this.widgets?.find((w) => w.name === "save_folder");
             if (saveFolderW) {
@@ -455,7 +465,17 @@ app.registerExtension({
                 if (st._saving) return;
                 const text = inputText.value.trim();
                 const title = inputTitle.value.trim();
-                const dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
+                // v1.72.5 (§60.9): новая карточка должна попадать в открытую
+                // подключённую папку/подпапку «Выходов», а не в «Без категорий».
+                // Раньше dest брал только selFolder, а при просмотре папки-вывода
+                // selFolder = "__outs" → folder = "" (проблема: «добавить в сами
+                // папки и подпапки, подключённые к Выходам»). Контракт: сами
+                // «Выходы» без открытой папки → по-прежнему «Без категории».
+                let dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
+                if (!dest && st.selFolder === "__outs") {
+                    const p = st.outsBrowsePath || st.outsActiveFolder;
+                    if (p && !p.startsWith("__")) dest = p;
+                }
                 const base = "💾 Сохранить промпт";
                 if (!text) {
                     inputSaveBtn.textContent = "⚠️ Пусто — нечего сохранять";
@@ -1427,14 +1447,15 @@ app.registerExtension({
                 return { direct, deep };
             };
             // --- v1.70 (§58): что стоит на выходах ---------------------------
-            // Карточки, которые сейчас подключены: выбранная («промпт 1») и всё,
-            // что привязано к «🔌 Выходы» — карточкой или активной карточкой
-            // папки-вывода. Map: id → номер выхода. Нужно, чтобы после выхода из
-            // подпапки было видно, в какой ветке осталась подключённая карточка.
+            // Карточки, которые сейчас подключены: активная («промпт 1», v1.72
+            // это active, а не selected) и всё, что привязано к «🔌 Выходы» —
+            // карточкой или активной карточкой папки-вывода. Map: id → номер
+            // выхода. Нужно, чтобы после выхода из подпапки было видно, в какой
+            // ветке осталась подключённая карточка.
             st.activeOutIds = () => {
                 const map = new Map();
                 try {
-                    if (selWidget && selWidget.value) map.set(String(selWidget.value), 1);
+                    if (activeW && activeW.value) map.set(String(activeW.value), 1);
                 } catch (e) { /* silent */ }
                 try {
                     for (const s of st.readOutSlots()) {
@@ -1474,6 +1495,55 @@ app.registerExtension({
                 return best;
             };
             st.folderSlotForPath = (path) => st.pickFolderSlot(st.readOutSlots(), path);
+            // v1.72 (§60): активация карточки по ДВОЙНОМУ клику — промпт уходит
+            // на выход того контекста, где карточку показывают:
+            //   1) своя карточка привязана к слоту (или ctx.slot) — тоггл off
+            //      (слот молчит → пустой текст);
+            //   2) папка-вывод (ctx.fs / предок папки карточки) — тоггл
+            //      active_id этой папки-вывода;
+            //   3) иначе — основной выход (active), пусто = сквозной проход.
+            // Повторный dblclick = снять активацию. Синхронно, без рендера:
+            // вызывающий хендлер сам перерисовывает (fillDetail/renderTree/
+            // render/syncNodeSize — тот же хвост, что у onclick).
+            st.activateCard = (e, c) => {
+                try {
+                    const ctx = c || {};
+                    const toggleOff = (ref) => {
+                        // readOutSlots каждый раз отдаёт НОВЫЕ объекты: меняем
+                        // только свежую копию и пишем её целиком (как fs-клик).
+                        const arr = st.readOutSlots();
+                        const s = arr.find((x) => x && ref && x.i === ref.i);
+                        if (!s) return;
+                        if (s.off) delete s.off; else s.off = true;
+                        st.writeOutSlots(arr);
+                        st.applyOutSockets();
+                    };
+                    const own = st.outSlotOfEntry(e.id);
+                    if (own) { toggleOff(own); return; }
+                    if (ctx.slot) { toggleOff(ctx.slot); return; }
+                    const fsPath = ctx.fs
+                        ? ctx.fs.path
+                        : (st.folderSlotForPath(e.folder) || {}).path;
+                    if (fsPath) {
+                        const arr = st.readOutSlots();
+                        // Путь перечитываем из свежей копии: объект ctx.fs
+                        // мог устареть после других правок слотов.
+                        const fs = st.pickFolderSlot(arr, fsPath);
+                        if (fs) {
+                            fs.active_id = fs.active_id === e.id ? "" : e.id;
+                            st.writeOutSlots(arr);
+                            st.applyOutSockets();
+                            st.outsActiveFolder = fs.path;
+                            // v1.69: НЕ выкидываем из открытой подпапки — dblclick
+                            // лишь меняет активный вывод её папки-вывода. Сброс —
+                            // только если открытый путь вообще не из этой ветки.
+                            if (!st.pathCovers(fs.path, st.outsBrowsePath)) st.outsBrowsePath = fs.path;
+                            return;
+                        }
+                    }
+                    if (activeW) activeW.value = activeW.value === e.id ? "" : e.id;
+                } catch (err) { /* silent */ }
+            };
             // Что уходит в провод — для тултипа сокета и строк в «Выходах».
             st.outSlotLabel = (s) => {
                 try {
@@ -2146,7 +2216,14 @@ const reload = async () => {
                 const row = document.createElement("div");
                 const active = st.selFolder === key;
                 const marked = st.markFolders.has(key);
-                row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${active ? "#fff" : "#ccc"};background:${marked ? "rgba(224,138,60,.35)" : active ? "#2c4a73" : "transparent"};${marked ? "box-shadow:inset 3px 0 0 #e08a3c;" : ""}padding-left:${4 + depth * 14}px;`;
+                // v1.72.6 (§60.10): подключённая папка (есть её строка-слот
+                // в «Выходах» — 🔌N-бейдж справа) при выборе светится зелёным
+                // #2e6b4f с inset-полосой #7fe0a8 — тем же цветом, что у
+                // активного слота в «Выходах»: цвет свидетельствует о
+                // подключении. Обычная активная папка — прежний синий #2c4a73.
+                const slotOfFolder = isFolder ? st.outSlotOfFolder(key) : null;
+                const activeBg = slotOfFolder ? "#2e6b4f" : "#2c4a73";
+                row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${active ? "#fff" : "#ccc"};background:${marked ? "rgba(224,138,60,.35)" : active ? activeBg : "transparent"};${marked ? "box-shadow:inset 3px 0 0 #e08a3c;" : active && slotOfFolder ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + depth * 14}px;`;
                 if (isFolder) row.title = "Клик — открыть · Ctrl+клик — пометить · Shift+клик — диапазон";
                 const name = document.createElement("span");
                 name.style.cssText = "flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
@@ -2168,7 +2245,6 @@ const reload = async () => {
                 row.appendChild(name);
                 // Категория, подключённая к доп. выходу, носит номер провода
                 // прямо в проводнике — видно, что куда уходит (§40).
-                const slotOfFolder = isFolder ? st.outSlotOfFolder(key) : null;
                 if (slotOfFolder) {
                     const bn = document.createElement("span");
                     bn.textContent = "🔌" + slotOfFolder.i;
@@ -2458,12 +2534,16 @@ const reload = async () => {
                 const o = opts || {};
                 const grid = !!o.grid, imgSize = o.imgSize || 163;
                 const slot = o.slot || o.fs || null;
+                // v1.72.4 (§60.8): два уровня зелёного в «Выходах» —
+                // одиночный клик (селект по detailId/sel) → зелёный
+                // #1c3525/#2e6b4f; активация dblclick (fs active_id) →
+                // ярко-зелёный #2e6b4f/#7fe0a8. Активация важнее селекта.
                 const isActive = !!(o.fs && o.fs.active_id === e.id);
-                const isSel = !!(selWidget && selWidget.value === e.id);
+                const isSel = !!((selWidget && selWidget.value === e.id) || st.detailId === e.id);
                 const card = document.createElement("div");
                 card.draggable = false;
-                const border = isActive ? "#2e6b4f" : isSel ? "#4a9eff" : "#333";
-                const bg = isActive ? "#1c3525" : isSel ? "#1e2c44" : "#1e1e1e";
+                const border = isActive ? "#7fe0a8" : isSel ? "#2e6b4f" : "#333";
+                const bg = isActive ? "#2e6b4f" : isSel ? "#1c3525" : "#1e1e1e";
                 card.style.cssText = grid
                     ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${border};background:${bg};flex-shrink:0;`
                     : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${border};background:${bg};`;
@@ -2483,7 +2563,9 @@ const reload = async () => {
                 const t = plCardTitle(e, slot ? slot.i : 0, !grid);
                 const m = document.createElement("div");
                 m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                m.textContent = isActive ? "⚡ активный вывод папки-вывода" : (e.folder || "Без категории");
+                // Метка ⚡ — только для активного ВЫВОДА ПАПКИ (контекст fs);
+                // активная карточка слота её не несёт (это не папка-вывод).
+                m.textContent = (o.fs && isActive) ? "⚡ активный вывод папки-вывода" : (e.folder || "Без категории");
                 body.appendChild(t);
                 // В «Списке» строка несёт и начало текста — как у обычных карточек
                 if (!grid) {
@@ -2504,28 +2586,25 @@ const reload = async () => {
                 card.onclick = async (ev) => {
                     if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) return;
                     if (st.markEntries.size || st.markFolders.size) st.clearMarks();
-                    // Папка-вывод: выбранная карточка сразу становится источником
-                    // текста для этого провода (перезапись active_id → cache-key).
-                    if (o.fs && o.fs.active_id !== e.id) {
-                        const arr = st.readOutSlots();
-                        const fs = arr.find((s) => s && s.kind === "folder" && s.path === o.fs.path);
-                        if (fs) {
-                            fs.active_id = e.id;
-                            st.writeOutSlots(arr);
-                            st.applyOutSockets();
-                            st.outsActiveFolder = fs.path;
-                            // v1.69: НЕ выкидываем из открытой подпапки — клик по
-                            // карточке лишь меняет активный вывод её папки-вывода.
-                            // Сброс — только если открытый путь вообще не из этой
-                            // ветки (папку переименовали/удалили).
-                            if (!st.pathCovers(fs.path, st.outsBrowsePath)) st.outsBrowsePath = fs.path;
-                        }
-                    }
+                    // v1.72 (§60): клик больше НЕ пишет active_id — перезапись
+                    // активного вывода папки-вывода делает только dblclick
+                    // (st.activateCard); клик остаётся выделением+просмотром.
                     // v1.59: карточка «Выходов» (папки-вывода или слота) НЕ пишет в
                     // основной выход и НЕ снимает выделение — просмотр идёт панелью,
                     // привязка/переключение — только через активный вывод слота.
                     await st.fillDetail(e.id);
                     // НЕ трогаем selFolder: остаёмся в «Выходах», как в обычном режиме
+                    renderTree(); render();
+                    if (!st._vuePanes) st.syncNodeSize?.();
+                };
+                // v1.72 (§60): ДВОЙНОЙ клик — активация/деактивация: контекст
+                // карточки (слот / папка-вывод / основной выход) решает, куда
+                // уходит промпт; повторный dblclick снимает. Хвост тот же, что
+                // у onclick (запрос двойного клика всегда идёт после кликов).
+                card.ondblclick = async (ev) => {
+                    if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) return;
+                    st.activateCard(e, o);
+                    await st.fillDetail(e.id);
                     renderTree(); render();
                     if (!st._vuePanes) st.syncNodeSize?.();
                 };
@@ -2775,6 +2854,10 @@ const reload = async () => {
                 // сегменты и ⬆ на уровень выше.
                 st.renderHeadNav();
                 const selVal = selWidget ? selWidget.value : "";
+                // v1.72 (§60): активная карточка основного выхода (active): ей в
+                // галерее сплошная заливка #2a5a91; selected остаётся только
+                // выделением (#1e2c44), на подключение не влияет.
+                const actVal = activeW ? activeW.value : "";
                 // v1.70 (§58): карточки на выходах — один раз на рендер (синий
                 // путь в подпапках ниже строится по этой карте).
                 const actMap = st.activeOutIds();
@@ -2817,7 +2900,7 @@ const reload = async () => {
                         const inner = browse === fs.path ? "" : browse.slice(fs.path.length + 1);
                         htxt.textContent = `промпт ${fs.i} · папка «${fs.path}»`
                             + (inner ? ` → подпапка «${inner}»` : "")
-                            + ": клик по карточке решает, что уходит в этот провод";
+                            + ": двойной клик по карточке решает, что уходит в этот провод";
                         head.appendChild(htxt);
                         st.list.appendChild(head);
                         // Возврат из подпапки — кнопкой: дерево в «Выходах» показывает
@@ -2898,8 +2981,25 @@ const reload = async () => {
                     card.draggable = true;
                     // v1.44 (§40): карточка, привязанная к слоту (или активный
                     // вывод папки-слота), несёт маркер 🔌 и зелёную подсветку.
-                    const outSlot = st.outSlotOfEntry(e.id) || st.folderActOf(e.id);
+                    const cardSlot0 = st.outSlotOfEntry(e.id);
+                    const folderSlot0 = st.folderActOf(e.id);
+                    const outSlot = cardSlot0 || folderSlot0;
                     const outMark = !!outSlot;
+                    // v1.72.2 (§60.6): цвета галереи дословно как в v1.71
+                    // (marked → outMark → selected → серый) плюс ЕДИНСТВЕННОЕ
+                    // нововведение v1.72 — цвет активации главной карточки по
+                    // двойному клику: сплошная #2a5a91 и рамка #4a9eff.
+                    // Привязка к слоту/папке красится своим v1.71-цветом
+                    // (#1c3525), без зелёной заливки v1.72.
+                    // v1.72.6 (§60.10): карточка в списке ПОДКЛЮЧЁННОЙ папки
+                    // при клике подсвечивается зелёным селектом как в «Выходах»
+                    // (§60.8): клик по подключённой карточке не пишет selWidget
+                    // (v1.59), поэтому селект читается ещё и по st.detailId —
+                    // та же механика, что в makeOutCard (v1.72.3). Синий #1e2c44
+                    // остаётся для неподключённых папок (контракт v1.72.2).
+                    const mainActive = e.id === actVal;
+                    const isSelCard = e.id === selVal || st.detailId === e.id;
+                    const folderConn = !!(e.folder && st.folderSlotForPath(e.folder));
                     card.title = (e.has_workflow
                         ? "Тяни на канвас — открыть сохранённый воркфлоу"
                         : "Воркфлоу нет (ручная запись) — прогони Queue, и воркфлоу прикрепится")
@@ -2915,8 +3015,12 @@ const reload = async () => {
                     // не влияет, в отличие от border) + тёплая подложка
                     const marked = st.markEntries.has(e.id);
                     const acct = marked ? "box-shadow:inset 4px 0 0 #e08a3c;" : "";
-                    const bg = marked ? "#4a2f18" : outMark ? "#1c3525" : e.id === selVal ? "#1e2c44" : "#1e1e1e";
-                    const border = `1px solid ${outMark ? "#2e6b4f" : e.id === selVal ? "#4a9eff" : "#333"}`;
+                    const bg = mainActive
+                        ? "#2a5a91"
+                        : marked ? "#4a2f18" : outMark ? "#1c3525"
+                        : isSelCard && folderConn ? "#1c3525"
+                        : isSelCard ? "#1e2c44" : "#1e1e1e";
+                    const border = `1px solid ${outMark || (isSelCard && folderConn) ? "#2e6b4f" : (mainActive || isSelCard) ? "#4a9eff" : "#333"}`;
                     card.style.cssText = grid
                         ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}flex-shrink:0;`
                         : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}`;
@@ -3053,20 +3157,31 @@ const reload = async () => {
                             if (selWidget) selWidget.value = e.id;
                             st.anchorEntry = e.id; // обычный клик ставит якорь для Shift-диапазона
                         }
-                        // v1.44 (§40): открыта папка-слот и кликнули карточку —
-                        // слот сразу выводит её (перезапись active_id → cache-key
-                        // меняется → нода переисполняется).
-                        const arr = st.readOutSlots();
-                        const folderSlot = st.pickFolderSlot(arr, st.selFolder);
-                        if (folderSlot && folderSlot.active_id !== e.id) {
-                            folderSlot.active_id = e.id;
-                            st.writeOutSlots(arr);
-                            st.applyOutSockets();
-                        }
+                        // v1.72 (§60): перезапись active_id папки-вывода ПО
+                        // ОДИНОЧНОМУ клику убрана — клик только выделяет/открывает,
+                        // активация (куда уходит промпт) — только по двойному клику
+                        // (см. card.ondblclick → st.activateCard).
                         await st.fillDetail(e.id);
                         render();
                         // Vue: размером ноды владеет layout, перерисовку канваса
                         // не запрашиваем (нода — DOM, canvas не участвует).
+                        if (!st._vuePanes) {
+                            st.syncNodeSize?.();
+                            this.graph?.setDirtyCanvas(true, true);
+                        }
+                    };
+
+                    // v1.72 (§60): ДВОЙНОЙ клик — активация карточки. Контекст
+                    // галереи (ctx={}): привязанная слотом — тоггл off; из папки-
+                    // вывода — active_id этого вывода; иначе — основной выход
+                    // (active). Повторный dblclick деактивирует.
+                    card.ondblclick = async (ev) => {
+                        if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) return;
+                        await st.activateCard(e, {});
+                        await st.fillDetail(e.id);
+                        renderTree(); render();
+                        // Vue: размером ноды владеет layout; канвасу — только
+                        // сигнал перерисовки (заливка меняется прямо на нём).
                         if (!st._vuePanes) {
                             st.syncNodeSize?.();
                             this.graph?.setDirtyCanvas(true, true);
@@ -3165,6 +3280,10 @@ const reload = async () => {
                 for (const id of ids) st.previewStamp.delete(id); // метки удалённых записей
                 if (st.detailId && ids.includes(st.detailId)) { st.detailId = null; st.detail.style.display = "none"; st.shrinkBack?.(); }
                 if (selWidget && ids.includes(selWidget.value)) selWidget.value = "";
+                // v1.72 (§60): удалённая активная карточка не висит в active —
+                // иначе навигатор/подсветка считают её подключённой, хотя текста
+                // на выходе уже нет.
+                if (activeW && ids.includes(activeW.value)) activeW.value = "";
                 if (paths.some((p) => st.selFolder === p || st.selFolder.startsWith(p + "/"))) {
                     st.selFolder = "__all";
                     st.syncSaveFolder();
@@ -5316,7 +5435,7 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
             st.dropAutoSockets = () => {
                 try {
                     if (typeof this.removeInput !== "function" || !this.inputs) return;
-                    for (const n of ["selected", "save_folder", "pickup", "slots_out"]) {
+                    for (const n of ["selected", "save_folder", "pickup", "slots_out", "active"]) {
                         const idx = this.inputs.findIndex((i) => i.widget && i.widget.name === n);
                         if (idx >= 0 && this.inputs[idx].link == null) this.removeInput(idx);
                     }
@@ -5566,6 +5685,30 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
             try {
                 const qw = this.widgets?.find((w) => w.name === "quick_test");
                 if (qw && qw.value) qw.value = "";
+            } catch (e) { /* silent */ }
+            // v1.72 (§60): гидрация/миграция active. Источники по приоритету:
+            // (1) именованный named.active — пустая строка ТОЖЕ источник
+            //     (перекрывает позицию: старый остаток не выживает);
+            // (2) позиция widgets_values[6] — только при длине ≥7, там лежит
+            //     именно active (порядок Python: … slots_out, quick_test, active);
+            // (3) старый граф (длина <7, active не сериализовался) — миграция:
+            //     активность в нём кодировалась selected → active := selected
+            //     (берём живой виджет, иначе — позицию wv[1] из графа).
+            // Граф без selected и без active просто не трогаем.
+            try {
+                const aw = this.widgets?.find((w) => w.name === "active");
+                const sw = this.widgets?.find((w) => w.name === "selected");
+                const named = info && info.widgets_values_named;
+                const arr = Array.isArray(info && info.widgets_values) ? info.widgets_values : [];
+                if (aw && named && typeof named.active === "string") {
+                    if (aw.value !== named.active) aw.value = named.active;
+                } else if (aw && arr.length >= 7) {
+                    const v = typeof arr[6] === "string" ? arr[6] : "";
+                    if (aw.value !== v) aw.value = v;
+                } else if (aw && sw && ((sw.value || "") !== "" || (typeof arr[1] === "string" && arr[1] !== ""))) {
+                    const src = (sw.value || "") || arr[1];
+                    if (aw.value !== src) aw.value = src;
+                }
             } catch (e) { /* silent */ }
             // v1.62: РАЗРЕШИТЬ сессионное состояние окна теста. Порядок важен:
             // выше quick_test очищен (v1.61 — чужие восстановленные значения

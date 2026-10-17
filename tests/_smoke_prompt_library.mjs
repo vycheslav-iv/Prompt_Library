@@ -230,6 +230,8 @@ function makeNode() {
     { name: "save_folder", value: "", type: "text", options: {}, callback: null, serialize: true },
     { name: "pickup", value: "", type: "text", options: {}, callback: null, serialize: true },
     { name: "slots_out", value: "[]", type: "text", options: { hidden: true, hideInPanel: true }, serialize: true },
+    // v1.72: основной выход держит ТОЛЬКО active (selected — про выделение)
+    { name: "active", value: "", type: "text", options: { hidden: true, hideInPanel: true }, serialize: true },
   ];
   const node = {
     id: 1, pos: [0, 0], size: [470, 700], flags: {}, bgcolor: null, widgets,
@@ -2454,12 +2456,12 @@ await run("slots: папка-вывод — карточки с превью, к
   // Карточки папки — с превью (img), как в обычном списке
   const cards = st.list.children.filter((c) => c.children[0] && c.children[0].tagName === "IMG");
   check("карточки папки показаны с превью (img)", cards.length === 2, String(cards.length));
-  const activeCard = cards.find((c) => String(c.style.cssText).includes("background:#1c3525"));
-  check("активный вывод e11 подсвечен зелёным", !!activeCard);
-  const nonActive = cards.find((c) => !String(c.style.cssText).includes("background:#1c3525"));
+  const activeCard = cards.find((c) => String(c.style.cssText).includes("background:#2e6b4f"));
+  check("активный вывод e11 — ярко-зелёный dblclick (фон #2e6b4f)", !!activeCard);
+  const nonActive = cards.find((c) => !String(c.style.cssText).includes("background:#2e6b4f"));
   check("есть неактивная карточка", !!nonActive);
-  await nonActive.onclick({});
-  check("клик переключил active_id на e10", st.outSlotOfFolder("ПапкаA").active_id === "e10");
+  await nonActive.ondblclick?.({});
+  check("двойной клик переключил active_id на e10", st.outSlotOfFolder("ПапкаA").active_id === "e10");
   check("selFolder не поменялся — из «Выходов» никуда не уходим", st.selFolder === "__outs", st.selFolder);
   // v1.59 (§независимость): клик по карточке в «Выходах» переключает только
   // активный вывод папки-слота (провод), но НЕ трогает основной выход и не
@@ -2470,7 +2472,7 @@ await run("slots: папка-вывод — карточки с превью, к
     `sel=${st.selWidget.value}, detail=${st.detail.style.display}, detailId=${st.detailId}`);
   st.render();
   const newActive = st.list.children.filter((c) => c.children[0] && c.children[0].tagName === "IMG")
-    .find((c) => String(c.style.cssText).includes("background:#1c3525"));
+    .find((c) => String(c.style.cssText).includes("background:#2e6b4f"));
   check("после перерисовки активна e10 (а не пропала)", !!newActive,
     `outs=${st.outsActiveFolder} kids=${st.list.children.map((c) => ftext(c)).join(" ; ")}`);
   check("сокет выхода 2 — про папку-вывод и её активную карточку",
@@ -2547,6 +2549,63 @@ await run("v1.59: карточки «Выходов» и папки-выводо
   await cardE3.onclick({});
   check("клик по НЕ подключённой карточке по-прежнему выбирает её в основной выход",
     st.selWidget.value === "e3", `sel=${st.selWidget.value}`);
+});
+
+// v1.72.3 (отчёт пользователя): «в «Выходах» при одиночном клике подсветка
+// карточек не происходит, хотя выбор меняется; при двойном — подсвечивает».
+// Причина: isSel в makeOutCard смотрел только на selWidget, а клик в «Выходах»
+// по контракту v1.59 в selWidget НЕ пишет — выбор живёт в detailId. Подсветка
+// «Выходов» обязана следовать detailId, не меняя selWidget.
+await run("v1.72.3: одиночный клик в «Выходах» подсвечивает карточку (detailId), selWidget не трогаем", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.folders.push("ПапкаA", "Прочее");
+  st.entries.push(mkSlotEntry("e10", "ПапкаA"), mkSlotEntry("e11", "ПапкаA"), mkSlotEntry("e12", "Прочее"));
+  st.selWidget.value = "e11"; // основной выход — НЕ на тех карточках, что кликаем
+  st.plDrop({ kind: "folder", path: "ПапкаA" }, "__outs"); // 🔌2
+  st.plDrop({ kind: "entry", id: "e12" }, "__outs");       // 🔌3
+  st.selFolder = "__outs";
+  st.outsActiveFolder = null;
+  st.renderTree(); st.render();
+
+  // (а) отдельная карточка-слот в корне «Выходов»
+  const slotCard = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG" && ftext(c).includes("e12"));
+  check("слот-карточка e12 отображена в «Выходах»", !!slotCard,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  await slotCard.onclick({});
+  check("слот: панель открыта для e12, selWidget остался e11 (v1.59 не тронут)",
+    st.detailId === "e12" && st.selWidget.value === "e11",
+    `detail=${st.detailId}, sel=${st.selWidget.value}`);
+  st.render();
+  const selCard = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG" && ftext(c).includes("e12"));
+  check("слот: одиночный клик подсветил карточку зелёным (фон #1c3525 + рамка #2e6b4f)",
+    !!selCard && String(selCard.style.cssText).includes("background:#1c3525")
+      && String(selCard.style.cssText).includes("#2e6b4f"),
+    selCard ? String(selCard.style.cssText).slice(0, 160) : "нет карточки");
+
+  // (б) карточка внутри папки-вывода
+  const row = st.tree.children.find((r) => ftext(r).includes("ПапкаA") && ftext(r).includes("🔌2"));
+  check("строка папки-вывода «ПапкаA» в дереве есть", !!row);
+  row.onclick({});
+  st.render();
+  const inFolder = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG" && ftext(c).includes("e10"));
+  check("карточка e10 внутри папки-вывода отображена", !!inFolder,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  await inFolder.onclick({});
+  check("папка: панель открыта для e10, selWidget остался e11",
+    st.detailId === "e10" && st.selWidget.value === "e11",
+    `detail=${st.detailId}, sel=${st.selWidget.value}`);
+  st.render();
+  const c10 = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG" && ftext(c).includes("e10"));
+  const c11 = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG" && ftext(c).includes("e11"));
+  check("папка: одиночный клик подсветил e10 зелёным (фон #1c3525)",
+    !!c10 && String(c10.style.cssText).includes("background:#1c3525"),
+    c10 ? String(c10.style.cssText).slice(0, 160) : "нет карточки");
+  check("папка: активная e11 — ярко-зелёная dblclick (фон #2e6b4f), важнее селекта",
+    !!c11 && String(c11.style.cssText).includes("background:#2e6b4f"),
+    c11 ? String(c11.style.cssText).slice(0, 160) : "нет карточки");
 });
 
 // v1.45.3 (два скриншота пользователя):
@@ -4270,8 +4329,8 @@ await run("v1.69: «Выходы» — подпапки папки-вывода 
   const cardK2 = st.list.children.find((c) => ftext(c).includes("k2"));
   check("v1.69: карточка подпапки — обычная карточка вывода (с выбором)", !!cardK2,
     texts().join(" ; ") || "—");
-  if (cardK2) await cardK2.onclick({});
-  check("v1.69: клик по карточке подпапки сделал её активным выводом папки-вывода",
+  if (cardK2) await cardK2.ondblclick?.({});
+  check("v1.69: двойной клик по карточке подпапки сделал её активным выводом папки-вывода",
     !!st.outSlotOfFolder("Космос") && st.outSlotOfFolder("Космос").active_id === "k2",
     JSON.stringify(st.readOutSlots()));
   // Возврат живёт в шапке папки-вывода (та же строка, что подсказка про провод).
@@ -4308,8 +4367,8 @@ await run("v1.69: карточка подпапки привязывается �
   const cardK2 = st.list.children.find((c) => ftext(c).includes("k2"));
   check("v1.69: в подпапке видна карточка k2", !!cardK2,
     st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
-  if (cardK2) await cardK2.onclick({});
-  check("v1.69: клик по карточке подпапки переключил вывод папки-вывода «Космос»",
+  if (cardK2) await cardK2.ondblclick?.({});
+  check("v1.69: двойной клик по карточке подпапки переключил вывод папки-вывода «Космос»",
     !!st.outSlotOfFolder("Космос") && st.outSlotOfFolder("Космос").active_id === "k2",
     JSON.stringify(st.readOutSlots()));
   check("v1.69: основной выход не тронут (карточка принадлежит папке-выводу)",
@@ -4345,7 +4404,10 @@ await run("v1.70: подпапка с подключённой карточко�
   st.entries.push(mkSlotEntry("k1", "Космос"), mkSlotEntry("k2", "Космос/Планеты"),
     mkSlotEntry("k3", "Космос/Планеты/Марс"), mkSlotEntry("k4", "Космос/Звёзды"));
   st.folders.push("Космос", "Космос/Планеты", "Космос/Планеты/Марс", "Космос/Звёзды");
-  st.selWidget.value = "k3"; // подключённая (выбранная) карточка — в самой глубокой подпапке
+  st.selWidget.value = "k3"; // выделение; v1.72: подсветку даёт active, не selected
+  // v1.72 (конракт): подключённой считается active (§2.3: тест правится вместе
+  // со сменой контракта — раньше «подключённой» кодировал selWidget).
+  node.widgets.find((w) => w.name === "active").value = "k3";
   st.selFolder = "Космос";
   st.renderTree(); st.render();
   const planets = folderCardBy(st, "Космос/Планеты");
@@ -4408,8 +4470,8 @@ await run("v1.70: путь к карточке из «Выходов» подс�
   const cardK2 = st.list.children.find((c) => ftext(c).includes("k2"));
   check("v1.70: внутри подпапки папки-вывода видна карточка k2", !!cardK2,
     st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
-  if (cardK2) await cardK2.onclick({});
-  check("v1.70: клик по карточке сделал её активным выводом папки-вывода",
+  if (cardK2) await cardK2.ondblclick?.({});
+  check("v1.70: двойной клик по карточке сделал её активным выводом папки-вывода",
     !!st.outSlotOfFolder("Космос") && st.outSlotOfFolder("Космос").active_id === "k2",
     JSON.stringify(st.readOutSlots()));
   // Назад к корню папки-вывода — и путь к подключённой карточке должен быть виден.
@@ -4455,6 +4517,429 @@ await run("v1.71.1: подпапки подключённой категории
   check("v1.71.1: бейдж подпапки — номер её слота (🔌 2), а не «(внутри)»",
     !!planets && ftext(planets).includes("🔌 2") && !ftext(planets).includes("(внутри)"),
     planets ? ftext(planets) : "карточки нет");
+});
+
+// --- v1.72: активация карточки по ДВОЙНОМУ клику ----------------------------
+// Одиночный клик = только выделение; dblclick = промпт карточки уходит на выход
+// того контекста, где она показана: галерея → основной выход (active), папка-
+// вывод → active_id слота, привязанная карточка → тоггл off (пустой текст).
+// Повторный dblclick = деактивация. Красная фаза: на текущем коде обработчика
+// dblclick нет вовсе, поэтому ЕДИНСТВЕННОЕ место, где старый код ещё может
+// сработать, — дожившиеся onclick: их мы НЕ вызываем перед dblclick.
+await run("v1.72: галерея — dblclick активирует основной выход (active)", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("e71", "Фото"), mkSlotEntry("e72", "Фото"));
+  st.folders.push("Фото");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  const activeW = node.widgets.find((w) => w.name === "active");
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  const card71 = st.list.children.find((c) => ftext(c).includes("e71"));
+  const card72 = st.list.children.find((c) => ftext(c).includes("e72"));
+  check("v1.72: карточки галереи видны", !!card71 && !!card72,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  if (card71) card71.onclick({});
+  check("v1.72: одиночный клик только выделяет (sel=e71, active пуст)",
+    st.selWidget.value === "e71" && !!activeW && activeW.value === "",
+    `sel=${st.selWidget.value}, active=${activeW && activeW.value}`);
+  check("v1.72: у карточки есть обработчик dblclick",
+    typeof (card72 && card72.ondblclick) === "function",
+    String(card72 && typeof card72.ondblclick));
+  // Клик НЕ вызываем: на старом коде он бы сам выставил active и замаскировал
+  // отсутствие dblclick.
+  if (card72 && card72.ondblclick) await card72.ondblclick({});
+  check("v1.72: dblclick переключил основной выход на e72",
+    !!activeW && activeW.value === "e72", `active=${activeW && activeW.value}`);
+  // Навигатор/счётчики подключённости обязаны считать по active: на старом
+  // activeOutIds (читает selected) тут едет e71 — КРАСНОЕ до правки JS.
+  check("v1.72: навигатор считает подключённым active (не selected)",
+    st.activeOutIds().has("e72") && !st.activeOutIds().has("e71"),
+    JSON.stringify([...st.activeOutIds().keys()]));
+  st.render();
+  const act72 = st.list.children.find((c) => ftext(c).includes("e72")
+    && String(c.style.cssText).includes("background:#2a5a91"));
+  check("v1.72: активная карточка — сплошная заливка #2a5a91", !!act72,
+    st.list.children.map((c) => ftext(c) + " {" + String(c.style.cssText).slice(0, 90) + "}")
+      .join(" ; ") || "—");
+  // Повторный dblclick — деактивация (compound: до смены было e72).
+  const was = activeW && activeW.value;
+  if (card72 && card72.ondblclick) await card72.ondblclick({});
+  check("v1.72: повторный dblclick снимает активацию (было e72 → стало пусто)",
+    was === "e72" && !!activeW && activeW.value === "",
+    `was=${was}, active=${activeW && activeW.value}`);
+});
+
+await run("v1.72: без клика карточки серые — тёмно-синий только у выбранной", () => {
+  // Отчёт пользователя: после правки v1.72 ВСЕ карточки стали синими.
+  // Причина была в gалерее: fallback брал `selVal ? "#1e2c44"` (любая
+  // непустая выборка) вместо `e.id === selVal`. Серыми обязаны быть все, кроме
+  // (1) выбранной одиночным кликом (#1e2c44 + рамка #4a9eff) и (2) главной
+  // активной (#2a5a91) — здесь active пуст, активных нет.
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("q1", "Фото"), mkSlotEntry("q2", "Фото"), mkSlotEntry("q3", "Фото"));
+  st.folders.push("Фото");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  st.selWidget.value = "q2";
+  st.render();
+  const bgOf = (id) => {
+    const c = st.list.children.find((x) => ftext(x).includes(id));
+    const m = c && String(c.style.cssText || "").match(/background:\s*(#[0-9a-fA-F]{6})/);
+    return m ? m[1].toLowerCase() : String(c && c.style.cssText);
+  };
+  check("v1.72: невыбранная карточка q1 без клика — серая (#1e1e1e)",
+    bgOf("q1") === "#1e1e1e", bgOf("q1"));
+  check("v1.72: невыбранная карточка q3 без клика — серая (#1e1e1e)",
+    bgOf("q3") === "#1e1e1e", bgOf("q3"));
+  check("v1.72: выбранная кликом q2 — тёмно-синяя (#1e2c44)",
+    bgOf("q2") === "#1e2c44", bgOf("q2"));
+  check("v1.72: активных нет (active пуст) — ни одна карточка не #2a5a91",
+    ["q1", "q2", "q3"].every((id) => bgOf(id) !== "#2a5a91"));
+});
+
+await run("v1.72: «Выходы» (папка-вывод) — dblclick переключает active_id", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("f1", "ПапкаF"), mkSlotEntry("f2", "ПапкаF"));
+  st.folders.push("ПапкаF");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  await st.plDrop({ kind: "folder", path: "ПапкаF" }, "__outs");
+  st.selFolder = "__outs";
+  st.outsActiveFolder = "ПапкаF";
+  st.renderTree(); st.render();
+  const cF1 = st.list.children.find((c) => ftext(c).includes("f1"));
+  const cF2 = st.list.children.find((c) => ftext(c).includes("f2"));
+  check("v1.72: карточки папки-вывода видны", !!cF1 && !!cF2,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  // Клик f1: на старом коде он пишет active_id и отравляет проверку dblclick —
+  // поэтому после него и проверяем, что КЛИК ничего не активировал.
+  if (cF1) cF1.onclick({});
+  const slotB = st.outSlotOfFolder("ПапкаF");
+  check("v1.72: одиночный клик по f1 НЕ пишет active_id", !!slotB && slotB.active_id !== "f1",
+    JSON.stringify(slotB));
+  check("v1.72: у карточки папки-вывода есть dblclick",
+    typeof (cF2 && cF2.ondblclick) === "function",
+    String(cF2 && typeof cF2.ondblclick));
+  if (cF2 && cF2.ondblclick) await cF2.ondblclick({});
+  const slotB2 = st.outSlotOfFolder("ПапкаF");
+  check("v1.72: dblclick переключил active_id на f2",
+    !!slotB2 && slotB2.active_id === "f2", JSON.stringify(slotB2));
+  const a2 = slotB2 && slotB2.active_id;
+  if (cF2 && cF2.ondblclick) await cF2.ondblclick({});
+  const a3 = (st.outSlotOfFolder("ПапкаF") || {}).active_id;
+  check("v1.72: повторный dblclick снимает активный вывод (было f2 → пусто)",
+    a2 === "f2" && a3 !== "f2", `a2=${a2}, a3=${a3}`);
+});
+
+await run("v1.72: галерея папки с папкой-выводом — клик не активирует, dblclick активирует (route 4)", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("f1", "ПапкаF"), mkSlotEntry("f2", "ПапкаF"));
+  st.folders.push("ПапкаF");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  await st.plDrop({ kind: "folder", path: "ПапкаF" }, "__outs");
+  st.selFolder = "ПапкаF"; // галерея по обычной папке, у которой есть папка-вывод
+  st.renderTree(); st.render();
+  const gF2 = st.list.children.find((c) => ftext(c).includes("f2"));
+  check("v1.72: карточки галереи папки видны", !!gF2,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  // Старый код галереи (:3059-3065) сам пишет active_id при клике — красное.
+  if (gF2) gF2.onclick({});
+  const sG1 = st.outSlotOfFolder("ПапкаF");
+  check("v1.72: одиночный клик в галерее папки НЕ пишет active_id", !!sG1 && sG1.active_id !== "f2",
+    JSON.stringify(sG1));
+  // Сброс вручную: без него старый клик оставил бы active_id=f2 и проверка
+  // dblclick прошла бы по чужому следу (слепой зелёный).
+  const arr0 = st.readOutSlots();
+  const fs0 = st.pickFolderSlot(arr0, "ПапкаF");
+  if (fs0) { fs0.active_id = ""; st.writeOutSlots(arr0); st.applyOutSockets(); }
+  const sG0 = st.outSlotOfFolder("ПапкаF");
+  check("v1.72: сброс active_id перед dblclick прошёл", !!sG0 && sG0.active_id === "",
+    JSON.stringify(sG0));
+  check("v1.72: у карточки галереи папки есть dblclick",
+    typeof (gF2 && gF2.ondblclick) === "function",
+    String(gF2 && typeof gF2.ondblclick));
+  if (gF2 && gF2.ondblclick) await gF2.ondblclick({});
+  const sG2 = st.outSlotOfFolder("ПапкаF");
+  check("v1.72: dblclick в галерее активирует вывод папки (route 4)",
+    !!sG2 && sG2.active_id === "f2", JSON.stringify(sG2));
+});
+
+await run("v1.72: привязанная карточка — dblclick toggles off (галерея + корень «Выходов»)", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("g1", "Космос"));
+  st.folders.push("Космос");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  await st.plDrop({ kind: "entry", ids: ["g1"], id: "g1" }, "__outs");
+  // 1) Галерея: привязанная карточка светится зелёным, dblclick выключает её.
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  // Контракт v1.72.2 (§60.6, требование пользователя «цвета как были»):
+  // привязанная карточка в галерее несёт v1.71-цвет привязки #1c3525,
+  // зелёная сплошная заливка #2e6b4f отменена — её носит только активная
+  // папка-вывод в «Выходах» (makeOutCard), а здесь она НЕ привязана к папке.
+  const gCard = st.list.children.find((c) => ftext(c).includes("g1"));
+  check("v1.72.2: привязанная карточка в галерее — фон #1c3525, зелёной заливки нет",
+    !!gCard && String(gCard.style.cssText).includes("background:#1c3525")
+      && !String(gCard.style.cssText).includes("background:#2e6b4f"),
+    gCard ? String(gCard.style.cssText).slice(0, 140) : "карточки нет");
+  if (gCard) gCard.onclick({});
+  const slot0 = st.outSlotOfEntry("g1");
+  check("v1.72: одиночный клик не выключает слот (off не появился)",
+    !!slot0 && !slot0.off, JSON.stringify(slot0));
+  check("v1.72: у привязанной карточки галереи есть dblclick",
+    typeof (gCard && gCard.ondblclick) === "function",
+    String(gCard && typeof gCard.ondblclick));
+  if (gCard && gCard.ondblclick) await gCard.ondblclick({});
+  const slot1 = st.outSlotOfEntry("g1");
+  check("v1.72: dblclick ставит off (слот молчит)", !!slot1 && slot1.off === true,
+    JSON.stringify(slot1));
+  st.render();
+  // v1.71 не различал вкл/выкл цветом (привязанная всегда #1c3525) — после
+  // v1.72.2 контракт тот же: важно, что НЕТ v1.72-заливки #2e6b4f.
+  const gOff = st.list.children.find((c) => ftext(c).includes("g1"));
+  check("v1.72.2: выключенная карточка — фон #1c3525, зелёной заливки нет",
+    !!gOff && String(gOff.style.cssText).includes("background:#1c3525")
+      && !String(gOff.style.cssText).includes("background:#2e6b4f"),
+    gOff ? String(gOff.style.cssText).slice(0, 140) : "карточки нет");
+  const offNow = slot1 && slot1.off;
+  if (gOff && gOff.ondblclick) await gOff.ondblclick({});
+  const slot2 = st.outSlotOfEntry("g1");
+  check("v1.72: повторный dblclick включает обратно (off снят)",
+    offNow === true && !!slot2 && !slot2.off, JSON.stringify(slot2));
+  // 2) Корень «Выходов»: та же карточка через makeOutCard (ctx.slot).
+  st.selFolder = "__outs";
+  st.outsActiveFolder = "";
+  st.renderTree(); st.render();
+  // v1.72.4 (§60.8): слот-контекст не даёт активации (ярко-зелёный #2e6b4f
+  // от dblclick — только у папки-вывода), но селект-зелёный #1c3525 от
+  // одиночного клика/sel теперь законен и на слот-карточке (новый контракт
+  // подсветки «Выходов»). Тест v1.72.2 запрещал оба — правится под контракт.
+  const oCard = st.list.children.find((c) => ftext(c).includes("g1"));
+  check("v1.72.4: карточка слота в «Выходах» без активации (#2e6b4f не появляется)",
+    !!oCard && !String(oCard.style.cssText).includes("background:#2e6b4f"),
+    oCard ? String(oCard.style.cssText).slice(0, 140) : "карточки нет");
+  check("v1.72: у карточки слота есть dblclick",
+    typeof (oCard && oCard.ondblclick) === "function",
+    String(oCard && typeof oCard.ondblclick));
+  if (oCard && oCard.ondblclick) await oCard.ondblclick({});
+  const slot3 = st.outSlotOfEntry("g1");
+  check("v1.72: dblclick по карточке слота ставит off", !!slot3 && slot3.off === true,
+    JSON.stringify(slot3));
+  const off3 = slot3 && slot3.off;
+  if (oCard && oCard.ondblclick) await oCard.ondblclick({});
+  const slot4 = st.outSlotOfEntry("g1");
+  check("v1.72: повторный dblclick по карточке слота снимает off",
+    off3 === true && !!slot4 && !slot4.off, JSON.stringify(slot4));
+});
+
+await run("v1.72: миграция графа — active при первой загрузке старого воркфлоу", async () => {
+  // (а) старый граф без active (6 значений) → active := selected из wv[1]
+  const nA = mkSlotNode();
+  addSlotEnv(nA);
+  const wA = nA.widgets.find((w) => w.name === "active");
+  proto.onConfigure.call(nA, {
+    widgets_values: ["📥 Запись", "e72", "Фото", "", "[]", ""],
+    widgets_values_named: {},
+  });
+  check("v1.72 (а): старый граф 6 значений → active унаследовал selected (e72)",
+    !!wA && wA.value === "e72", String(wA && wA.value));
+  // (б) 7 значений и named.active:"" — именованное ПУСТОЕ перекрывает позицию:
+  // позиционный остаток "m1" стоит и в виджете, и в wv[6] — выжить может
+  // только ветка named. До правки JS миграции нет → в m1 и остаётся (RED).
+  const nB = mkSlotNode();
+  addSlotEnv(nB);
+  const wB = nB.widgets.find((w) => w.name === "active");
+  if (wB) wB.value = "m1";
+  proto.onConfigure.call(nB, {
+    widgets_values: ["📥 Запись", "m1", "Фото", "", "[]", "", "m1"],
+    widgets_values_named: { active: "" },
+  });
+  check("v1.72 (б): named.active=\"\" перекрывает позицию (не остался m1)",
+    !!wB && wB.value === "", String(wB && wB.value));
+  // (в) named.active задан → читается при гидрации (позиция wv[6] намеренно
+  // другая: только ветка named даёт e73, позиционная дала бы «stale7»).
+  const nC = mkSlotNode();
+  addSlotEnv(nC);
+  const wC = nC.widgets.find((w) => w.name === "active");
+  proto.onConfigure.call(nC, {
+    widgets_values: ["📥 Запись", "", "", "", "[]", "", "stale7"],
+    widgets_values_named: { active: "e73" },
+  });
+  check("v1.72 (в): named.active читается при гидрации",
+    !!wC && wC.value === "e73", String(wC && wC.value));
+  // (г) старый граф 5 значений (до slots_out/quick_test/active) — selected
+  // берём из позиции wv[1]: без миграции active остаётся пустым (RED).
+  const nD = mkSlotNode();
+  addSlotEnv(nD);
+  const wD = nD.widgets.find((w) => w.name === "active");
+  proto.onConfigure.call(nD, {
+    widgets_values: ["📥 Запись", "e74", "Фото", "", "[]"],
+    widgets_values_named: {},
+  });
+  check("v1.72 (г): граф в 5 значений → active унаследовал selected из wv[1] (e74)",
+    !!wD && wD.value === "e74", String(wD && wD.value));
+});
+
+// --- v1.72.5: новая карточка в подключённую папку/подпапку «Выходов» ---------
+await run("v1.72.5: сохранение при выбранной папке-выводе уходит в неё, не в «Без категории»", async () => {
+  const node = mkSlotNode();
+  node.id = 90;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  addSlotEnv(node);
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("/prompt_library/add")) return jsonResponse({ ok: true, id: "a1" });
+    return jsonResponse({ ok: true });
+  };
+  try {
+    st.plDrop({ kind: "folder", path: "ПапкаA" }, "__outs");
+    const ta = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st.dText).pop();
+    const saveBtn = walkDom(st.root).find((el) => el.tagName === "BUTTON"
+      && String(el.textContent).includes("Сохранить промпт"));
+    check("v1.72.5: кнопка сохранения найдена", !!ta && !!saveBtn);
+    // (а) открыта папка-вывод в «Выходах» → промпт идёт в неё
+    st.selFolder = "__outs";
+    st.outsActiveFolder = "ПапкаA";
+    st.outsBrowsePath = "ПапкаA";
+    ta.value = "текст в папку-вывод";
+    await saveBtn.onclick();
+    const addA = posts.filter((p) => p.url.includes("/prompt_library/add")).pop();
+    check("v1.72.5: выбрана папка-вывод → folder = «ПапкаA» (а не «»)",
+      addA?.body?.folder === "ПапкаA", JSON.stringify(addA?.body));
+    // (б) открытая подпапка (просмотр ниже корня папки-вывода) → в подпапку
+    st.outsBrowsePath = "ПапкаA/Под";
+    ta.value = "текст в подпапку";
+    await saveBtn.onclick();
+    const addB = posts.filter((p) => p.url.includes("/prompt_library/add")).pop();
+    check("v1.72.5: открыта подпапка → folder = «ПапкаA/Под»",
+      addB?.body?.folder === "ПапкаA/Под", JSON.stringify(addB?.body));
+    // (в) сами «Выходы» без открытой папки → «Без категории» (контракт v1.72.5:
+    // это поведение сохраняется, пользователь его подтвердил)
+    st.outsActiveFolder = "";
+    st.outsBrowsePath = "";
+    ta.value = "текст в без категории";
+    await saveBtn.onclick();
+    const addC = posts.filter((p) => p.url.includes("/prompt_library/add")).pop();
+    check("v1.72.5: сами «Выходы» без папки → folder = «» (Без категории)",
+      addC?.body?.folder === "", JSON.stringify(addC?.body));
+    // (г) проводник: папка выбрана обычным кликом → folder = её путь
+    st.selFolder = "ПапкаA";
+    ta.value = "текст из проводника";
+    await saveBtn.onclick();
+    const addD = posts.filter((p) => p.url.includes("/prompt_library/add")).pop();
+    check("v1.72.5: папка выбрана в проводнике → folder = «ПапкаA»",
+      addD?.body?.folder === "ПапкаA", JSON.stringify(addD?.body));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+// --- v1.72.6: зелёное выделение подключённой папки в проводнике и её карточек --
+// Отчёт пользователя (два скриншота): (1) клик по подключённой 🔌 папке в ОБЩЕМ
+// дереве подсвечивает строку тёмно-синим #2c4a73 — нужен зелёный как у строк
+// слотов в «Выходах» (§60.8), цвет обязан свидетельствовать о подключении;
+// (2) карточки в списке, открытом через проводник у подключённой папки, при
+// клике не подсвечиваются вовсе — клик по подключённой карточке не пишет
+// selWidget (v1.59), а bg-цепочка галереи не читает st.detailId, в отличие от
+// makeOutCard после v1.72.3.
+await run("v1.72.6: строка подключённой папки в проводнике активна зелёным как в «Выходах»", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("h1", "ПапкаH"), mkSlotEntry("u1", "ПапкаU"));
+  st.folders.push("ПапкаH", "ПапкаU");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  await st.plDrop({ kind: "folder", path: "ПапкаH" }, "__outs");
+  st.renderTree();
+  // Строки папок узнаются по кнопке 📍/📌: строка слота «Выходов» с тем же
+  // путём (📁 ПапкаH 🔌N) лежит выше и кнопки закрепления не имеет.
+  const folderRowOf = (key) => st.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(key) && (t.includes("📍") || t.includes("📌"));
+  });
+  const rowH = folderRowOf("ПапкаH");
+  check("v1.72.6: строка папки-категории «ПапкаH» в дереве найдена", !!rowH,
+    st.tree.children.map((r) => ftext(r)).join(" ; ") || "—");
+  if (rowH) rowH.onclick({});
+  const cssH = String((folderRowOf("ПапкаH") || {}).style?.cssText || "");
+  check("v1.72.6: активная подключённая папка — зелёный фон #2e6b4f (как строка слота в «Выходах»)",
+    cssH.includes("background:#2e6b4f"), cssH.slice(0, 220));
+  check("v1.72.6: …и inset-полоса #7fe0a8 как у активного слота в «Выходах»",
+    cssH.includes("box-shadow:inset 3px 0 0 #7fe0a8"), cssH.slice(0, 220));
+  // Охранители контракта: неподключённая папка остаётся синей; подключённая
+  // без выбора — прозрачной (зелёная заливка только у активной).
+  const rowU = folderRowOf("ПапкаU");
+  if (rowU) rowU.onclick({});
+  const cssU = String((folderRowOf("ПапкаU") || {}).style?.cssText || "");
+  check("v1.72.6: активная неподключённая папка — прежний синий #2c4a73",
+    cssU.includes("background:#2c4a73"), cssU.slice(0, 220));
+  st.selFolder = "__all";
+  st.renderTree();
+  const cssIdle = String((folderRowOf("ПапкаH") || {}).style?.cssText || "");
+  check("v1.72.6: подключённая папка без выбора — без зелёной заливки (transparent)",
+    cssIdle.includes("background:transparent"), cssIdle.slice(0, 220));
+});
+
+await run("v1.72.6: карточка в списке подключённой папки — зелёный селект при клике", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("k1", "ПапкаK"), mkSlotEntry("k2", "ПапкаK"),
+    mkSlotEntry("m1", "ПапкаM"));
+  st.folders.push("ПапкаK", "ПапкаM");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  await st.plDrop({ kind: "folder", path: "ПапкаK" }, "__outs");
+  st.selFolder = "ПапкаK";
+  st.renderTree(); st.render();
+  const bgOf = (id) => {
+    const c = st.list.children.find((x) => ftext(x).includes(id));
+    const m = c && String(c.style.cssText || "").match(/background:\s*(#[0-9a-fA-F]{6})/);
+    return m ? m[1].toLowerCase() : String(c && c.style.cssText);
+  };
+  const cardK = st.list.children.find((c) => ftext(c).includes("k1"));
+  check("v1.72.6: карточка k1 в списке подключённой папки видна", !!cardK,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  if (cardK) await cardK.onclick({});
+  const cssK = String((st.list.children.find((c) => ftext(c).includes("k1")) || {}).style?.cssText || "");
+  check("v1.72.6: клик подсветил карточку подключённой папки зелёным (#1c3525 + рамка #2e6b4f)",
+    bgOf("k1") === "#1c3525" && cssK.includes("border:1px solid #2e6b4f"),
+    `${bgOf("k1")} | ${cssK.slice(0, 160)}`);
+  check("v1.72.6: это СЕЛЕКТ, не активация — сплошной заливки #2e6b4f нет",
+    bgOf("k1") !== "#2e6b4f", bgOf("k1"));
+  check("v1.72.6: selWidget не тронут (v1.59: подключённая карточка не берёт основной выход)",
+    st.selWidget.value === "" && st.detailId === "k1",
+    `sel=${st.selWidget.value}, detail=${st.detailId}`);
+  check("v1.72.6: невыбранная соседка k2 — серая (#1e1e1e)",
+    bgOf("k2") === "#1e1e1e", bgOf("k2"));
+  // Охранитель: в неподключённой папке клик по-прежнему даёт синий #1e2c44
+  // (контракт v1.72.2, галерея без подключения не зеленеет).
+  st.selFolder = "ПапкаM";
+  st.renderTree(); st.render();
+  const cardM = st.list.children.find((c) => ftext(c).includes("m1"));
+  if (cardM) await cardM.onclick({});
+  check("v1.72.6: неподключённая папка — синий селект #1e2c44 (v1.72.2 не тронут)",
+    bgOf("m1") === "#1e2c44", bgOf("m1"));
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);

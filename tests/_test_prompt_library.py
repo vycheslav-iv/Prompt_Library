@@ -197,8 +197,8 @@ res = node.execute(mode=node.MODE_WRITE, selected="", save_folder="Фото",
 check("«Запись»: выход пуст + ui на месте", res["result"][1] == "" and "ui" in res,
       str(res["result"]))
 check("входной текст обрезан", res["ui"]["text"] == ["Портрет девушки"])
-check("PNG-патч записал widgets_values позиционно (6 значений, v1.44+v1.61)",
-      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото", "", "", ""],
+check("PNG-патч записал widgets_values позиционно (7 значений, v1.44+v1.61+v1.72)",
+      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото", "", "", "", ""],
       str(workflow["nodes"][0]["widgets_values"]))
 check("чужой node id не тронут", len(workflow["nodes"]) == 1)
 entries, folders = mod._load_db()
@@ -230,8 +230,8 @@ check("mode='' + без use_selected -> запись", any(e["prompt"] == "бе�
 print("\n4. execute (режим выдачи)")
 entries, _ = mod._load_db()
 target = next(e for e in entries if e["prompt"] == "Портрет девушки")
-res5 = node.execute(mode=node.MODE_ISSUE, selected=target["id"], save_folder="",
-                    source="перезапишется", extra_pnginfo=pnginfo, unique_id=7)
+res5 = node.execute(mode=node.MODE_ISSUE, selected=target["id"], active=target["id"],
+                    save_folder="", source="перезапишется", extra_pnginfo=pnginfo, unique_id=7)
 check("выдача возвращает промпт записи", res5["result"][1] == "Портрет девушки")
 entries, _ = mod._load_db()
 check("last_used проставлен",
@@ -240,7 +240,7 @@ before = len(entries)
 node.execute(mode=node.MODE_ISSUE, selected=target["id"], save_folder="",
              source="не должен сохраниться", extra_pnginfo=pnginfo, unique_id=7)
 check("в режиме выдачи новые записи не создаются", len(mod._load_db()[0]) == before)
-res6 = node.execute(mode=node.MODE_ISSUE, selected="нет-такого", save_folder="",
+res6 = node.execute(mode=node.MODE_ISSUE, active="нет-такого", save_folder="",
                     source="прозрачный проход", extra_pnginfo=pnginfo, unique_id=7)
 check("выдача с несуществующим id -> пропускает вход", res6["result"][1] == "прозрачный проход")
 res7 = node.execute(mode="", selected="", save_folder="", source="s",
@@ -741,7 +741,8 @@ check("_output_linked ищет именно свою ноду",
       res_wo["result"][1] == "" and mod._output_linked(png_other, 9) is False)
 
 # Выдача: только выдаёт, ничего не сохраняет
-res_i = node2.execute(mode=node2.MODE_ISSUE, selected=e_w["id"], save_folder="Режимы",
+res_i = node2.execute(mode=node2.MODE_ISSUE, selected=e_w["id"], active=e_w["id"],
+                       save_folder="Режимы",
                        source="режим-выдача-входящий", extra_pnginfo=None, unique_id=1)
 check("« Выдача » выдаёт текст выбранной записи",
       res_i["result"][1] == "режим-запись-1", str(res_i["result"]))
@@ -750,7 +751,8 @@ check("« Выдача » saved_id пуст (обложка не нужна)", r
       str(res_i["ui"]["saved_id"]))
 
 # Выдача + запись: и выдаёт, и сохраняет входящий
-res_b = node2.execute(mode=node2.MODE_BOTH, selected=e_w["id"], save_folder="Режимы",
+res_b = node2.execute(mode=node2.MODE_BOTH, selected=e_w["id"], active=e_w["id"],
+                      save_folder="Режимы",
                       source="режим-оба-1", extra_pnginfo=None, unique_id=1)
 e_b = _entry("режим-оба-1")
 check("« Выдача + запись » выдаёт выбранную запись",
@@ -927,8 +929,8 @@ check("подхват: снапшот воркфлоу отложен под т�
 check("подхват: подсказка о том, почему вход не сохраняется",
       "не сохраняется" in (res_pick["ui"]["mode_notice"][0] or ""),
       str(res_pick["ui"]["mode_notice"]))
-check("подхват: PNG-патч несёт pickup 4-м значением, slots_out 5-м",
-      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_BOTH, "", "Подхват", "1622", "", ""],
+check("подхват: PNG-патч несёт pickup 4-м значением, slots_out 5-м, active 7-м",
+      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_BOTH, "", "Подхват", "1622", "", "", ""],
       str(wf_pick["nodes"][0]["widgets_values"]))
 # Без подхвата поведение прежнее (pickup="")
 res_off = node3.execute(mode=node3.MODE_WRITE, selected="", save_folder="", pickup="",
@@ -1587,7 +1589,8 @@ check("27: 0-1 выходы на месте", res27["result"][0] == "" and res27
 # Порядок 0/1 (§40, v1.45.1): 0 — путь категории, 1 — основной текст.
 # Имена сокетов в UI («путь категории» / «промпт 1 (основной)») обязаны совпадать
 # с тем, что реально едет по проводу — на этом стоял дефект v1.44.
-res27o2 = node27.execute(mode=node27.MODE_ISSUE, selected=_e27a["id"], save_folder="Слоты/Под",
+res27o2 = node27.execute(mode=node27.MODE_ISSUE, selected=_e27a["id"], active=_e27a["id"],
+                         save_folder="Слоты/Под",
                          extra_pnginfo=None, unique_id=1)
 check("27: выход 0 — путь категории, выход 1 — текст записи",
       res27o2["result"][0] == "Слоты/Под/" and res27o2["result"][1] == "текст-карточки-1",
@@ -1646,12 +1649,13 @@ check("27: slots_out списком (map-over-list) работает", len(res27
 wf27 = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
 node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out=slots27,
                extra_pnginfo={"workflow": wf27}, unique_id=7)
-check("27: PNG-патч несёт slots_out 5-м значением",
-      wf27["nodes"][0]["widgets_values"] == [node27.MODE_ISSUE, "", "", "", slots27, ""],
+check("27: PNG-патч несёт slots_out 5-м значением, active 7-м",
+      wf27["nodes"][0]["widgets_values"] == [node27.MODE_ISSUE, "", "", "", slots27, "", ""],
       str(wf27["nodes"][0]["widgets_values"]))
 
 # Выдача + слоты одновременно: prompt_out своим, слоты своими
-res27x2 = node27.execute(mode=node27.MODE_ISSUE, selected=_e27a["id"], save_folder="",
+res27x2 = node27.execute(mode=node27.MODE_ISSUE, selected=_e27a["id"], active=_e27a["id"],
+                         save_folder="",
                          slots_out=slots27, extra_pnginfo=None, unique_id=1)
 check("27: prompt_out (выбор) и слот (та же запись) не конфликтуют",
       res27x2["result"][1] == "текст-карточки-1" and res27x2["result"][2] == "текст-карточки-1",
@@ -2557,6 +2561,7 @@ check("48: и `text` в UI несёт квик (а не пусто)",
 
 # 5. Пустой/пробельный quick = прежнее поведение.
 res48e = node48.execute(mode=node48.MODE_ISSUE, selected=_e48["id"] if _e48 else "",
+                        active=_e48["id"] if _e48 else "",
                         save_folder="", quick_test="   ", source=None,
                         extra_pnginfo=None, unique_id=1)
 check("48: пустой quick -> выдача карточки как раньше",
@@ -2566,9 +2571,91 @@ check("48: пустой quick -> выдача карточки как раньш
 wf48 = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
 node48.execute(mode=node48.MODE_ISSUE, selected="", save_folder="Фото", slots_out="[]",
                quick_test="квик-в-png", extra_pnginfo={"workflow": wf48}, unique_id=7)
-check("48: PNG-патч несёт quick_test 6-м значением",
-      wf48["nodes"][0]["widgets_values"] == [node48.MODE_ISSUE, "", "Фото", "", "[]", "квик-в-png"],
+check("48: PNG-патч несёт quick_test 6-м, active 7-м значением",
+      wf48["nodes"][0]["widgets_values"] == [node48.MODE_ISSUE, "", "Фото", "", "[]", "квик-в-png", ""],
       str(wf48["nodes"][0]["widgets_values"]))
+
+
+# --- 49. v1.72: active — единственный драйвер основного выхода ------------------
+# Двойной клик в JS пишет active; выдача основного провода (выход 1) идёт ТОЛЬКО
+# по нему. selected остаётся выделением панели (ui["selected"]) и на текст не
+# влияет; пустой active = сквозной проход входа (§60).
+print("\n49. active — драйвер выдачи (v1.72)")
+node49 = mod.PromptLibrary()
+node49.execute(mode=node49.MODE_WRITE, selected="", save_folder="Акт",
+               source="текст-А", extra_pnginfo=None, unique_id=1)
+node49.execute(mode=node49.MODE_WRITE, selected="", save_folder="Акт",
+               source="текст-Б", extra_pnginfo=None, unique_id=1)
+_e49a, _e49b = _entry("текст-А"), _entry("текст-Б")
+check("49: среда — две записи есть", _e49a is not None and _e49b is not None)
+
+# (1) active перебивает selected; (3) счётчик растёт у АКТИВНОЙ карточки
+_use49b_before = (_entry("текст-Б") or {}).get("use_count", 0)
+_use49a_before = (_entry("текст-А") or {}).get("use_count", 0)
+res49_1 = node49.execute(mode=node49.MODE_ISSUE, selected=_e49a["id"], active=_e49b["id"],
+                         save_folder="", source="вход-не-должен-пройти",
+                         extra_pnginfo=None, unique_id=1)
+check("49: active перебивает selected — на проводе текст-Б",
+      res49_1["result"][1] == "текст-Б", str(res49_1["result"][1]))
+check("49: use_count +1 у активной (текст-Б), а не у selected (текст-А)",
+      (_entry("текст-Б") or {}).get("use_count", 0) == _use49b_before + 1
+      and (_entry("текст-А") or {}).get("use_count", 0) == _use49a_before,
+      f"B={(_entry('текст-Б') or {}).get('use_count')} A={(_entry('текст-А') or {}).get('use_count')}")
+
+# (2) пустой active -> сквозной проход, даже когда selected непуст
+res49_2 = node49.execute(mode=node49.MODE_ISSUE, selected=_e49a["id"], active="",
+                         save_folder="", source="вход-текст",
+                         extra_pnginfo=None, unique_id=1)
+check("49: пустой active -> пропускает вход (а не selected)",
+      res49_2["result"][1] == "вход-текст", str(res49_2["result"][1]))
+
+# (4) active списком (map-over-list, как pickup/mode) -> первый элемент
+res49_4 = node49.execute(mode=node49.MODE_ISSUE, selected="", active=[_e49a["id"]],
+                         save_folder="", source="вход-список",
+                         extra_pnginfo=None, unique_id=1)
+check("49: active списком (map-over-list) -> текст-А",
+      res49_4["result"][1] == "текст-А", str(res49_4["result"][1]))
+
+# (5) guard: несуществующий active -> прозрачный проход (не ошибка)
+res49_5 = node49.execute(mode=node49.MODE_ISSUE, selected="", active="нет-такого-id",
+                         save_folder="", source="прозрачный",
+                         extra_pnginfo=None, unique_id=1)
+check("49: несуществующий active -> пропускает вход (guard)",
+      res49_5["result"][1] == "прозрачный", str(res49_5["result"][1]))
+
+# (6) слот-карточка с off:true не выдаёт текст; без off — выдаёт как раньше
+slots49 = json.dumps([
+    {"i": 2, "kind": "card", "id": _e49a["id"], "name": "А", "off": True},
+    {"i": 3, "kind": "card", "id": _e49b["id"], "name": "Б"},
+])
+res49_6 = node49.execute(mode=node49.MODE_ISSUE, selected="", active="", save_folder="",
+                         slots_out=slots49, extra_pnginfo=None, unique_id=1)
+check("49: слот-карточка off:true -> на выходе пусто (деактивирована)",
+      res49_6["result"][2] == "", str(res49_6["result"][2]))
+check("49: слот-карточка без off выдаёт текст (guard)",
+      res49_6["result"][3] == "текст-Б", str(res49_6["result"][3]))
+
+# (7) PNG-патч несёт 7 значений, active последним (порядок INPUT_TYPES required)
+wf49 = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
+node49.execute(mode=node49.MODE_ISSUE, selected="", active=_e49b["id"], save_folder="",
+               slots_out="[]", quick_test="", extra_pnginfo={"workflow": wf49}, unique_id=7)
+check("49: PNG-патч — 7 значений, active последним",
+      wf49["nodes"][0]["widgets_values"] == [node49.MODE_ISSUE, "", "", "", "[]", "", _e49b["id"]],
+      str(wf49["nodes"][0]["widgets_values"]))
+
+# (8) INPUT_TYPES: active — 7-й required после quick_test
+_req49 = list(mod.PromptLibrary.INPUT_TYPES()["required"].keys())
+check("49: INPUT_TYPES required — 7 полей, active последним",
+      _req49 == ["mode", "selected", "save_folder", "pickup", "slots_out", "quick_test", "active"],
+      str(_req49))
+
+# (9) guard: «Запись» active не читает — выход пуст, запись сохранена
+res49_9 = node49.execute(mode=node49.MODE_WRITE, selected="", active=_e49b["id"],
+                         save_folder="", source="запись-49",
+                         extra_pnginfo=None, unique_id=1)
+check("49: «Запись» игнорирует active (выход пуст, запись есть)",
+      res49_9["result"][1] == "" and _entry("запись-49") is not None,
+      str(res49_9["result"][1]))
 
 
 # --- итог -------------------------------------------------------------------

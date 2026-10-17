@@ -1792,6 +1792,11 @@ class PromptLibrary:
                 # выходе 1, пока окно открыто; сам в базу не пишется.
                 # Скрытый виджет — значение зеркалит JS, пока окно открыто.
                 "quick_test": ("STRING", {"multiline": False, "default": ""}),
+                # v1.72: единственный драйвер основного выхода (§60). JS пишет
+                # сюда id карточки по ДВОЙНОМУ клику (галерея, папка-вывод);
+                # пусто — сквозной проход входа. selected остаётся только
+                # выделением панели (ui["selected"]) и на текст не влияет.
+                "active": ("STRING", {"multiline": False, "default": ""}),
             },
             "optional": {
                 "source": ("*", {}),
@@ -1860,22 +1865,26 @@ class PromptLibrary:
             return float("nan")
         return None
 
-    def execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", source=None, image=None,
+    def execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", active="", source=None, image=None,
                 extra_pnginfo=None, unique_id=None, **kwargs):
         # Весь прогон узла держит общий с HTTP-роутами замок (§25.3.2): execute()
         # исполняется в потоке ComfyUI, а роуты — в event loop; без замка их циклы
         # «load -> mutate -> save» могли наложиться и потерять чужое изменение
         # (например, только что созданную вручную запись или удаление).
         with _DB_LOCK:
-            return self._execute(mode, selected, save_folder, pickup, slots_out, quick_test, source, image,
+            return self._execute(mode, selected, save_folder, pickup, slots_out, quick_test, active, source, image,
                                  extra_pnginfo, unique_id, **kwargs)
 
-    def _execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", source=None, image=None,
+    def _execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", active="", source=None, image=None,
                  extra_pnginfo=None, unique_id=None, **kwargs):
         # mode может прийти как список (ComfyUI COMBO через map-over-list) —
         # приводим к строке, как уже делаем для pickup.
         if isinstance(mode, (list, tuple)):
             mode = mode[0] if len(mode) else ""
+        # v1.72: active (скрытый STRING-виджет) тоже может прийти списком
+        # (map-over-list, как pickup) — разворачиваем до единого вида.
+        if isinstance(active, (list, tuple)):
+            active = active[0] if len(active) else ""
         # Папка сохранения = выбранная в дереве (скрытый save_folder, пишет JS).
         # Совместимость: старые workflow несли folder/category виджетом
         folder = save_folder or kwargs.get("folder", "") or kwargs.get("category", "")
@@ -1919,13 +1928,16 @@ class PromptLibrary:
         display = incoming
 
         # 1. Исходящий текст (выдача книги с полки — фиксируем дату)
-        #  • Выдача / Выдача+запись — текст выбранной записи (иначе входящий);
+        #  • Выдача / Выдача+запись — текст записи из active (v1.72: только
+        #    двойной клик в JS пишет active; selected — выделение панели и на
+        #    текст НЕ влияет; пустой active — сквозной проход входа);
         #  • Запись — пусто, чтобы нода-сейвер ничего не выдавала дальше
         #    (кроме случая провода на выходе, см. out_linked выше).
         out_text = incoming
         if mode == self.MODE_WRITE and not out_linked:
             out_text = ""
         sel = (selected or "").strip()
+        act = str(active or "").strip()
         dirty = False
         # 1.1. Быстрый тест (v1.61): текст из окна «Добавить промпт» крутится на
         # основном проводе, пока окно открыто. Непустой quick_test перебивает и
@@ -1937,9 +1949,9 @@ class PromptLibrary:
         if quick:
             out_text = quick
             display = quick
-        elif (issue or both) and sel:
+        elif (issue or both) and act:
             for e in entries:
-                if e.get("id") == sel:
+                if e.get("id") == act:
                     out_text = e.get("prompt", "")
                     e["last_used"] = _now()
                     e["use_count"] = e.get("use_count", 0) + 1
@@ -2037,9 +2049,10 @@ class PromptLibrary:
                         if str(node_data.get("id")) == str(unique_id):
                             # Порядок = порядок INPUT_TYPES required:
                             # mode, selected, save_folder, pickup, slots_out,
-                            # quick_test (quick_test — v1.61)
+                            # quick_test, active (quick_test — v1.61,
+                            # active — v1.72)
                             # (prompt-виджет удалён в v1.7; slots_out — v1.44)
-                            node_data["widgets_values"] = [mode, selected, save_folder, pickup, slots_out, quick_test]
+                            node_data["widgets_values"] = [mode, selected, save_folder, pickup, slots_out, quick_test, active]
                             break
             except Exception:
                 pass
@@ -2066,6 +2079,7 @@ class PromptLibrary:
         # 3.2. Мультивывод (§40): доп. слоты 2-11 из категории «Выходы».
         # slots_out — JSON: [{i, kind: "card"|"folder", id или path+active_id}].
         # Текст слота = prompt записи; карточка без записи → «(запись удалена)».
+        # v1.72: карточка с off:true (деактивирована двойным кликом) молчит.
         slot_texts = [""] * 10
         try:
             slots = _parse_slots(slots_out)
@@ -2084,6 +2098,10 @@ class PromptLibrary:
                         break
                 if not text:
                     text = "(запись удалена)"
+                if s.get("off"):
+                    # v1.72: деактивирована — текст не выдаётся, даже если
+                    # запись существует.
+                    text = ""
             elif s.get("kind") == "folder":
                 aid = s.get("active_id", "")
                 for e in entries:
