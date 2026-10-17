@@ -4330,6 +4330,98 @@ await run("v1.69: карточка подпапки привязывается �
     })());
 });
 
+// --- v1.70 (§58): подсветка подпапок, в которых лежит подключённая карточка --
+// Отчёт пользователя: карточка выбрана глубоко в подпапке; вернувшись в верхнюю
+// категорию, не видно, в какую ветку идти за подключённым промптом. Проверяем:
+// карточка-подпапка на пути к подключённой записи подсвечена (тем же синим, что
+// и сама выбранная карточка) на КАЖДОМ уровне, а соседние ветки — нет.
+const folderCardBy = (st, path) => st.list.children.find((c) => String(c.title || "").includes("📁 " + path + " —"));
+
+await run("v1.70: подпапка с подключённой карточкой подсвечена по всей глубине", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.entries.push(mkSlotEntry("k1", "Космос"), mkSlotEntry("k2", "Космос/Планеты"),
+    mkSlotEntry("k3", "Космос/Планеты/Марс"), mkSlotEntry("k4", "Космос/Звёзды"));
+  st.folders.push("Космос", "Космос/Планеты", "Космос/Планеты/Марс", "Космос/Звёзды");
+  st.selWidget.value = "k3"; // подключённая (выбранная) карточка — в самой глубокой подпапке
+  st.selFolder = "Космос";
+  st.renderTree(); st.render();
+  const planets = folderCardBy(st, "Космос/Планеты");
+  const stars = folderCardBy(st, "Космос/Звёзды");
+  check("v1.70: подпапка на пути к карточке подсвечена цветом выделения",
+    !!planets && String(planets.style.cssText).includes("#4a9eff"),
+    planets ? String(planets.style.cssText).slice(0, 140) : "карточки подпапки нет");
+  check("v1.70: соседняя подпапка без карточки не подсвечена",
+    !!stars && !String(stars.style.cssText).includes("#4a9eff"),
+    stars ? String(stars.style.cssText).slice(0, 140) : "карточки подпапки нет");
+  check("v1.70: на подсвеченной подпапке видно, сколько подключённых внутри",
+    !!planets && ftext(planets).includes("🔌 1"), planets ? ftext(planets) : "карточки нет");
+  check("v1.70: счётчик подключённых считается по всей глубине (Марс — внутри Планет)",
+    st.folderActiveCount("Космос/Планеты") === 1 && st.folderActiveCount("Космос/Звёзды") === 0,
+    `planets=${st.folderActiveCount("Космос/Планеты")}, stars=${st.folderActiveCount("Космос/Звёзды")}`);
+  // Второй уровень: входим в «Планеты» — там подсвечена уже «Марс».
+  st.selFolder = "Космос/Планеты";
+  st.renderTree(); st.render();
+  const mars = folderCardBy(st, "Космос/Планеты/Марс");
+  check("v1.70: на втором уровне подсвечена подпапка с карточкой (Марс)",
+    !!mars && String(mars.style.cssText).includes("#4a9eff"),
+    mars ? String(mars.style.cssText).slice(0, 140) : "карточки подпапки нет");
+});
+
+await run("v1.70: путь к карточке из «Выходов» подсвечен и в галерее, и в «Выходах»", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.entries.push(mkSlotEntry("k1", "Космос"), mkSlotEntry("k2", "Космос/Планеты"));
+  st.folders.push("Космос", "Космос/Планеты");
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  // Карточка из подпапки подключена к доп. выходу (выбор пуст — «промпт 1» ни при чём).
+  st.plDrop({ kind: "entry", ids: ["k2"], id: "k2" }, "__outs");
+  st.selFolder = "Космос";
+  st.renderTree(); st.render();
+  const planets = folderCardBy(st, "Космос/Планеты");
+  check("v1.70: карточка в слоте «Выходов» тоже подсвечивает свою подпапку",
+    !!planets && String(planets.style.cssText).includes("#4a9eff"),
+    planets ? String(planets.style.cssText).slice(0, 140) : "карточки подпапки нет");
+  check("v1.70: пустой выбор сам по себе ничего не подсвечивает (только слот)",
+    st.folderActiveCount("Космос/Планеты") === 1, String(st.folderActiveCount("Космос/Планеты")));
+  // «Выходы»: папка-вывод «Космос» — внутри неё путь к активной карточке тоже виден.
+  // Карточку k2 сначала снимаем с выхода: иначе подсветка шла бы от её слота, и
+  // проверка «пустая папка-вывод не подсвечена» ничего не измеряла бы.
+  st.unbindOutSlot(2);
+  check("v1.70: снятая с выхода карточка больше не подсвечивает подпапку",
+    st.folderActiveCount("Космос/Планеты") === 0, String(st.folderActiveCount("Космос/Планеты")));
+  st.plDrop({ kind: "folder", path: "Космос" }, "__outs");
+  st.selFolder = "__outs";
+  st.outsActiveFolder = "Космос";
+  st.outsBrowsePath = "Космос";
+  st.renderTree(); st.render();
+  const outPlanets = folderCardBy(st, "Космос/Планеты");
+  check("v1.70: без активной карточки папки-вывода подпапка не подсвечена",
+    !!outPlanets && !String(outPlanets.style.cssText).includes("#4a9eff"),
+    outPlanets ? String(outPlanets.style.cssText).slice(0, 140) : "карточки подпапки нет");
+  if (outPlanets) outPlanets.onclick({});
+  const cardK2 = st.list.children.find((c) => ftext(c).includes("k2"));
+  check("v1.70: внутри подпапки папки-вывода видна карточка k2", !!cardK2,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  if (cardK2) await cardK2.onclick({});
+  check("v1.70: клик по карточке сделал её активным выводом папки-вывода",
+    !!st.outSlotOfFolder("Космос") && st.outSlotOfFolder("Космос").active_id === "k2",
+    JSON.stringify(st.readOutSlots()));
+  // Назад к корню папки-вывода — и путь к подключённой карточке должен быть виден.
+  const outHead = st.list.children.find((c) => ftext(c).includes("решает, что уходит"));
+  const back = outHead ? outHead.children.find((c) => ftext(c).includes("⬅")) : null;
+  if (back) back.onclick({ preventDefault() {}, stopPropagation() {} });
+  const backPlanets = folderCardBy(st, "Космос/Планеты");
+  check("v1.71: в «Выходах» путь к активной карточке папки-вывода подсвечен зелёным (светлая рамка)",
+    !!backPlanets && String(backPlanets.style.cssText).includes("#4caf50"),
+    backPlanets ? String(backPlanets.style.cssText).slice(0, 140) : "карточки подпапки нет");
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");

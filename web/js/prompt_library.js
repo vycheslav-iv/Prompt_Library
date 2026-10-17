@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.69-subfolders";
+const PL_JS_VERSION = "1.71-out-folders-green";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -1426,6 +1426,40 @@ app.registerExtension({
                 }
                 return { direct, deep };
             };
+            // --- v1.70 (§58): что стоит на выходах ---------------------------
+            // Карточки, которые сейчас подключены: выбранная («промпт 1») и всё,
+            // что привязано к «🔌 Выходы» — карточкой или активной карточкой
+            // папки-вывода. Map: id → номер выхода. Нужно, чтобы после выхода из
+            // подпапки было видно, в какой ветке осталась подключённая карточка.
+            st.activeOutIds = () => {
+                const map = new Map();
+                try {
+                    if (selWidget && selWidget.value) map.set(String(selWidget.value), 1);
+                } catch (e) { /* silent */ }
+                try {
+                    for (const s of st.readOutSlots()) {
+                        if (!s) continue;
+                        const id = s.kind === "folder" ? s.active_id : s.id;
+                        if (id) map.set(String(id), s.i);
+                    }
+                } catch (e) { /* silent */ }
+                return map;
+            };
+            // Сколько таких карточек лежит в этой категории или в её подпапках
+            // (ЛЮБОЙ глубины): карточка-подпапка с ненулевым счётом подсвечивается
+            // цветом выделения, и путь к подключённой записи видно на каждом
+            // уровне. map — общий на один рендер (readOutSlots парсит JSON виджета,
+            // звать его на каждую подпапку незачем).
+            st.folderActiveCount = (path, map) => {
+                let n = 0;
+                try {
+                    for (const id of (map || st.activeOutIds()).keys()) {
+                        const e = st.entries.find((x) => x.id === id);
+                        if (e && st.pathCovers(path, e.folder)) n++;
+                    }
+                } catch (err) { /* silent */ }
+                return n;
+            };
             // Ближайшая папка-вывод, накрывающая путь. Длиннейший путь побеждает:
             // при двух слотах ("Фото" и "Фото/Портреты") карточка из вложенной
             // категории уходит в свой, более точный выход.
@@ -2576,9 +2610,23 @@ const reload = async () => {
                 const cnt = st.folderCounts(path);
                 const subs = st.subfoldersOf(path).length;
                 const marked = st.markFolders.has(path);
+                // v1.70 (§58): вглубь этой ветки есть карточка на выходе —
+                // подсвечиваем папку синим (как подсветка пути).
+                const act = Math.max(0, Number(o.actCount) || 0);
+                const active = act > 0;
+                // v1.71: зелёная подсветка для всех подпапок в «Выходы»
+                // — зелёный фон у всех подпапок внутри папки-слота,
+                // — зелёная рамка (как у карточек) только если внутри есть карточка на выходе.
+                const inOutSlot = o.outs && !!st.outSlotOfFolder?.(path);     // сама папка-слот
+                const hasOutCard = active;                                   // есть 🔌 внутри
+                const parentSlot = o.outs ? st.folderSlotForPath?.(path) : null; // ближайший слот, накрывающий путь
+                const inOutFolder = o.outs && (inOutSlot || !!parentSlot); // в пределах любого слота
+                const outBgOnly = inOutFolder && !hasOutCard; // в «Выходы» но без 🔌 внутри — фон зелёный, без рамки
+                const isOutFolder = inOutFolder && (inOutSlot || hasOutCard);  // зелёная рамка: слот ИЛИ есть 🔌
                 const card = document.createElement("div");
                 card.draggable = true;
                 card.title = `📁 ${path} — клик: открыть` + (o.outs ? " внутри папки-вывода" : "")
+                    + (active ? ` · на выходе ${act === 1 ? "карточка" : "карточек: " + act} внутри` : "")
                     + " · Ctrl+клик — пометить, Shift+клик — диапазон"
                     + " · перетащить в «🔌 Выходы» — подключить категорию к выходу";
                 // Тот же дроп, что у строки дерева: kind "folder" + paths (папку
@@ -2589,9 +2637,11 @@ const reload = async () => {
                     ev.dataTransfer.effectAllowed = "copyMove";
                     ev.stopPropagation();
                 };
-                const border = marked ? "#e08a3c" : "#3a4a5f";
-                const bg = marked ? "#4a2f18" : "#1a2432";
-                const acct = marked ? "box-shadow:inset 4px 0 0 #e08a3c;" : "";
+                const border = marked ? "#e08a3c" : isOutFolder ? "#4caf50" : active ? "#4a9eff" : (outBgOnly ? "#3a4a5f" : "#3a4a5f");
+                const bg = marked ? "#4a2f18" : isOutFolder ? "#1c3525" : active ? "#1e2c44" : (outBgOnly ? "#1c3525" : "#1a2432");
+                const acct = marked ? "box-shadow:inset 4px 0 0 #e08a3c;"
+                    : isOutFolder ? "box-shadow:inset 4px 0 0 #4caf50;"
+                    : active ? "box-shadow:inset 4px 0 0 #4a9eff;" : (outBgOnly ? "" : "");
                 card.style.cssText = grid
                     ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${border};background:${bg};${acct}flex-shrink:0;`
                     : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:1px solid ${border};background:${bg};${acct}`;
@@ -2609,9 +2659,21 @@ const reload = async () => {
                 t.textContent = leaf;
                 const m = document.createElement("div");
                 m.style.cssText = "color:#8aa;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-                m.textContent = (cnt.deep ? `записей: ${cnt.deep}` : "пусто")
-                    + (subs ? ` · подпапок: ${subs}` : "");
+                const metaParts = [];
+                if (cnt.deep !== undefined) metaParts.push(cnt.deep === 0 ? "пусто" : `записей: ${cnt.deep}`);
+                if (subs) metaParts.push(`подпапок: ${subs}`);
+                if (isOutFolder) {
+                    // Сама папка — слот вывода — зелёный бейдж
+                    const slot = st.outSlotOfFolder(path);
+                    metaParts.push(`🔌 ${slot ? slot.i : '?'}`);
+                } else if (active && act > 0) {
+                    // Внутри есть карточка на выходе — синий бейдж (путь)
+                    metaParts.push(`🔌 ${act} (внутри)`);
+                }
+                m.textContent = metaParts.join(' · ');
                 body.appendChild(t); body.appendChild(m);
+                if (isOutFolder) m.title = `Эта папка подключена к выходу «${st.outSlotOfFolder(path)?.name || path}»`;
+                else if (active) m.title = "Внутри этой категории (включая подпапки) есть карточка на выходе";
                 card.appendChild(ico); card.appendChild(body);
                 card.onclick = (ev) => {
                     if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) {
@@ -2706,6 +2768,9 @@ const reload = async () => {
                 // сегменты и ⬆ на уровень выше.
                 st.renderHeadNav();
                 const selVal = selWidget ? selWidget.value : "";
+                // v1.70 (§58): карточки на выходах — один раз на рендер (синий
+                // путь в подпапках ниже строится по этой карте).
+                const actMap = st.activeOutIds();
                 let shown = 0;
                 // Подпапки считаем ОТДЕЛЬНО: нижняя строка говорит «Записей в
                 // категории: N» — подмешивать туда папки нельзя.
@@ -2767,7 +2832,8 @@ const reload = async () => {
                         // Подпапки открытой категории — перед карточками, как в
                         // проводнике ОС: сначала папки, потом записи.
                         for (const sub of st.subfoldersOf(browse)) {
-                            st.list.appendChild(st.folderNavCard(sub, { grid, imgSize, outs: true }));
+                            st.list.appendChild(st.folderNavCard(sub,
+                                { grid, imgSize, outs: true, actCount: st.folderActiveCount(sub, actMap) }));
                             shownFolders++;
                         }
                         for (const e of st.entries.filter((x) => x.folder === browse)) {
@@ -2815,7 +2881,8 @@ const reload = async () => {
                 // из списка было нельзя.
                 if (st.selFolder && !st.selFolder.startsWith("__")) {
                     for (const sub of st.subfoldersOf(st.selFolder)) {
-                        st.list.appendChild(st.folderNavCard(sub, { grid, imgSize }));
+                        st.list.appendChild(st.folderNavCard(sub,
+                            { grid, imgSize, actCount: st.folderActiveCount(sub, actMap) }));
                         shownFolders++;
                     }
                 }
