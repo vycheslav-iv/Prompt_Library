@@ -4942,6 +4942,53 @@ await run("v1.72.6: карточка в списке подключённой п
     bgOf("m1") === "#1e2c44", bgOf("m1"));
 });
 
+await run("v1.72.7: активация карточки в списке подключённой папки — ярко-зелёная как в «Выходах»", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("k1", "ПапкаK"), mkSlotEntry("k2", "ПапкаK"));
+  st.folders.push("ПапкаK");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  await st.plDrop({ kind: "folder", path: "ПапкаK" }, "__outs");
+  st.selFolder = "ПапкаK";
+  st.renderTree(); st.render();
+  const bgOf = (id) => {
+    const c = st.list.children.find((x) => ftext(x).includes(id));
+    const m = c && String(c.style.cssText || "").match(/background:\s*(#[0-9a-fA-F]{6})/);
+    return m ? m[1].toLowerCase() : String(c && c.style.cssText);
+  };
+  const cssOf = (id) => {
+    const c = st.list.children.find((x) => ftext(x).includes(id));
+    return String((c && c.style.cssText) || "");
+  };
+  const card1 = st.list.children.find((c) => ftext(c).includes("k1"));
+  check("v1.72.7: карточка k1 в списке подключённой папки видна", !!card1,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  // Одиночный клик — селект-зелёный (контракт v1.72.6, охраняется как был).
+  if (card1) await card1.onclick({});
+  check("v1.72.7: одиночный клик — селект-зелёный #1c3525 + рамка #2e6b4f (v1.72.6 охранитель)",
+    bgOf("k1") === "#1c3525" && cssOf("k1").includes("border:1px solid #2e6b4f"),
+    `${bgOf("k1")} | ${cssOf("k1").slice(0, 160)}`);
+  // Двойной клик — активация вывода папки (route 4): должна дать ЯРКИЙ цвет,
+  // как isActive в makeOutCard (§60.8): фон #2e6b4f + рамка #7fe0a8.
+  if (card1 && card1.ondblclick) await card1.ondblclick({});
+  const slotK = st.outSlotOfFolder("ПапкаK");
+  check("v1.72.7: dblclick активировал вывод папки (active_id=k1)",
+    !!slotK && slotK.active_id === "k1", JSON.stringify(slotK));
+  check("v1.72.7: активированная карточка в галерее — ЯРКО-зелёная (фон #2e6b4f + рамка #7fe0a8)",
+    bgOf("k1") === "#2e6b4f" && cssOf("k1").includes("#7fe0a8"),
+    `${bgOf("k1")} | ${cssOf("k1").slice(0, 160)}`);
+  // Повторный dblclick снимает активацию → возврат к селект-зелёному.
+  if (card1 && card1.ondblclick) await card1.ondblclick({});
+  check("v1.72.7: деактивация вернула селект-зелёный #1c3525 (яркой заливки нет)",
+    bgOf("k1") === "#1c3525", bgOf("k1"));
+  // Соседняя карточка никак не задета активацией.
+  check("v1.72.7: соседка k2 без активации — серая #1e1e1e (не ярко-зелёная)",
+    bgOf("k2") === "#1e1e1e", bgOf("k2"));
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");

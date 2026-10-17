@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.72.6-green-select-explorer";
+    const PL_JS_VERSION = "1.72.7-activation-bright-gallery";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -2984,7 +2984,9 @@ const reload = async () => {
                     const cardSlot0 = st.outSlotOfEntry(e.id);
                     const folderSlot0 = st.folderActOf(e.id);
                     const outSlot = cardSlot0 || folderSlot0;
-                    const outMark = !!outSlot;
+                    const outBind = !!cardSlot0;   // своя привязка к слоту (v1.71-цвет)
+                    const outActive = !!folderSlot0; // активный вывод папки-вывода (dblclick)
+                    const outMark = outBind || outActive;
                     // v1.72.2 (§60.6): цвета галереи дословно как в v1.71
                     // (marked → outMark → selected → серый) плюс ЕДИНСТВЕННОЕ
                     // нововведение v1.72 — цвет активации главной карточки по
@@ -2997,6 +2999,12 @@ const reload = async () => {
                     // (v1.59), поэтому селект читается ещё и по st.detailId —
                     // та же механика, что в makeOutCard (v1.72.3). Синий #1e2c44
                     // остаётся для неподключённых папок (контракт v1.72.2).
+                    // v1.72.7 (§60.11): АКТИВАЦИЯ вывода папки (dblclick →
+                    // fs active_id, folderActOf) в галерее — ЯРКО-зелёная
+                    // #2e6b4f/#7fe0a8, как isActive в makeOutCard (§60.8).
+                    // Раньше она сливалась с селект-зелёным #1c3525 («обычная,
+                    // не яркая»). Привязка своей карточки к слоту (без
+                    // активации папки) остаётся v1.71-цветом #1c3525.
                     const mainActive = e.id === actVal;
                     const isSelCard = e.id === selVal || st.detailId === e.id;
                     const folderConn = !!(e.folder && st.folderSlotForPath(e.folder));
@@ -3017,10 +3025,11 @@ const reload = async () => {
                     const acct = marked ? "box-shadow:inset 4px 0 0 #e08a3c;" : "";
                     const bg = mainActive
                         ? "#2a5a91"
-                        : marked ? "#4a2f18" : outMark ? "#1c3525"
+                        : marked ? "#4a2f18" : outActive ? "#2e6b4f"
+                        : outMark ? "#1c3525"
                         : isSelCard && folderConn ? "#1c3525"
                         : isSelCard ? "#1e2c44" : "#1e1e1e";
-                    const border = `1px solid ${outMark || (isSelCard && folderConn) ? "#2e6b4f" : (mainActive || isSelCard) ? "#4a9eff" : "#333"}`;
+                    const border = `1px solid ${outActive ? "#7fe0a8" : outMark || (isSelCard && folderConn) ? "#2e6b4f" : (mainActive || isSelCard) ? "#4a9eff" : "#333"}`;
                     card.style.cssText = grid
                         ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}flex-shrink:0;`
                         : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}`;
