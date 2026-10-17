@@ -4422,6 +4422,41 @@ await run("v1.70: путь к карточке из «Выходов» подс�
     backPlanets ? String(backPlanets.style.cssText).slice(0, 140) : "карточки подпапки нет");
 });
 
+// --- v1.71.1: подпапки папки-слота зелёные и в обычном проводнике ----------
+// Отчёт пользователя: папка подключена к «Выходы» — внутри «Выходов» её
+// подпапки зелёные, но клик по той же папке в проводнике (обычный режим)
+// показывает их синими: зелёная логика (inOutSlot/parentSlot/isOutFolder)
+// была закрыта флагом `o.outs`, который в обычном списке не передаётся.
+await run("v1.71.1: подпапки подключённой категории зелёные и в проводнике, и в «Выходах»", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.entries.push(mkSlotEntry("g1", "Космос"), mkSlotEntry("g2", "Космос/Планеты"),
+    mkSlotEntry("g3", "Космос/Звёзды"));
+  st.folders.push("Космос", "Космос/Планеты", "Космос/Звёзды");
+  // Папка «Космос» → доп. выход; активный вывод — g2, лежит в подпапке.
+  st.selWidget.value = "g2";
+  await st.plDrop({ kind: "folder", path: "Космос" }, "__outs");
+  check("v1.71.1: папка подключена, активная карточка в подпапке",
+    !!st.outSlotOfFolder("Космос") && st.outSlotOfFolder("Космос").active_id === "g2",
+    JSON.stringify(st.readOutSlots()));
+  // Клик по папке в проводнике: обычный режим, folderNavCard без opts.outs.
+  st.selFolder = "Космос";
+  st.renderTree(); st.render();
+  const planets = folderCardBy(st, "Космос/Планеты");
+  const stars = folderCardBy(st, "Космос/Звёзды");
+  check("v1.71.1: подпапка с активным выводом зелёная (#4caf50), а не синяя",
+    !!planets && String(planets.style.cssText).includes("#4caf50"),
+    planets ? String(planets.style.cssText).slice(0, 160) : "карточки подпапки нет");
+  check("v1.71.1: соседняя подпапка в пределах папки-слота зелёная (фон #1c3525)",
+    !!stars && String(stars.style.cssText).includes("#1c3525"),
+    stars ? String(stars.style.cssText).slice(0, 160) : "карточки подпапки нет");
+  check("v1.71.1: бейдж подпапки — номер её слота (🔌 2), а не «(внутри)»",
+    !!planets && ftext(planets).includes("🔌 2") && !ftext(planets).includes("(внутри)"),
+    planets ? ftext(planets) : "карточки нет");
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");

@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-const PL_JS_VERSION = "1.71-out-folders-green";
+const PL_JS_VERSION = "1.71.1-out-green-navigator";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -2617,10 +2617,13 @@ const reload = async () => {
                 // v1.71: зелёная подсветка для всех подпапок в «Выходы»
                 // — зелёный фон у всех подпапок внутри папки-слота,
                 // — зелёная рамка (как у карточек) только если внутри есть карточка на выходе.
-                const inOutSlot = o.outs && !!st.outSlotOfFolder?.(path);     // сама папка-слот
+                // v1.71.1: логика больше НЕ закрыта флагом o.outs — подпапки
+                // папки-слота зелёные и в обычном проводнике (клике по папке),
+                // не только при просмотре внутри «🔌 Выходы».
+                const inOutSlot = !!st.outSlotOfFolder?.(path);     // сама папка-слот
                 const hasOutCard = active;                                   // есть 🔌 внутри
-                const parentSlot = o.outs ? st.folderSlotForPath?.(path) : null; // ближайший слот, накрывающий путь
-                const inOutFolder = o.outs && (inOutSlot || !!parentSlot); // в пределах любого слота
+                const parentSlot = st.folderSlotForPath?.(path) || null; // ближайший слот, накрывающий путь
+                const inOutFolder = !!(inOutSlot || parentSlot); // в пределах любого слота
                 const outBgOnly = inOutFolder && !hasOutCard; // в «Выходы» но без 🔌 внутри — фон зелёный, без рамки
                 const isOutFolder = inOutFolder && (inOutSlot || hasOutCard);  // зелёная рамка: слот ИЛИ есть 🔌
                 const card = document.createElement("div");
@@ -2663,8 +2666,9 @@ const reload = async () => {
                 if (cnt.deep !== undefined) metaParts.push(cnt.deep === 0 ? "пусто" : `записей: ${cnt.deep}`);
                 if (subs) metaParts.push(`подпапок: ${subs}`);
                 if (isOutFolder) {
-                    // Сама папка — слот вывода — зелёный бейдж
-                    const slot = st.outSlotOfFolder(path);
+                    // Сама папка — слот вывода — зелёный бейдж; подпапка в
+                    // пределах слота — номер ближайшего слота (v1.71.1).
+                    const slot = st.outSlotOfFolder(path) || parentSlot;
                     metaParts.push(`🔌 ${slot ? slot.i : '?'}`);
                 } else if (active && act > 0) {
                     // Внутри есть карточка на выходе — синий бейдж (путь)
@@ -2672,7 +2676,10 @@ const reload = async () => {
                 }
                 m.textContent = metaParts.join(' · ');
                 body.appendChild(t); body.appendChild(m);
-                if (isOutFolder) m.title = `Эта папка подключена к выходу «${st.outSlotOfFolder(path)?.name || path}»`;
+                if (isOutFolder) {
+                    const slot = st.outSlotOfFolder(path) || parentSlot;
+                    m.title = `Эта папка подключена к выходу «${(slot && slot.name) || path}»`;
+                }
                 else if (active) m.title = "Внутри этой категории (включая подпапки) есть карточка на выходе";
                 card.appendChild(ico); card.appendChild(body);
                 card.onclick = (ev) => {
