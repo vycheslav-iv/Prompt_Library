@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.72.7-activation-bright-gallery";
+    const PL_JS_VERSION = "1.72.11-outslot-del-button";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -2223,6 +2223,50 @@ const reload = async () => {
                 // подключении. Обычная активная папка — прежний синий #2c4a73.
                 const slotOfFolder = isFolder ? st.outSlotOfFolder(key) : null;
                 const activeBg = slotOfFolder ? "#2e6b4f" : "#2c4a73";
+                // v1.72.8 (§60.12): карточка, активированная в ОСНОВНОЙ промпт
+                // (dblclick → activeW, маршрут 4), должна быть видна в
+                // проводнике справа. Контракт (после скриншотов: «перебор
+                // выделений», затем «тончайшая рамка — костыль»): отмечается
+                // РОВНО ОДНА строка — папка самой карточки (без предков), и
+                // НАСТОЯЩИМ ЭЛЕМЕНТОМ-меткой первым ребёнком строки — сразу
+                // слева от 📁, вместе с отступом вложенности. Раньше была
+                // inset-тень: на скруглённой строке она сужалась краями и
+                // висела у края строки, вдали от иконки — выглядела остатком
+                // рамки. Приоритет метки: marked (☑ + оранжевая тень) и
+                // подключённый активный (зелёная тень) гасят её; фон строки
+                // не трогается. Карточка из слот-папки активирует
+                // fs.active_id (маршрут 3, §60.11), так что activeW не может
+                // указывать внутрь подключённой папки. Пустой folder («Без
+                // категории») и служебные ветки не помечаются.
+                let actEnt = null;
+                try {
+                    const av = activeW ? String(activeW.value || "") : "";
+                    if (av && isFolder) actEnt = st.entries.find((x) => x.id === av) || null;
+                } catch (e) { /* silent */ }
+                const actMark = !!(actEnt && actEnt.folder && key === actEnt.folder
+                    && !marked && !(active && slotOfFolder));
+                // v1.72.9 (§60.13, третья итерация): зелёная метка — на СТРОКЕ
+                // ПАПКИ КАРТОЧКИ (точное se.folder === key), активной на
+                // ближайший слот-вывод: folderSlotForPath — тот же
+                // pickFolderSlot, что и маршрут 2 (dblclick). Подключённый
+                // предок при карточке в его подпапке метку НЕ получает —
+                // пользователь: «активировал карточку в подпапке, а зелёный
+                // маркер стоит на основной корневой папке, а должен быть на
+                // подпапке». Без требования «карточка выбрана (selWidget)».
+                // Приоритет: синяя activeW-метка > зелёная; marked (☑) и
+                // открытая слот-папка (active && slotOfFolder, уже залита
+                // зелёным §60.11) гасят зелёную.
+                let zMark = false;
+                if (!actMark && !marked && isFolder && !(active && slotOfFolder)) {
+                    try {
+                        const fSlot = st.folderSlotForPath(key);
+                        const aid = fSlot ? String(fSlot.active_id || "") : "";
+                        if (aid) {
+                            const se = st.entries.find((x) => x.id === aid);
+                            zMark = !!(se && se.folder === key);
+                        }
+                    } catch (e) { /* silent */ }
+                }
                 row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${active ? "#fff" : "#ccc"};background:${marked ? "rgba(224,138,60,.35)" : active ? activeBg : "transparent"};${marked ? "box-shadow:inset 3px 0 0 #e08a3c;" : active && slotOfFolder ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + depth * 14}px;`;
                 if (isFolder) row.title = "Клик — открыть · Ctrl+клик — пометить · Shift+клик — диапазон";
                 const name = document.createElement("span");
@@ -2241,6 +2285,23 @@ const reload = async () => {
                     if (plugLabel[2]) name.appendChild(plTextSpan(" " + plugLabel[2]));
                 } else {
                     name.textContent = (marked ? "☑ " : "") + label;
+                }
+                const mkColor = actMark ? "#4a9eff" : zMark ? "#7fe0a8" : "";
+                if (mkColor) {
+                    // Элемент-метка (§60.12/§60.13): первый ребёнок строки
+                    // — сразу слева от 📁, вместе с depth-отступом. Синяя
+                    // #4a9eff — папка активной карточки основного промпта;
+                    // зелёная #7fe0a8 — карточка выбрана и активна на
+                    // папку-вывод. Inset-тень синей заменена элементом: на
+                    // скруглённой строке она сужалась краями и висела у
+                    // левого края, вдали от иконки («костыльно», отчёт
+                    // по скриншоту).
+                    const mk = document.createElement("span");
+                    mk.style.cssText = `width:4px;height:13px;border-radius:2px;background:${mkColor};flex-shrink:0;`;
+                    mk.title = actMark
+                        ? "Папка карточки, включённой в основной промпт"
+                        : "Папка с выбранной и активной карточкой вывода";
+                    row.appendChild(mk);
                 }
                 row.appendChild(name);
                 // Категория, подключённая к доп. выходу, носит номер провода
@@ -2394,6 +2455,18 @@ const reload = async () => {
                         : selIdTree === slot.id;
                     const row = document.createElement("div");
                     row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${isActive ? "#fff" : "#ccc"};background:${isActive ? "#2e6b4f" : "transparent"};${isActive ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + 14}px;`;
+                    // v1.72.10 (§60.14): зелёный кружок слева от штекера — у
+                    // папки-вывода активна карточка (active_id, dblclick →
+                    // маршрут 2). Эмодзи 🔌 не перекрашивается CSS-цветом,
+                    // поэтому индикатор — отдельный кружок-спан 6px, первым
+                    // ребёнком строки. Карточка-слот кружка не имеет — сама
+                    // карточка и есть вывод.
+                    if (isFolder && String(slot.active_id || "")) {
+                        const actDot = document.createElement("span");
+                        actDot.style.cssText = "width:6px;height:6px;border-radius:50%;background:#7fe0a8;flex-shrink:0;margin-right:1px;";
+                        actDot.title = "Активная карточка: " + st.outSlotLabel(slot);
+                        row.appendChild(actDot);
+                    }
                     const num = document.createElement("span");
                     num.textContent = `🔌${slot.i}`;
                     num.title = `Выход «промпт ${slot.i}»`;
@@ -2405,11 +2478,16 @@ const reload = async () => {
                         + " · перетащите строку, чтобы отдать этот текст другому выходу";
                     row.appendChild(num);
                     row.appendChild(name);
-                    // Кнопка отвязки
+                    // Кнопка отвязки. v1.72.11 (§60.15): тёмный кружок с
+                    // красным крестиком вместо оранжевого ✖ (пользователь:
+                    // «темный, но не серый кружок с красным крестиком внутри»).
+                    // Поведение прежнее: stopPropagation + unbindOutSlot.
                     const del = document.createElement("button");
-                    del.textContent = "✖";
+                    del.textContent = "✕";
                     del.title = "Отвязать выход (провод отключится, сокет исчезнет)";
-                    del.style.cssText = "background:none;border:none;cursor:pointer;font-size:11px;color:#e08a3c;padding:0 2px;";
+                    del.style.cssText = "background:#414141;border:none;border-radius:50%;width:14px;height:14px;cursor:pointer;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;color:#e05555;padding:0;flex-shrink:0;";
+                    del.onmouseenter = () => { del.style.background = "#525252"; del.style.color = "#ff6b6b"; };
+                    del.onmouseleave = () => { del.style.background = "#414141"; del.style.color = "#e05555"; };
                     del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
                     row.appendChild(del);
                     st.outSlotDrag(row, idx);

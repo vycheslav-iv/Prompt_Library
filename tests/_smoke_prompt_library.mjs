@@ -4989,6 +4989,274 @@ await run("v1.72.7: активация карточки в списке подк
     bgOf("k2") === "#1e1e1e", bgOf("k2"));
 });
 
+// v1.72.8 (третья итерация, отчёт по скриншоту): «костыльно, тончайшая
+// рамка — нужны нормальные вещи». Inset-тень на строке со скруглением
+// рендерилась сужающимися краями и висела у ЛЕВОГО КРАЯ строки (вдали от
+// иконки при отступе) — выглядела как остаток рамки. Контракт: настоящий
+// ЭЛЕМЕНТ-метка (span 4×13, радиус 2px, #4a9eff) первым ребёнком строки —
+// сразу слева от 📁, вместе с отступом вложенности; inset-тени для пути
+// больше НЕТ; фон строки не трогается; ровно одна строка (только папка
+// карточки, без предков). Приоритет: marked (☑ + оранжевая тень) и
+// подключённый активный (зелёная тень) гасят метку.
+await run("v1.72.8: папка активной карточки — элемент-метка слева от 📁, без тени и заливки", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("a81", "Фото/Портреты"), mkSlotEntry("a82", "Видео"));
+  st.folders.push("Фото", "Фото/Портреты", "Видео");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  const activeW = node.widgets.find((w) => w.name === "active");
+  // Строки папок узнаются по 📍/📌 (заголовок строки-слота «Выходов» не имеет
+  // кнопки закрепления). Подпись строки — ЛИСТ («📁 Портреты»), полный путь
+  // живёт в title: «Фото» и «Портреты» не пересекаются по ftext.
+  const folderRowOf = (key) => st.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(key) && (t.includes("📍") || t.includes("📌"));
+  });
+  const cssOf = (key) => String((folderRowOf(key) || {}).style?.cssText || "");
+  // Метка — отдельный ребёнок строки с #4a9eff (у самой строки цвета пути нет:
+  // тень убрана, drag-outline — событие, не покраска).
+  const markChildOf = (key) => {
+    const r = folderRowOf(key);
+    return r && [...(r.children || [])]
+      .find((c) => String(c.style?.cssText || "").includes("#4a9eff"));
+  };
+  const rowPosOf = (key) => {
+    const r = folderRowOf(key);
+    return r && [...(r.children || [])].indexOf(markChildOf(key));
+  };
+  // Сани: до активации ни метки, ни тени, ни заливки.
+  check("v1.72.8: до активации подпапка чиста (нет метки/тени, transparent)",
+    !markChildOf("Портреты") && cssOf("Портреты").includes("background:transparent")
+      && !cssOf("Портреты").includes("#4a9eff"), cssOf("Портреты").slice(0, 200));
+  const card81 = st.list.children.find((c) => ftext(c).includes("a81"));
+  check("v1.72.8: карточка a81 в галерее видна", !!card81,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  // Маршрут 4 (своих слотов и папок-слотов нет) → activeW.
+  if (card81) await card81.ondblclick({});
+  check("v1.72.8: dblclick выставил основной выход (active=a81)",
+    !!activeW && activeW.value === "a81", `active=${activeW && activeW.value}`);
+  st.renderTree();
+  // КРАСНОЕ до правки: вместо элемента — inset-тень на строке.
+  check("v1.72.8: подпапка — ЭЛЕМЕНТ-метка (#4a9eff) среди детей строки",
+    !!markChildOf("Портреты"),
+    cssOf("Портреты").slice(0, 220) + " | children="
+    + [...((folderRowOf("Портреты") || {}).children || [])].length);
+  check("v1.72.8: inset-тени пути на строке больше НЕТ",
+    !cssOf("Портреты").includes("box-shadow:inset 3px 0 0 #4a9eff"), cssOf("Портреты").slice(0, 220));
+  // Метка — первым ребёнком (слева от 📁), а не у края строки.
+  check("v1.72.8: метка первым ребёнком — слева от иконки папки",
+    rowPosOf("Портреты") === 0, `pos=${rowPosOf("Портреты")}`);
+  // Контракт фона: никакой заливки.
+  check("v1.72.8: подпапка — фон прозрачный (заливки нет)",
+    cssOf("Портреты").includes("background:transparent"), cssOf("Портреты").slice(0, 220));
+  // Одна строка: предок и соседка чисты.
+  check("v1.72.8: предок «Фото» НЕ отмечен (нет метки и заливки)",
+    !markChildOf("Фото") && cssOf("Фото").includes("background:transparent"), cssOf("Фото").slice(0, 220));
+  check("v1.72.8: соседняя «Видео» чиста (transparent)",
+    cssOf("Видео").includes("background:transparent"), cssOf("Видео").slice(0, 220));
+  // Деактивация повторным dblclick снимает метку.
+  if (card81) await card81.ondblclick({});
+  st.renderTree();
+  check("v1.72.8: деактивация убрала метку с подпапки",
+    !markChildOf("Портреты") && cssOf("Портреты").includes("background:transparent"),
+    cssOf("Портреты").slice(0, 140));
+});
+
+// v1.72.9 (§60.13, третья итерация, живой скриншот): «я активировал карточку
+// в подпапке, а зелёный маркер стоит на основной корневой папке, а должен
+// быть на подпапке». Контракт: зелёная метка #7fe0a8 — на СТРОКЕ ПАПКИ
+// КАРТОЧКИ (точное se.folder === key, без предков), когда эта карточка
+// активна на ближайший слот-вывод (folderSlotForPath(se.folder).active_id —
+// тот же слот, что и маршрут 2). Подключённая папка при карточке в её
+// подпапке ВТОРУЮ метку не получает. Приоритет: синяя activeW-метка >
+// зелёная; marked гасит зелёную. Детект — только `background:#7fe0a8`
+// (слот-бейдж 🔌N — того же цвета, но это color).
+await run("v1.72.9: зелёная метка — на строке папки активной карточки вывода", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("b81", "Фото/Портреты"), mkSlotEntry("b82", "Видео"));
+  st.folders.push("Фото", "Фото/Портреты", "Видео");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  // Как на скриншоте: подключён ПРЕДОК «Фото», карточка активирована в подпапке.
+  await st.plDrop({ kind: "folder", path: "Фото" }, "__outs");
+  st.renderTree(); st.render();
+  const folderRowOf = (key) => st.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(key) && (t.includes("📍") || t.includes("📌"));
+  });
+  const cssOf = (key) => String((folderRowOf(key) || {}).style?.cssText || "");
+  // Метка — ребёнок строки с background:<цвет> (бейджи — color:<цвет>, не путать).
+  const markChildOf = (key, color) => {
+    const r = folderRowOf(key);
+    return r && [...(r.children || [])]
+      .find((c) => String(c.style?.cssText || "").includes("background:" + color));
+  };
+  const setAct = (path, id) => {
+    const arr = st.readOutSlots();
+    const fs = st.pickFolderSlot(arr, path);
+    if (fs) { fs.active_id = id || ""; st.writeOutSlots(arr); st.applyOutSockets(); }
+    st.renderTree(); st.render();
+  };
+  check("v1.72.9: до активации зелёных меток нет",
+    !markChildOf("Портреты", "#7fe0a8") && !markChildOf("Фото", "#7fe0a8"),
+    cssOf("Портреты").slice(0, 160) + " | " + cssOf("Фото").slice(0, 160));
+  // Активируем карточку подпапки на вывод «Фото» (маршрут 2).
+  setAct("Фото", "b81");
+  // КРАСНОЕ до правки JS: метка висит на подключённом предке, а не на подпапке.
+  check("v1.72.9: подпапка карточки «Портреты» — зелёная ЭЛЕМЕНТ-метка",
+    !!markChildOf("Портреты", "#7fe0a8"),
+    cssOf("Портреты").slice(0, 200) + " | children="
+    + [...((folderRowOf("Портреты") || {}).children || [])].length);
+  check("v1.72.9: подключённый предок «Фото» БЕЗ метки (метка на папке карточки)",
+    !markChildOf("Фото", "#7fe0a8"), cssOf("Фото").slice(0, 160));
+  // Синяя метка не появляется (activeW не трогали).
+  check("v1.72.9: синяя метка не появилась (activeW пуст)",
+    !markChildOf("Портреты", "#4a9eff"), cssOf("Портреты").slice(0, 140));
+  // Сброс активации — метки нет.
+  setAct("Фото", "");
+  check("v1.72.9: деактивация убрала зелёную метку",
+    !markChildOf("Портреты", "#7fe0a8"), cssOf("Портреты").slice(0, 140));
+  // Случай 2: подключена сама папка карточки — метка на ней же.
+  await st.plDrop({ kind: "folder", path: "Фото/Портреты" }, "__outs");
+  setAct("Фото/Портреты", "b81");
+  check("v1.72.9: подключена сама папка карточки — метка на ней",
+    !!markChildOf("Портреты", "#7fe0a8"), cssOf("Портреты").slice(0, 200));
+  // Охранитель §60.11: открытая в галерее СЛОТ-папка залита — метка гаснет.
+  st.selFolder = "Фото/Портреты";
+  st.renderTree(); st.render();
+  check("v1.72.9: открытая слот-папка — метка гаснет (залита §60.11)",
+    !markChildOf("Портреты", "#7fe0a8")
+      && cssOf("Портреты").includes("background:#2e6b4f"), cssOf("Портреты").slice(0, 140));
+  // Соседняя ветка чиста.
+  check("v1.72.9: соседняя «Видео» без меток",
+    !markChildOf("Видео", "#7fe0a8") && !markChildOf("Видео", "#4a9eff"),
+    cssOf("Видео").slice(0, 140));
+});
+
+// v1.72.10 (§60.14, задача пользователя): «в "Выходы" штекеры с
+// подключенными папками — если активирована карточка любая в подаваемом на
+// "Выходе", то штекер становится зеленым, если не активирована - обычным,
+// ИЛИ рядом со штекером слева сделать маленький круг зеленый». Эмодзи 🔌
+// не перекрашивается CSS-цветом, поэтому берётся второй вариант: у строки
+// папки-слота с непустым active_id (dblclick → маршрут 2, §60.11) первым
+// ребёнком строки (слева от штекера 🔌N) появляется зелёный кружок 6px
+// #7fe0a8. Карточка-слот кружка не имеет — сама карточка и есть вывод.
+// Детект кружка: ребёнок строки со background:#7fe0a8 (штекер 🔌N —
+// color:#7fe0a8, не фон; залитка открытой папки — cssText СТРОКИ, не
+// ребёнка).
+await run("v1.72.10: зелёный кружок у штекера папки-вывода с активной карточкой", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("b91", "Фото"), mkSlotEntry("b92", "Видео"));
+  st.folders.push("Фото", "Видео");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  await st.plDrop({ kind: "folder", path: "Фото" }, "__outs"); // 🔌 папка
+  await st.plDrop({ kind: "entry", id: "b92" }, "__outs");      // 🔌 карточка
+  st.renderTree(); st.render();
+  // Строка слота в «Выходах»: прямой ребёнок st.tree с num-спаном /^🔌\d+$/
+  // (папки главного дерева такого спана не имеют).
+  const slotRowOf = (needle) => st.tree.children.find((r) =>
+    [...(r.children || [])]
+      .some((c) => /^🔌\d+$/.test(String(c.textContent || "")) && ftext(r).includes(needle)));
+  const dotOf = (row) => row && [...(row.children || [])]
+    .find((c) => String(c.style?.cssText || "").includes("background:#7fe0a8"));
+  const setAct = (path, id) => {
+    const arr = st.readOutSlots();
+    const fs = st.pickFolderSlot(arr, path);
+    if (fs) { fs.active_id = id || ""; st.writeOutSlots(arr); st.applyOutSockets(); }
+    st.renderTree(); st.render();
+  };
+  const rowCss = (row) => String(row && row.style ? row.style.cssText : "(нет строки)");
+  // До активации: кружка нет.
+  check("v1.72.10: папка-слот «Фото» без активной карточки — кружка нет",
+    !dotOf(slotRowOf("Фото")), rowCss(slotRowOf("Фото")).slice(0, 160));
+  // Карточка-слот — без кружка всегда (даже если её выбрать).
+  check("v1.72.10: карточка-слот — кружка нет (только папки-выводы)",
+    !!slotRowOf("b92") && !dotOf(slotRowOf("b92")), rowCss(slotRowOf("b92")).slice(0, 160));
+  // Активируем карточку на папку-вывод → кружок слева от штекера.
+  setAct("Фото", "b91");
+  const actRow = slotRowOf("Фото");
+  check("v1.72.10: папка-слот с активной карточкой — зелёный кружок слева от штекера",
+    !!dotOf(actRow) && ftext(actRow).includes("🔌"),
+    rowCss(actRow).slice(0, 200) + " | children=" + [...(actRow ? actRow.children : [])].length);
+  // Деактивация — кружок снят.
+  setAct("Фото", "");
+  check("v1.72.10: деактивация сняла кружок",
+    !dotOf(slotRowOf("Фото")), rowCss(slotRowOf("Фото")).slice(0, 140));
+  // Активная карточка на ВТОРОМ папочном слоте — кружок только на нём.
+  st.entries.push(mkSlotEntry("b93", "Видео"));
+  await st.plDrop({ kind: "folder", path: "Видео" }, "__outs");
+  setAct("Фото", "b91");
+  setAct("Видео", "b93");
+  check("v1.72.10: два папочных слота — кружки на обоих, карточка-слот чист",
+    !!dotOf(slotRowOf("Фото")) && !!dotOf(slotRowOf("Видео"))
+      && !dotOf(slotRowOf("b92")),
+  [...(slotRowOf("b92") ? slotRowOf("b92").children : [])].length + " children у карточки");
+});
+
+// v1.72.11 (§60.15, задача пользователя): «крестики удаления X можешь
+// заменить на тёмный, но не серый кружок с красным крестиком внутри, так
+// будет красивее». Контракт: кнопка отвязки в строке слота «Выходов» —
+// <button> с border-radius:50% (круг), background:#414141 (тёмный —
+// #262626→#383838→#464646 подбирался по фидбеку, итог чуть темнее),
+// color:#e05555 (красный крестик), font-weight:700 (жирнее, фидбек),
+// глиф ✕; hover осветляет (#525252 / #ff6b6b). Поведение не трогается: stopPropagation + unbindOutSlot —
+// слот отвязывается.
+await run("v1.72.11: кнопка отвязки слота — тёмный кружок с красным крестиком", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("c91", "Фото"));
+  st.folders.push("Фото");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  await st.plDrop({ kind: "folder", path: "Фото" }, "__outs");
+  st.renderTree(); st.render();
+  const slotRowOf = (needle) => st.tree.children.find((r) =>
+    [...(r.children || [])]
+      .some((c) => /^🔌\d+$/.test(String(c.textContent || "")) && ftext(r).includes(needle)));
+  const delBtnOf = (row) => row && [...(row.children || [])]
+    .find((c) => c.tagName === "BUTTON");
+  const row = slotRowOf("Фото");
+  const del = delBtnOf(row);
+  const dcss = String(del && del.style ? del.style.cssText : "(нет кнопки)");
+  check("v1.72.11: кнопка отвязки существует в строке слота", !!del, dcss.slice(0, 120));
+  // КРАСНОЕ до правки JS: старый ✖ — background:none, цвет #e08a3c, без круга.
+  check("v1.72.11: кнопка — круг (border-radius:50%)",
+    dcss.includes("border-radius:50%"), dcss.slice(0, 200));
+  check("v1.72.11: фон тёмный #414141 (не none/сливается)",
+    dcss.includes("background:#414141"), dcss.slice(0, 200));
+  check("v1.72.11: крестик жирный (font-weight:700)",
+    dcss.includes("font-weight:700") || dcss.includes("font-weight:bold"),
+    dcss.slice(0, 200));
+  check("v1.72.11: крестик красный #e05555 (не #e08a3c)",
+    dcss.includes("color:#e05555") && !dcss.includes("#e08a3c"), dcss.slice(0, 200));
+  check("v1.72.11: глиф-крестик ✕/✖", /[✕✖]/.test(String(del ? del.textContent : "")),
+    String(del ? del.textContent : ""));
+  // Охранитель поведения: клик по кнопке отвязывает слот (не ломаем wiring).
+  const before = st.readOutSlots().length;
+  if (del && del.onclick) del.onclick({ stopPropagation() {} });
+  st.renderTree(); st.render();
+  check("v1.72.11: клик по кнопке отвязал слот (unbindOutSlot)",
+    st.readOutSlots().length === before - 1,
+    "было " + before + " → стало " + st.readOutSlots().length);
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");
