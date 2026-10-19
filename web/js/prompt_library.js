@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.73.7-dual-folder-marks";
+    const PL_JS_VERSION = "1.74.5-pick-bar";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -544,16 +544,37 @@ app.registerExtension({
             const treeBox = document.createElement("div");
             treeBox.style.cssText = "width:34%;min-width:110px;display:flex;flex-direction:column;gap:4px;flex-shrink:0;";
             const treeHead = document.createElement("div");
-            treeHead.style.cssText = "display:flex;align-items:center;justify-content:space-between;";
+            // v1.74.4 (§71): одна кнопка-пиктограмма + «+ Категория» — на MIN_W
+            // (470, дерево 34%) шапка не должна рвать подписи: заголовок
+            // сжимается с многоточием, группа кнопок и сами кнопки —
+            // flex-shrink:0 (принцип ряда «Библиотека:» с v1.53).
+            treeHead.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:6px;";
             const treeTitle = document.createElement("div");
-            treeTitle.style.cssText = "color:#888;font-size:11px;font-weight:bold;";
+            treeTitle.style.cssText = "flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#888;font-size:11px;font-weight:bold;";
             treeTitle.textContent = "📁 Категории";
+            // v1.74.4 (§71): ОДНА кнопка-переключатель с ЖЁЛТОЙ ПИКТОГРАММОЙ
+            // («плохо выглядит… пусть будет пиктограмма, желтая»). Глиф
+            // отражает ДЕЙСТВИЕ: ничего не свёрнуто → ⊟ (свернуть все папки
+            // с подпапками), есть свёрнутое → ⊞ (развернуть всё); полная
+            // фраза — в title. Синхронизация — в renderTree, поэтому глиф
+            // меняется и после одиночных кликов по стрелкам папок. Жёлтый —
+            // как у «+ Категория»: узкая кнопка (глиф ~12px вместо подписи
+            // 11px ≈ 58px) и она же читается на любом фоне ноды. Стоит в шапке
+            // дерева перед «+ Категория»: отдельная строка ела бы высоту ноды.
+            const collapseToggleBtn = document.createElement("button");
+            collapseToggleBtn.textContent = "⊟";
+            collapseToggleBtn.title = "Свернуть все папки";
+            collapseToggleBtn.style.cssText = "background:#2a2a2a;color:#e8c33a;border:1px solid #444;border-radius:4px;padding:1px 5px;cursor:pointer;font-size:12px;line-height:1;flex-shrink:0;";
+            collapseToggleBtn.onclick = (ev) => {
+                if (ev && ev.stopPropagation) ev.stopPropagation();
+                st.toggleCollapseAll?.();
+            };
             const newFolderBtn = document.createElement("button");
             newFolderBtn.textContent = "+ Категория";
             newFolderBtn.title = "Создать категорию (в текущей — подкатегорию)";
             // Жёлтая кнопка с чёрным текстом (как просил пользователь): остальные
             // кнопки шапки цветные, серая терялась, а на жёлтом чёрный читается.
-            newFolderBtn.style.cssText = "background:#e8c33a;color:#111;border:1px solid #c9a72f;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;font-weight:bold;";
+            newFolderBtn.style.cssText = "flex-shrink:0;background:#e8c33a;color:#111;border:1px solid #c9a72f;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;font-weight:bold;";
             const exportBtn = document.createElement("button");
             exportBtn.textContent = "📤 Экспорт";
             exportBtn.title = "Экспорт на диск: при Ctrl/Shift-выделении — отмеченные записи и категории, иначе — текущая категория (с подкатегориями)";
@@ -613,7 +634,8 @@ app.registerExtension({
             // Массовое удаление добавляется ниже, в блоке bulk-элементов
             // (v1.52): `exportRow` создан раньше, а кнопка — позже.
             const treeHeadBtns = document.createElement("div");
-            treeHeadBtns.style.cssText = "display:flex;align-items:center;gap:4px;";
+            treeHeadBtns.style.cssText = "display:flex;align-items:center;gap:4px;flex-shrink:0;";
+            treeHeadBtns.appendChild(collapseToggleBtn);
             treeHeadBtns.appendChild(newFolderBtn);
             treeHead.appendChild(treeTitle);
             treeHead.appendChild(treeHeadBtns);
@@ -951,6 +973,7 @@ app.registerExtension({
                 pickupRow, pickupSel, inputTitle,
                 bulkCount, bulkDel, bulkClear,
                 progTrack, progFill, exportRow, exportCaption, exportBtn, galleryBtn, importBtn, newFolderBtn,
+                treeHead, treeTitle, treeHeadBtns, collapseToggleBtn,
                 // Наружу — чтобы живая проба мерила ряд действий именно на том
                 // минимуме, которым живёт нода (без дублирования числа в тесте).
                 minW: MIN_W,
@@ -984,10 +1007,35 @@ app.registerExtension({
                 // в сессии и только для показа: что уходит в провод, решает
                 // active_id слота (клик по карточке — на любой глубине).
                 outsBrowsePath: "",
+                // v1.74.0 (§67): СВЁРНУТЫЕ папки проводника (только в сессии,
+                // в PNG не переносится — это состояние просмотра, как метки).
+                // Строка свёрнутой папки видна, её потомки — нет; маркеры
+                // активных карточек из скрытых папок поднимаются на ближайшую
+                // видимую папку (activeFolderMarks + collapseRep).
+                collapsedFolders: new Set(),
             };
             this._pl = st;
             plLiveStates.add(st);
             st.version = PL_JS_VERSION;
+            // v1.74.1 (§68): свёрнутые папки живут в PROPERTIES ноды —
+            // LiteGraph сериализует properties в воркфлоу, поэтому состояние
+            // переживает смену воркфлоу и возврат (а также сохранение/PNG).
+            // На свежей ноде properties пуст — набор остаётся пустым.
+            try {
+                const saved = this.properties && this.properties.pl_collapsed_folders;
+                if (Array.isArray(saved)) {
+                    st.collapsedFolders = new Set(saved.filter((x) => typeof x === "string"));
+                }
+            } catch (e) { /* silent */ }
+            st.persistCollapsed = () => {
+                try {
+                    if (!this.properties) this.properties = {};
+                    this.properties.pl_collapsed_folders = [...st.collapsedFolders];
+                    // Пометить граф изменённым: без этого ComfyUI мог не считать
+                    // воркфлоу «грязным» при одном лишь сворачивании.
+                    try { this.graph?.change?.(); } catch (e) { /* silent */ }
+                } catch (e) { /* silent */ }
+            };
 
             // v1.62: восстановить сессионное состояние окна теста ({text,title,
             // visible}) после пересоздания ноды (смена воркфлоу и возврат).
@@ -1438,6 +1486,106 @@ app.registerExtension({
                 return st.allFolders()
                     .filter((f) => f.split("/").slice(0, -1).join("/") === p)
                     .sort(st.folderCompare);
+            };
+            // --- v1.74.0 (§67): сворачивание проводника ----------------------
+            // Свёрнутая папка ВИДНА (её строка остаётся), скрыты только её
+            // потомки. Поэтому представитель пути — самый ВЕРХНИЙ свёрнутый
+            // предок: он видим, а всё глубже него — нет. Нет свёрнутых предков —
+            // представитель сам путь (маркер на точной папке, как раньше).
+            st.collapseRep = (path) => {
+                const p = String(path || "");
+                if (!p) return p;
+                const segs = p.split("/");
+                for (let i = 1; i < segs.length; i++) {
+                    const anc = segs.slice(0, i).join("/");
+                    if (st.collapsedFolders.has(anc)) return anc;
+                }
+                return p;
+            };
+            // Переключение состояния. Возвращает новое значение (true — свёрнута).
+            st.toggleFolderCollapsed = (path) => {
+                const p = String(path || "");
+                if (!p || p.startsWith("__")) return false;
+                if (st.collapsedFolders.has(p)) st.collapsedFolders.delete(p);
+                else st.collapsedFolders.add(p);
+                return st.collapsedFolders.has(p);
+            };
+            // Свёрнутость едет следом за папкой: переименование/перенос меняют
+            // префикс пути (сама папка и все её потомки), удаление — вычищает.
+            st.collapseRemap = (oldPath, newPath) => {
+                const from = String(oldPath || ""), to = String(newPath || "");
+                if (!from || !to || from === to) return;
+                const next = new Set();
+                for (const p of st.collapsedFolders) {
+                    if (p === from) next.add(to);
+                    else if (p.startsWith(from + "/")) next.add(to + p.slice(from.length));
+                    else next.add(p);
+                }
+                st.collapsedFolders = next;
+                st.persistCollapsed?.();
+            };
+            st.collapseDrop = (path) => {
+                const p = String(path || "");
+                if (!p) return;
+                for (const f of [...st.collapsedFolders]) {
+                    if (f === p || f.startsWith(p + "/")) st.collapsedFolders.delete(f);
+                }
+                st.persistCollapsed?.();
+            };
+            // Маркеры папок для ТЕКУЩЕГО вида: Map «ближайшая видимая папка →
+            // точные папки под ней». Синяя — карточка основного промпта (activeW),
+            // зелёная — карточка, активная на выходе (карточка-слот или
+            // active_id папки-вывода), фиолетовая (v1.74.5, §72) — путь категории
+            // (cat_pick): раньше кружок жил только на точной строке и при
+            // сворачивании предка пропадал — теперь тот же механизм подъёма.
+            // Дубли схлопываются: две карточки в разных
+            // скрытых папках дают ОДНУ полоску на свёрнутом предке. Точные папки
+            // без свёрнутых предков остаются как были (метка на своей папке).
+            st.activeFolderMarks = () => {
+                const blue = new Set();
+                const green = new Set();
+                try {
+                    const av = activeW ? String(activeW.value || "") : "";
+                    if (av) {
+                        const e = st.entries.find((x) => x.id === av);
+                        if (e && e.folder) blue.add(e.folder);
+                    }
+                } catch (e) { /* silent */ }
+                try {
+                    for (const s of st.readOutSlots()) {
+                        if (!s || s.off) continue;
+                        const id = s.kind === "folder" ? String(s.active_id || "") : String(s.id || "");
+                        if (!id) continue;
+                        const e = st.entries.find((x) => x.id === id);
+                        if (!e || !e.folder) continue;
+                        // Контракт §60.13: папка-вывод метит ТОЧНУЮ папку
+                        // активной карточки, но только если ЭТОТ слот —
+                        // ближайший для неё (у более точного слота может быть
+                        // своя активная карточка).
+                        if (s.kind === "folder") {
+                            const near = st.folderSlotForPath(e.folder);
+                            if (!near || Number(near.i) !== Number(s.i)) continue;
+                        }
+                        green.add(e.folder);
+                    }
+                } catch (e) { /* silent */ }
+                // v1.74.5 (§72): фиолетовая — путь категории (cat_pick).
+                // Служебные пути в набор не попадают (как и в pick-гейте).
+                const purple = new Set();
+                try {
+                    const pv = catPickW ? String(catPickW.value || "") : "";
+                    if (pv && !pv.startsWith("__")) purple.add(pv);
+                } catch (e) { /* silent */ }
+                const reps = (src) => {
+                    const m = new Map();
+                    for (const f of src) {
+                        const r = st.collapseRep(f);
+                        if (!m.has(r)) m.set(r, []);
+                        m.get(r).push(f);
+                    }
+                    return m;
+                };
+                return { blue: reps(blue), green: reps(green), purple: reps(purple) };
             };
             // path лежит в base или глубже (base — сама категория или её предок).
             // Так подпапка подключённой категории принадлежит ЕЙ, а не соседней
@@ -2222,6 +2370,12 @@ const reload = async () => {
                             : target;
                         const moved = await st.apiPost("/prompt_library/move_many", { folder_paths: paths, new_parent });
                         if (moved.ok) {
+                            // v1.74.0 (§67): свёрнутость перенесённой ветки едет
+                            // за новым путём (включая сами подпапки)
+                            for (const p of paths) {
+                                const leaf = p.split("/").pop();
+                                st.collapseRemap(p, new_parent ? `${new_parent}/${leaf}` : leaf);
+                            }
                             // v1.73 (§61): перенос папок едет следом за путём
                             // категории — каждая перемещённая папка (и её
                             // подпапки) переписывает cat_pick по префиксу
@@ -2254,6 +2408,13 @@ const reload = async () => {
             };
 
             // --- Дерево полок ---
+            // v1.74.0 (§67): сводные данные одного рендера дерева. treeMarks —
+            // Map «ближайшая видимая папка → точные папки» (см.
+            // st.activeFolderMarks); treeKids — прямые подпапки для стрелок ▾/▸.
+            // v1.74.5 (§72): purple — карта подъёма фиолетовой метки пути
+            // категории (как blue/green, §67).
+            let treeMarks = { blue: new Map(), green: new Map(), purple: new Map() };
+            let treeKids = new Map();
             const folderRow = (key, label, depth, isFolder) => {
                 const row = document.createElement("div");
                 const active = st.selFolder === key;
@@ -2286,12 +2447,12 @@ const reload = async () => {
                 // fs.active_id (маршрут 3, §60.11), так что activeW не может
                 // указывать внутрь подключённой папки. Пустой folder («Без
                 // категории») и служебные ветки не помечаются.
-                let actEnt = null;
-                try {
-                    const av = activeW ? String(activeW.value || "") : "";
-                    if (av && isFolder) actEnt = st.entries.find((x) => x.id === av) || null;
-                } catch (e) { /* silent */ }
-                const actMark = !!(actEnt && actEnt.folder && key === actEnt.folder
+                // v1.74.0 (§67): маркер считается не «по этой строке», а по
+                // карте видимых представителей (activeFolderMarks): пока точная
+                // папка видима — метка на ней, как раньше (§60.12/§60.13); если
+                // её скрыл свёрнутый предок — метка поднимается на ближайшую
+                // видимую папку, а несколько скрытых папок дают ОДНУ полоску.
+                const actMark = !!(isFolder && treeMarks.blue.has(key)
                     && !marked && !(active && slotOfFolder));
                 // v1.72.9 (§60.13, третья итерация): зелёная метка — на СТРОКЕ
                 // ПАПКИ КАРТОЧКИ (точное se.folder === key), активной на
@@ -2307,33 +2468,13 @@ const reload = async () => {
                 // статуса и СОСУЩЕСТВУЮТ (порядок 🟦🩵: синяя слева, зелёная
                 // справа). Раньше zMark считалась только при !actMark, и
                 // папка с выводом + основным промптом показывала одну синюю.
-                let zMark = false;
-                if (!marked && isFolder && !(active && slotOfFolder)) {
-                    try {
-                        const fSlot = st.folderSlotForPath(key);
-                        const aid = fSlot ? String(fSlot.active_id || "") : "";
-                        if (aid) {
-                            const se = st.entries.find((x) => x.id === aid);
-                            zMark = !!(se && se.folder === key);
-                        }
-                        // v1.73.4 (§63): ОДИНОЧНАЯ карточка, привязанная к слоту
-                        // «Выходов» (kind === "card") — та же зелёная метка на её
-                        // ТОЧНОЙ папке (без предков, как §60.13). Выше делалась
-                        // только для папки-вывода (folderSlotForPath фильтрует
-                        // kind !== "folder") — отчёт пользователя: «карточка
-                        // подключена, а папка не подсвечена». Выключенная карточка
-                        // (dblclick → off, Python молчит) метки не получает.
-                        if (!zMark) {
-                            for (const s of st.readOutSlots()) {
-                                if (!s || s.kind !== "card" || s.off || !s.id) continue;
-                                const se = st.entries.find((x) => x.id === s.id);
-                                if (se && se.folder === key) { zMark = true; break; }
-                            }
-                        }
-                    } catch (e) { /* silent */ }
-                }
+                // v1.73.4 (§63) контракт сохранён: выключенная карточка
+                // (dblclick → off) и её папка метки не получают — это уже
+                // учтено в activeFolderMarks (off-слоты пропускаются).
+                const zMark = !!(isFolder && treeMarks.green.has(key)
+                    && !marked && !(active && slotOfFolder));
                 row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${active ? "#fff" : "#ccc"};background:${marked ? "rgba(224,138,60,.35)" : pick ? "#3a2d66" : active ? activeBg : "transparent"};${marked ? "box-shadow:inset 3px 0 0 #e08a3c;" : pick ? "box-shadow:inset 0 0 0 1px #b388ff;" : active && slotOfFolder ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + depth * 14}px;`;
-                if (isFolder) row.title = "Клик — открыть · Двойной клик — путь категории · Ctrl+клик — пометить · Shift+клик — диапазон";
+                if (isFolder) row.title = "Клик — открыть · Двойной клик — путь категории · ▾/▸ — свернуть/развернуть · Ctrl+клик — пометить · Shift+клик — диапазон";
                 const name = document.createElement("span");
                 name.style.cssText = "flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
                 name.title = isFolder ? key : label;
@@ -2351,30 +2492,64 @@ const reload = async () => {
                 } else {
                     name.textContent = (marked ? "☑ " : "") + label;
                 }
-                // Метка строки (§60.12/§60.13, §61, §66): ребёнок строки —
+                // Метка строки (§60.12/§60.13, §61, §66, §72): ребёнок строки —
                 // сразу слева от 📁, вместе с depth-отступом. v1.73.7 (§66):
                 // синяя и зелёная СОСУЩЕСТВУЮТ как две полоски — синяя слева
                 // (основной промпт activeW), зелёная справа (карточка на
-                // выходе). Полоски вытесняют фиолетовый кружок pick (как
-                // раньше вытесняла одна метка). Inset-тень синей заменена
-                // элементом: на скруглённой строке она сужалась краями и
-                // висела у левого края («костыльно»).
+                // выходе). v1.74.5 (§72): фиолетовая (путь категории) — ТА ЖЕ
+                // полоска третьей; кружок 6px снят, вытеснения полосками
+                // больше нет — три статуса читаются как три вертикальные
+                // линии и переживают сворачивание предка (§67). Inset-тень
+                // синей была заменена элементом: на скруглённой строке она
+                // сужалась краями и висела у левого края («костыльно»).
                 const bars = [];
-                if (actMark) bars.push({ c: "#4a9eff", t: "Папка карточки, включённой в основной промпт" });
-                if (zMark) bars.push({ c: "#7fe0a8", t: "Папка с карточкой, активной на выходе" });
-                const pickDot = pick && !actMark && !zMark;
-                if (bars.length) {
-                    for (const b of bars) {
-                        const mk = document.createElement("span");
-                        mk.style.cssText = `width:4px;height:13px;border-radius:2px;background:${b.c};flex-shrink:0;`;
-                        mk.title = b.t;
-                        row.appendChild(mk);
-                    }
-                } else if (pickDot) {
+                // Тултип честно говорит, когда маркер представляет СКРЫТУЮ
+                // свёрнутую папку, а не саму строку.
+                const markTip = (kind, text) => {
+                    const exact = treeMarks[kind].get(key) || [];
+                    return exact.some((p) => p !== key) ? text + " · есть в свёрнутой папке" : text;
+                };
+                // v1.74.5 (§72): фиолетовая полоска по карте подъёма (не по
+                // точному `pick`): видна и на точной папке, и на ближайшем
+                // видимом предке, когда точная скрыта сворачиванием. Гейт
+                // прежний по духу — marked (☑) гасит, заливка #3a2d66 +
+                // кольцо по-прежнему только на ТОЧНОЙ видимой папке.
+                const pickMark = !!(isFolder && treeMarks.purple.has(key) && !marked);
+                if (actMark) bars.push({ c: "#4a9eff", t: markTip("blue", "Папка карточки, включённой в основной промпт") });
+                if (zMark) bars.push({ c: "#7fe0a8", t: markTip("green", "Папка с карточкой, активной на выходе") });
+                if (pickMark) bars.push({ c: "#b388ff", t: markTip("purple", "Путь категории (двойной клик)") });
+                for (const b of bars) {
                     const mk = document.createElement("span");
-                    mk.style.cssText = `width:6px;height:6px;border-radius:50%;background:#b388ff;flex-shrink:0;`;
-                    mk.title = "Путь категории (двойной клик)";
+                    mk.style.cssText = `width:4px;height:13px;border-radius:2px;background:${b.c};flex-shrink:0;`;
+                    mk.title = b.t;
                     row.appendChild(mk);
+                }
+                // Стрелка сворачивания — ПОСЛЕ маркеров (контракт §66 «маркер
+                // первым ребёнком строки» сохранён), но левее 📁. У листа —
+                // пустой спейсер, чтобы имена папок не плясали.
+                if (isFolder) {
+                    const kids = treeKids.get(key) || [];
+                    const tw = document.createElement("span");
+                    if (kids.length) {
+                        const collapsed = st.collapsedFolders.has(key);
+                        // v1.74.1 (§68): залитые треугольники крупнее контурных
+                        // ▾/▸ и не теряются в 11px-строке (отчёт: «едва видно»).
+                        tw.textContent = collapsed ? "▶" : "▼";
+                        tw.title = collapsed ? "Развернуть подпапки" : "Свернуть подпапки";
+                        // v1.74.2 (§69): −20% от 12px = 10px (отчёт: «слишком
+                        // большие»); залитый ▼/▶ остаётся читаемым.
+                        tw.style.cssText = "width:12px;flex-shrink:0;text-align:center;font-size:10px;line-height:1;color:#d5e2f0;cursor:pointer;user-select:none;";
+                        tw.onclick = (ev) => {
+                            if (ev && ev.stopPropagation) ev.stopPropagation();
+                            st.toggleFolderCollapsed(key);
+                            st.persistCollapsed?.();
+                            renderTree();
+                            render();
+                        };
+                    } else {
+                        tw.style.cssText = "width:11px;flex-shrink:0;";
+                    }
+                    row.appendChild(tw);
                 }
                 row.appendChild(name);
                 // Категория, подключённая к доп. выходу, носит номер провода
@@ -2449,6 +2624,8 @@ const reload = async () => {
                                     // Метки/якорь переименованного пути едут следом
                                     if (st.markFolders.delete(key)) st.markFolders.add(newPath);
                                     if (st.anchorFolder === key) st.anchorFolder = newPath;
+                                    // v1.74.0 (§67): свёрнутость едет за путём
+                                    st.collapseRemap(key, newPath);
                                     // v1.73 (§61): путь категории переименованной
                                     // папки едет следом (и подпапки — по префиксу)
                                     if (catPickW) {
@@ -2471,6 +2648,8 @@ const reload = async () => {
                         try {
                             const r = await st.apiPost("/prompt_library/folder_delete", { path: key });
                             if (r.ok) {
+                                // v1.74.0 (§67): удалённая ветка не остаётся свёрнутой
+                                st.collapseDrop(key);
                                 if (st.selFolder === key || st.selFolder.startsWith(key + "/")) st.selFolder = "__all";
                                 // v1.73 (§61): удалённая папка не может оставаться
                                 // путём категории — выбор сбрасывается (фолбэк
@@ -2531,6 +2710,9 @@ const reload = async () => {
 
             const renderTree = () => {
                 st.tree.innerHTML = "";
+                // v1.74.0 (§67): один расчёт маркеров на рендер — с учётом
+                // свёрнутых предков (иначе каждая строка дёргала бы слоты).
+                treeMarks = st.activeFolderMarks();
                 // Порядок строк для Shift-диапазона (включая служебные — при
                 // применении диапазона они пропускаются, метятся только папки).
                 // Порядок строк совпадает с порядком отрисовки НИЖЕ: служебные
@@ -2653,16 +2835,67 @@ const reload = async () => {
                     if (!kids.has(parent)) kids.set(parent, []);
                     kids.get(parent).push(f);
                 }
+                // v1.74.0 (§67): стрелки ▾/▸ рисуются по прямой карте детей.
+                // Свёрнутая папка остаётся строкой, но её потомки в дерево
+                // не попадают — свёрнутость любого уровня (корень, подпапка,
+                // папка подпапки) работает одинаково.
+                treeKids = kids;
                 const walk = (parent, depth) => {
                     for (const f of (kids.get(parent) || [])) {
                         st.folderOrder.push(f);
                         st.tree.appendChild(folderRow(f, "📁 " + f.split("/").pop(), depth, true));
-                        walk(f, depth + 1);
+                        if (!st.collapsedFolders.has(f)) walk(f, depth + 1);
                     }
                 };
                 walk("", 0);
+                // v1.74.3 (§70): подпись кнопки-переключателя всегда отражает
+                // состояние — и после клика по ней, и после одиночных стрелок.
+                st.syncCollapseToggle?.();
             };
             st.renderTree = renderTree;
+            // v1.74.2 (§69): массовые действия шапки дерева. В набор попадают
+            // только папки С ПОДПАПКАМИ: лист ничего не скрывает, а будущая
+            // подпапка внутри него не должна появиться уже свёрнутой.
+            st.collapseAllFolders = () => {
+                const next = new Set();
+                try {
+                    for (const f of st.allFolders()) {
+                        if (st.subfoldersOf(f).length) next.add(f);
+                    }
+                } catch (e) { /* silent */ }
+                st.collapsedFolders = next;
+                st.persistCollapsed?.();
+                renderTree();
+                render();
+            };
+            st.expandAllFolders = () => {
+                st.collapsedFolders = new Set();
+                st.persistCollapsed?.();
+                renderTree();
+                render();
+            };
+            // v1.74.3 (§70): ОДНА кнопка вместо пары. Считаем только свёрнутые
+            // папки С ПОДПАПКАМИ — лист в наборе ничего не скрывает, и подпись
+            // «Развернуть» на пустом визуально дереве врала бы.
+            st.collapsibleCollapsedCount = () => {
+                let n = 0;
+                try {
+                    for (const f of st.collapsedFolders) {
+                        if (st.subfoldersOf(f).length) n++;
+                    }
+                } catch (e) { /* silent */ }
+                return n;
+            };
+            st.syncCollapseToggle = () => {
+                const on = st.collapsibleCollapsedCount() > 0;
+                // v1.74.4 (§71): глиф отражает действие, а не состояние визуала.
+                st.collapseToggleBtn.textContent = on ? "⊞" : "⊟";
+                st.collapseToggleBtn.title = on ? "Развернуть все папки" : "Свернуть все папки";
+            };
+            st.toggleCollapseAll = () => {
+                if (st.collapsibleCollapsedCount() > 0) st.expandAllFolders();
+                else st.collapseAllFolders();
+            };
 
             newFolderBtn.onclick = async () => {
                 const parent = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
@@ -5930,6 +6163,29 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
                 } else if (aw && sw && ((sw.value || "") !== "" || (typeof arr[1] === "string" && arr[1] !== ""))) {
                     const src = (sw.value || "") || arr[1];
                     if (aw.value !== src) aw.value = src;
+                }
+            } catch (e) { /* silent */ }
+            // v1.74.1 (§68): свёрнутые папки — из properties графа (смена
+            // воркфлоу, открытие из PNG). info.properties — то, что сохранил
+            // LiteGraph; this.properties — уже применённая копия. Если ключа
+            // нет у СТАРОГО воркфлоу — честно пустой набор; если info вообще
+            // без properties (внутренние вызовы) — сессионное состояние не
+            // трогаем, чтобы не стереть его на пустом месте.
+            try {
+                const st = this._pl;
+                if (st) {
+                    const props = (info && info.properties) || {};
+                    let raw = props.pl_collapsed_folders;
+                    if (raw == null && this.properties) raw = this.properties.pl_collapsed_folders;
+                    if (Array.isArray(raw)) {
+                        st.collapsedFolders = new Set(raw.filter((x) => typeof x === "string"));
+                    } else if (info && info.properties) {
+                        st.collapsedFolders = new Set();
+                    }
+                    if (!this.properties) this.properties = {};
+                    this.properties.pl_collapsed_folders = [...st.collapsedFolders];
+                    st.renderTree?.();
+                    st.render?.();
                 }
             } catch (e) { /* silent */ }
             // v1.62: РАЗРЕШИТЬ сессионное состояние окна теста. Порядок важен:

@@ -3376,11 +3376,17 @@ await run("v1.48: ряд экспорта/импорта — в шапке пр�
     st.importBtn.disabled !== true
       && String(st.importBtn.style.cssText).includes("cursor:pointer"),
     String(st.importBtn.style.cssText));
-  // Дерево больше не несёт кнопок экспорта: только «+ Категория»
+  // Дерево не несёт кнопок экспорта. v1.74.2 (§2.3): контракт шапки
+  // расширен задачей «свернуть все/развернуть все», в v1.74.3 — одна
+  // кнопка-переключатель, в v1.74.4 (§2.3) подпись заменена ПИКТОГРАММОЙ
+  // (по отчёту пользователя «плохо выглядит… пусть будет пиктограмма,
+  // желтая»): в шапке ровно две кнопки — ⊟/⊞ (динамический глиф) и
+  // «+ Категория».
   const treeHead = st.tree.parentNode.children[0];
   const headTexts = treeHead.children[1].children.map((b) => b.textContent);
-  check("в шапке проводника осталась только «+ Категория»",
-    headTexts.length === 1 && headTexts[0] === "+ Категория", headTexts.join(","));
+  check("в шапке проводника — пиктограмма ⊟ и «+ Категория», без экспорта",
+    headTexts.length === 2 && headTexts[0] === "⊟"
+      && headTexts[1] === "+ Категория", headTexts.join(","));
 });
 
 await run("v1.46: галерея категории — зеркало обложек + prompt_library.html в корне", async () => {
@@ -5367,9 +5373,15 @@ await run("v1.73: cat_pick — двойной клик выбирает папк
   const mkP = rowK2 && rowK2.children[0];
   // Стиль читаем целиком из cssText: стаб style не парсит строку в свойства
   // (width/height как отдельные поля в стабе пусты всегда).
+  // v1.74.5 (§72, задача пользователя): точка заменена ВЕРТИКАЛЬНОЙ
+  // ПОЛОСКОЙ 4×13 #b388ff — такой же, как у синей и зелёной, чтобы
+  // фиолетовый маркер переживал сворачивание предка (§67) и на
+  // свёрнутом родителе читался как ТРЕТЬЯ линия из трёх. Контракт
+  // точки (6px/круг) снят — правка теста по §2.3, а не откат задачи.
   const mkCss = String((mkP && mkP.style && mkP.style.cssText) || "");
-  check("v1.73: метка-кружок 6px первым ребёнком строки",
-    !!(mkP && mkCss.includes("width:6px") && mkCss.includes("border-radius:50%")),
+  check("v1.73: метка — вертикальная полоска 4×13 #b388ff первым ребёнком (v1.74.5)",
+    !!(mkP && mkCss.includes("width:4px") && mkCss.includes("height:13px")
+      && mkCss.includes("background:#b388ff") && !mkCss.includes("border-radius:50%")),
     mkCss);
   check("v1.73: подсказка метки — «Путь категории»",
     !!(mkP && String(mkP.title || "").includes("Путь категории")),
@@ -5767,6 +5779,481 @@ await run("v1.73.7: папка с карточкой вывода И карто�
     !markChildOf("Рабочая", "#4a9eff") && !markChildOf("Рабочая", "#7fe0a8"),
     "blue=" + !!markChildOf("Рабочая", "#4a9eff") + " green=" + !!markChildOf("Рабочая", "#7fe0a8"));
   st.markFolders.clear();
+});
+
+// v1.74.0 (§67): сворачивание папок проводника + УМНАЯ маркировка.
+// Отчёт пользователя: «библиотека разрослась, проводник справа не позволяет
+// сворачивать подпапки и папки подпапок — очень длинная структура». Контракт:
+// (1) у папки с детьми есть переключатель ▾/▸, клик сворачивает её потомков
+// (сама строка остаётся видимой), Ctrl/двойной клик/выбор папки не трогаются;
+// (2) маркеры (синяя — основной промпт, зелёная — карточка на выходе) стоят на
+// ТОЧНОЙ папке, пока она видима, и ПОДНИМАЮТСЯ на ближайшую ВИДИМУЮ папку,
+// когда точная скрыта свёрнутым предком — «чтобы не остаться без маркеров»;
+// (3) дубли схлопываются: несколько карточек в разных скрытых папках дают ОДИН
+// маркер на свёрнутом предке, а не гирлянду. КРАСНОЕ до правки: ни
+// `collapsedFolders`, ни переключателя, ни подъёма маркеров нет.
+await run("v1.74.0: сворачивание папок + маркер на ближайшей видимой папке", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(
+    mkSlotEntry("m1", "Галерея/Природа/Леса"),
+    mkSlotEntry("m2", "Галерея/Природа/Леса"),
+    mkSlotEntry("m3", "Галерея/Природа"),
+    mkSlotEntry("m4", "Галерея/Архив"));
+  st.folders.push("Галерея", "Галерея/Природа", "Галерея/Природа/Леса", "Галерея/Архив");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  const activeW = node.widgets.find((w) => w.name === "active");
+  // Синяя: m1 — в глубокой папке «Леса». Зелёная: m2 — карточка на выходе
+  // (та же «Леса»). m3 (выход в «Природа») привязывается позже — им проверяется
+  // схлопывание ДВУХ зелёных в ОДНУ полоску на свёрнутом предке.
+  activeW.value = "m1";
+  await st.plDrop({ kind: "entry", ids: ["m2"], id: "m2" }, "__outs");
+  st.renderTree(); st.render();
+
+  const rowOf = (leaf) => st.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(leaf) && (t.includes("📍") || t.includes("📌"));
+  });
+  const barsOf = (leaf, color) => {
+    const r = rowOf(leaf);
+    return r ? r.children.filter((c) => String(c.style?.cssText || "").includes("background:" + color)) : [];
+  };
+  const hasBar = (leaf, color) => barsOf(leaf, color).length > 0;
+  const arrowOf = (leaf) => {
+    const r = rowOf(leaf);
+    return r ? r.children.find((c) => ["▼", "▶"].includes(String(c.textContent || ""))) : null;
+  };
+  const arrowText = (leaf) => {
+    const a = arrowOf(leaf);
+    return a ? String(a.textContent || "") : "";
+  };
+  const clickArrow = (leaf) => {
+    const a = arrowOf(leaf);
+    if (a && a.onclick) a.onclick({ stopPropagation() {} });
+  };
+
+  // Сани: контейнер свёрнутых папок существует и пуст на свежей ноде.
+  // instanceof Set здесь не годится: st создан в vm-контексте, у него
+  // СВОЙ Set — проверяем набор по поведению (has/size), а не по роду.
+  check("v1.74.0: состояние свёрнутых папок — Set и пусто на свежей ноде",
+    !!st.collapsedFolders && typeof st.collapsedFolders.has === "function"
+      && st.collapsedFolders.size === 0,
+    String(st.collapsedFolders));
+  // Все 4 папки видны; маркеры — на ТОЧНОЙ папке, без предков (прежний контракт).
+  check("v1.74.0: развёрнутое дерево показывает все папки",
+    ["Галерея", "Природа", "Леса", "Архив"].every((x) => !!rowOf(x)),
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+  check("v1.74.0: маркеры на точной папке «Леса» (синяя+зелёная), у предков — нет",
+    hasBar("Леса", "#4a9eff") && hasBar("Леса", "#7fe0a8")
+      && !hasBar("Природа", "#4a9eff") && !hasBar("Природа", "#7fe0a8")
+      && !hasBar("Галерея", "#4a9eff") && !hasBar("Галерея", "#7fe0a8"),
+    "Леса blue=" + hasBar("Леса", "#4a9eff") + " green=" + hasBar("Леса", "#7fe0a8")
+      + " Природа green=" + hasBar("Природа", "#7fe0a8"));
+  // Переключатель есть только у папок с детьми; у листа — нет.
+  check("v1.74.0: ▼ у папки с подпапками, у листа переключателя нет",
+    arrowText("Галерея") === "▼" && arrowText("Природа") === "▼"
+      && !arrowText("Леса") && !arrowText("Архив"),
+    "Галерея=" + arrowText("Галерея") + " Природа=" + arrowText("Природа")
+      + " Леса=" + (arrowText("Леса") || "—"));
+
+  // Сворачиваем «Природу»: «Леса» исчезает, маркеры поднимаются на «Природу».
+  clickArrow("Природа");
+  check("v1.74.0: клик по ▾ свернул подпапку (Леса скрыта)",
+    !rowOf("Леса") && !!rowOf("Природа"),
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+  check("v1.74.0: маркеры скрытой «Леса» поднялись на видимую «Природу»",
+    hasBar("Природа", "#4a9eff") && hasBar("Природа", "#7fe0a8"),
+    "Природа blue=" + hasBar("Природа", "#4a9eff") + " green=" + hasBar("Природа", "#7fe0a8"));
+  check("v1.74.0: маркер НЕ дублируется на корневой папке, пока видна «Природа»",
+    !hasBar("Галерея", "#4a9eff") && !hasBar("Галерея", "#7fe0a8"),
+    "Галерея blue=" + hasBar("Галерея", "#4a9eff") + " green=" + hasBar("Галерея", "#7fe0a8"));
+  check("v1.74.0: клик ▾ не меняет выбранную папку (selFolder)",
+    st.selFolder === "__all", String(st.selFolder));
+  // Состояние переживает перерисовку.
+  st.renderTree(); st.render();
+  check("v1.74.0: свёрнутость переживает перерисовку (Леса по-прежнему скрыта)",
+    !rowOf("Леса") && hasBar("Природа", "#4a9eff"),
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+
+  // Возврат к точным маркерам: разворачиваем «Природу».
+  clickArrow("Природа");
+  check("v1.74.0: после разворота маркеры снова на ТОЧНОЙ «Леса», предки чистые",
+    hasBar("Леса", "#4a9eff") && hasBar("Леса", "#7fe0a8")
+      && !hasBar("Природа", "#4a9eff") && !hasBar("Природа", "#7fe0a8")
+      && !hasBar("Галерея", "#4a9eff") && !hasBar("Галерея", "#7fe0a8"),
+    "Леса blue=" + hasBar("Леса", "#4a9eff") + " green=" + hasBar("Леса", "#7fe0a8"));
+
+  // Вторая зелёная — m3 в «Природа». Развёрнутое дерево: две точные зелёные.
+  await st.plDrop({ kind: "entry", ids: ["m3"], id: "m3" }, "__outs");
+  st.renderTree(); st.render();
+  check("v1.74.0: две зелёные в разных папках — на каждой своей ТОЧНОЙ папке",
+    barsOf("Леса", "#7fe0a8").length === 1 && barsOf("Природа", "#7fe0a8").length === 1
+      && !hasBar("Галерея", "#7fe0a8"),
+    "Леса green=" + barsOf("Леса", "#7fe0a8").length
+      + " Природа green=" + barsOf("Природа", "#7fe0a8").length);
+  // Сворачиваем «Природу»: её собственная зелёная + поднятая из «Леса» — одна.
+  clickArrow("Природа");
+  check("v1.74.0: на свёрнутой «Природа» — ровно ОДНА синяя и ОДНА зелёная полоска",
+    barsOf("Природа", "#4a9eff").length === 1 && barsOf("Природа", "#7fe0a8").length === 1,
+    "blue=" + barsOf("Природа", "#4a9eff").length + " green=" + barsOf("Природа", "#7fe0a8").length);
+
+  // Сворачиваем корень: видна только «Галерея», маркеры поднимаются на неё.
+  // (Свёрнутость «Природы» при этом остаётся в наборе — при развороте корня
+  // «Природа» снова окажется свёрнутой, как её оставили.)
+  clickArrow("Галерея");
+  check("v1.74.0: свёрнутый корень скрыл подпапки (Природа и Архив не видны)",
+    !!rowOf("Галерея") && !rowOf("Природа") && !rowOf("Архив") && !rowOf("Леса"),
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+  check("v1.74.0: на свёрнутом корне — синяя и РОВНО ОДНА зелёная полоска",
+    barsOf("Галерея", "#4a9eff").length === 1 && barsOf("Галерея", "#7fe0a8").length === 1,
+    "blue=" + barsOf("Галерея", "#4a9eff").length + " green=" + barsOf("Галерея", "#7fe0a8").length);
+  // Разворачиваем корень: «Природа» видна и осталась свёрнутой → маркеры на ней.
+  clickArrow("Галерея");
+  check("v1.74.0: разворот корня вернул «Природу» (свёрнутой) с её маркерами",
+    !!rowOf("Природа") && !rowOf("Леса")
+      && hasBar("Природа", "#4a9eff") && hasBar("Природа", "#7fe0a8")
+      && !hasBar("Галерея", "#4a9eff") && !hasBar("Галерея", "#7fe0a8"),
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+  check("v1.74.0: у развёрнутого корня ▼, у свёрнутой «Природы» ▶",
+    arrowText("Галерея") === "▼" && arrowText("Природа") === "▶",
+    "Галерея=" + (arrowText("Галерея") || "—") + " Природа=" + (arrowText("Природа") || "—"));
+  // Финальный разворот: точные маркеры на своих папках.
+  clickArrow("Природа");
+  check("v1.74.0: финальный разворот — точные маркеры (Леса/Природа), предки чистые",
+    barsOf("Леса", "#4a9eff").length === 1 && barsOf("Леса", "#7fe0a8").length === 1
+      && barsOf("Природа", "#7fe0a8").length === 1 && !hasBar("Природа", "#4a9eff")
+      && !hasBar("Галерея", "#4a9eff") && !hasBar("Галерея", "#7fe0a8"),
+    "Леса blue=" + barsOf("Леса", "#4a9eff").length + " green=" + barsOf("Леса", "#7fe0a8").length
+      + " Природа blue=" + barsOf("Природа", "#4a9eff").length + " green=" + barsOf("Природа", "#7fe0a8").length);
+});
+
+// v1.74.5 (§72, отчёт пользователя): «при сворачивании маркеры зелёный и
+// синий остаются в корневой папке, но фиолетового (путь категории) — нет».
+// Контракт: (1) фиолетовая метка cat_pick — ВЕРТИКАЛЬНАЯ ПОЛОСКА 4×13
+// #b388ff (вместо точки 6px), как у синей и зелёной; (2) она входит в
+// общий массив `bars` и ПОДНИМАЕТСЯ на ближайшую видимую папку через
+// `activeFolderMarks`/`collapseRep` (§67), как синяя и зелёная — на
+// свёрнутом предке видны ТРИ полоски в порядке 🟦🩵🟪; (3) `marked` (☑)
+// гасит, как и прежде. КРАСНОЕ до правки JS: фиолетовый — кружок вне
+// `bars`, подъёма нет (у предка только синяя+зелёная).
+await run("v1.74.5: фиолетовый маркер — полоска, поднимается на свёрнутого предка (три полоски)", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(
+    mkSlotEntry("m1", "Галерея/Природа/Леса"),
+    mkSlotEntry("m2", "Галерея/Природа/Леса"));
+  st.folders.push("Галерея", "Галерея/Природа", "Галерея/Природа/Леса");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  const activeW = node.widgets.find((w) => w.name === "active");
+  const cpW = node.widgets.find((w) => w.name === "cat_pick");
+  // Три статуса на ОДНОЙ глубокой папке: синяя (m1 — основной промпт),
+  // зелёная (m2 — карточка на выходе), фиолетовая (путь категории).
+  activeW.value = "m1";
+  await st.plDrop({ kind: "entry", ids: ["m2"], id: "m2" }, "__outs");
+  cpW.value = "Галерея/Природа/Леса";
+  st.renderTree(); st.render();
+  const rowOf = (leaf) => st.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(leaf) && (t.includes("📍") || t.includes("📌"));
+  });
+  // barsOf строгий: именно полоска 4×13 — кружок 6px фаза НЕ считает
+  // маркером (мутация «вернуть кружок» обязана быть красной).
+  const barsOf = (leaf, color) => {
+    const r = rowOf(leaf);
+    return r ? r.children.filter((c) => {
+      const s = String(c.style?.cssText || "");
+      return s.includes("background:" + color)
+        && s.includes("width:4px") && s.includes("height:13px");
+    }) : [];
+  };
+  const hasBar = (leaf, color) => barsOf(leaf, color).length > 0;
+  const posOf = (leaf, color) => {
+    const r = rowOf(leaf);
+    return r ? [...(r.children || [])].findIndex((c) => {
+      const s = String(c.style?.cssText || "");
+      return s.includes("background:" + color)
+        && s.includes("width:4px") && s.includes("height:13px");
+    }) : -1;
+  };
+  const clickArrow = (leaf) => {
+    const r = rowOf(leaf);
+    const a = r && r.children.find((c) => ["▼", "▶"].includes(String(c.textContent || "")));
+    if (a && a.onclick) a.onclick({ stopPropagation() {} });
+  };
+  // Развёрнутое дерево: полоска на ТОЧНОЙ «Леса», предки чистые.
+  check("v1.74.5: точная «Леса» несёт фиолетовую ПОЛОСКУ (не кружок)",
+    barsOf("Леса", "#b388ff").length === 1,
+    "purple=" + barsOf("Леса", "#b388ff").length);
+  check("v1.74.5: у предков фиолетовой нет, пока «Леса» видима",
+    !hasBar("Природа", "#b388ff") && !hasBar("Галерея", "#b388ff"),
+    "Природа=" + hasBar("Природа", "#b388ff") + " Галерея=" + hasBar("Галерея", "#b388ff"));
+  // Три статуса СОСУЩЕСТВУЮТ: три полоски, порядок синяя < зелёная < фиолетовая.
+  check("v1.74.5: на точной «Леса» — три полоски (синяя+зелёная+фиолетовая)",
+    barsOf("Леса", "#4a9eff").length === 1 && barsOf("Леса", "#7fe0a8").length === 1
+      && barsOf("Леса", "#b388ff").length === 1,
+    "blue=" + barsOf("Леса", "#4a9eff").length + " green=" + barsOf("Леса", "#7fe0a8").length
+      + " purple=" + barsOf("Леса", "#b388ff").length);
+  check("v1.74.5: порядок — синяя < зелёная < фиолетовая",
+    posOf("Леса", "#4a9eff") >= 0 && posOf("Леса", "#7fe0a8") >= 0
+      && posOf("Леса", "#b388ff") >= 0
+      && posOf("Леса", "#4a9eff") < posOf("Леса", "#7fe0a8")
+      && posOf("Леса", "#7fe0a8") < posOf("Леса", "#b388ff"),
+    "blue=" + posOf("Леса", "#4a9eff") + " green=" + posOf("Леса", "#7fe0a8")
+      + " purple=" + posOf("Леса", "#b388ff"));
+  // Сворачиваем «Природу» — все три маркера поднимаются на неё.
+  clickArrow("Природа");
+  check("v1.74.5: на свёрнутой «Природа» — ТРИ полоски (каждой по одной)",
+    barsOf("Природа", "#4a9eff").length === 1 && barsOf("Природа", "#7fe0a8").length === 1
+      && barsOf("Природа", "#b388ff").length === 1,
+    "blue=" + barsOf("Природа", "#4a9eff").length + " green=" + barsOf("Природа", "#7fe0a8").length
+      + " purple=" + barsOf("Природа", "#b388ff").length);
+  check("v1.74.5: порядок на предке — синяя < зелёная < фиолетовая",
+    posOf("Природа", "#4a9eff") >= 0 && posOf("Природа", "#7fe0a8") >= 0
+      && posOf("Природа", "#b388ff") >= 0
+      && posOf("Природа", "#4a9eff") < posOf("Природа", "#7fe0a8")
+      && posOf("Природа", "#7fe0a8") < posOf("Природа", "#b388ff"),
+    "blue=" + posOf("Природа", "#4a9eff") + " green=" + posOf("Природа", "#7fe0a8")
+      + " purple=" + posOf("Природа", "#b388ff"));
+  check("v1.74.5: корень «Галерея» чист — маркер один раз, на «Природа»",
+    !hasBar("Галерея", "#4a9eff") && !hasBar("Галерея", "#7fe0a8")
+      && !hasBar("Галерея", "#b388ff"),
+    "Галерея blue=" + hasBar("Галерея", "#4a9eff") + " green=" + hasBar("Галерея", "#7fe0a8")
+      + " purple=" + hasBar("Галерея", "#b388ff"));
+  // Охранитель контракта marked (☑): гасит ВСЕ три полоски.
+  st.markFolders.add("Галерея/Природа");
+  st.renderTree(); st.render();
+  check("v1.74.5: marked (☑) гасит все три полоски",
+    !hasBar("Природа", "#4a9eff") && !hasBar("Природа", "#7fe0a8")
+      && !hasBar("Природа", "#b388ff"),
+    "blue=" + hasBar("Природа", "#4a9eff") + " green=" + hasBar("Природа", "#7fe0a8")
+      + " purple=" + hasBar("Природа", "#b388ff"));
+  st.markFolders.clear();
+  // Разворот: фиолетовая возвращается на ТОЧНУЮ «Леса», предки чистые.
+  clickArrow("Природа");
+  st.renderTree(); st.render();
+  check("v1.74.5: разворот вернул фиолетовую на точную «Леса», предки чистые",
+    barsOf("Леса", "#b388ff").length === 1 && !hasBar("Природа", "#b388ff")
+      && !hasBar("Галерея", "#b388ff"),
+    "Леса=" + barsOf("Леса", "#b388ff").length + " Природа=" + hasBar("Природа", "#b388ff")
+      + " Галерея=" + hasBar("Галерея", "#b388ff"));
+});
+
+// v1.74.1 (§68, отчёт пользователя): «стрелки очень мелкие, едва видно» и
+// «при переключении на другой воркфлоу и возвращении папки сразу
+// разворачиваются — без запоминания состояния идея не работает».
+// Контракт: (1) стрелка — крупный залитый треугольник ▼/▶, font-size ≥ 11px;
+// (2) свёрнутость живёт в `node.properties.pl_collapsed_folders` (LiteGraph
+// сериализует properties в воркфлоу) и восстанавливается в onConfigure после
+// смены воркфлоу. КРАСНОЕ до правки: глиф ▾ 9px, persistence нет вовсе.
+await run("v1.74.1: стрелка читаемая + свёрнутость переживает смену воркфлоу", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("q1", "Галерея/Природа/Леса"));
+  st.folders.push("Галерея", "Галерея/Природа", "Галерея/Природа/Леса", "Галерея/Архив");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  const rowOf = (leaf) => st.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(leaf) && (t.includes("📍") || t.includes("📌"));
+  });
+  const arrowOf = (leaf) => {
+    const r = rowOf(leaf);
+    return r ? r.children.find((c) => ["▼", "▶", "▾", "▸"].includes(String(c.textContent || ""))) : null;
+  };
+  const clickArrow = (leaf) => {
+    const a = arrowOf(leaf);
+    if (a && a.onclick) a.onclick({ stopPropagation() {} });
+  };
+  const arrowCss = (leaf) => String(arrowOf(leaf)?.style?.cssText || "");
+  const fontSizeOf = (leaf) => {
+    const m = /font-size:(\d+)px/.exec(arrowCss(leaf));
+    return m ? Number(m[1]) : 0;
+  };
+  // Читаемость: залитый треугольник и размер не меньше 11px.
+  check("v1.74.1: стрелка — крупный залитый треугольник ▼/▶",
+    ["▼", "▶"].includes(String(arrowOf("Галерея")?.textContent || "")),
+    "glyph=" + String(arrowOf("Галерея")?.textContent || "нет"));
+  // v1.74.2 (§2.3): контракт размера изменён по задаче «−20%»: было 12px →
+  // стало 10px. Проверка держит нижнюю границу читаемости (10px), чтобы
+  // откат к прежним 9px контурным не прошёл молча.
+  check("v1.74.1: стрелка не мельче 10px", fontSizeOf("Галерея") >= 10,
+    "css=" + (arrowCss("Галерея") || "нет"));
+
+  // Сворачиваем подпапку — состояние обязано попасть в properties ноды.
+  clickArrow("Природа");
+  check("v1.74.1: свёрнутость записана в node.properties.pl_collapsed_folders",
+    !!(node.properties && Array.isArray(node.properties.pl_collapsed_folders)
+      && node.properties.pl_collapsed_folders.includes("Галерея/Природа")),
+    JSON.stringify(node.properties && node.properties.pl_collapsed_folders));
+
+  // Смена воркфлоу и возврат: новая нода + onConfigure с теми же properties.
+  const node2 = mkSlotNode();
+  const st2 = node2._pl;
+  addSlotEnv(node2);
+  st2.entries.push(mkSlotEntry("q1", "Галерея/Природа/Леса"));
+  st2.folders.push("Галерея", "Галерея/Природа", "Галерея/Природа/Леса", "Галерея/Архив");
+  st2.selWidget = node2.widgets.find((w) => w.name === "selected");
+  st2.selWidget.value = "";
+  st2.detailId = null;
+  st2.selFolder = "__all";
+  // На старом коде properties ещё нет — пустой массив, чтобы фаза дошла до
+  // последних проверок и записала ВСЕ провалы, а не упала на TypeError.
+  const savedProps = (node.properties && Array.isArray(node.properties.pl_collapsed_folders))
+    ? node.properties.pl_collapsed_folders.slice() : [];
+  node2.properties = { pl_collapsed_folders: savedProps };
+  proto.onConfigure.call(node2, {
+    properties: node2.properties,
+    widgets_values: ["📥 Запись", "", "", "", "[]"],
+    widgets_values_named: {},
+  });
+  st2.renderTree(); st2.render();
+  const rowOf2 = (leaf) => st2.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(leaf) && (t.includes("📍") || t.includes("📌"));
+  });
+  check("v1.74.1: после onConfigure свёрнутая папка восстановлена",
+    !!st2.collapsedFolders && st2.collapsedFolders.has("Галерея/Природа"),
+    String(st2.collapsedFolders && [...st2.collapsedFolders]));
+  check("v1.74.1: в дереве после возврата «Леса» скрыта, «Природа» видна",
+    !!rowOf2("Природа") && !rowOf2("Леса"),
+    st2.tree.children.map((r) => ftext(r)).join(" ; "));
+});
+
+// v1.74.4 (§71, отчёт пользователя «плохо выглядит, пусть будет пиктограмма,
+// желтая»): контракт одной кнопки v1.74.3 сохранён, подпись заменена
+// динамической ПИКТОГРАММОЙ на жёлтой кнопке:
+// (1) стрелка — font-size 10px (решение v1.74.2 сохранено), залитый ▼/▶;
+// (2) в шапке проводника («📁 Категории», перед «+ Категория») — ОДНА
+// кнопка-переключатель с жёлтой пиктограммой: ничего не свёрнуто → ⊟
+// (свернуть все папки с подпапками), есть свёрнутое → ⊞ (развернуть всё).
+// Глиф и жёлтый цвет — то, что читается и на узкой ноде, и в двух строках
+// не растёт; синхронизация в renderTree, как в v1.74.3;
+// (3) отдельной второй кнопки (expandAllBtn) больше нет;
+// (4) состояние пишется в node.properties и переживает смену воркфлоу (v1.74.1).
+await run("v1.74.4: одна кнопка с жёлтой пиктограммой ⊟/⊞", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("z1", "КореньA/Под1/Глубже"));
+  st.folders.push("КореньA", "КореньA/Под1", "КореньA/Под1/Глубже",
+    "КореньB", "КореньB/ПодB");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  node.widgets.find((w) => w.name === "active").value = "z1";
+  st.renderTree(); st.render();
+  const rowOf = (leaf) => st.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(leaf) && (t.includes("📍") || t.includes("📌"));
+  });
+  const arrowOf = (leaf) => {
+    const r = rowOf(leaf);
+    return r ? r.children.find((c) => ["▼", "▶"].includes(String(c.textContent || ""))) : null;
+  };
+  const arrowSize = (leaf) => {
+    const m = /font-size:(\d+(?:\.\d+)?)px/.exec(String(arrowOf(leaf)?.style?.cssText || ""));
+    return m ? Number(m[1]) : 0;
+  };
+  const hasBar = (leaf, color) => {
+    const r = rowOf(leaf);
+    return !!r && r.children.some((c) => String(c.style?.cssText || "").includes("background:" + color));
+  };
+
+  // Размер: −20% от 12px = 10px (решение v1.74.2 сохранено).
+  check("v1.74.3: стрелка уменьшена до 10px (было 12)", arrowSize("КореньA") === 10,
+    "font-size=" + arrowSize("КореньA"));
+
+  // Кнопка ОДНА, с пиктограммой, стоит в шапке проводника перед «+ Категория».
+  const tb = st.collapseToggleBtn;
+  check("v1.74.4: в шапке одна кнопка-переключатель (вторая удалена)",
+    !!tb && st.expandAllBtn === undefined,
+    "toggle=" + (tb ? "есть" : "нет") + " / expandAllBtn=" + st.expandAllBtn);
+  check("v1.74.4: кнопка стоит в шапке проводника перед «+ Категория»",
+    !!tb && st.treeHead.contains(tb) && tb.parentNode === st.newFolderBtn.parentNode
+      && tb.parentNode.children.indexOf(tb) < tb.parentNode.children.indexOf(st.newFolderBtn),
+    tb ? "есть" : "нет");
+  check("v1.74.4: до клика — пиктограмма ⊟ и подсказка «Свернуть все папки»",
+    !!tb && tb.textContent === "⊟" && /Свернуть все/i.test(tb.title),
+    (tb && tb.textContent) + " / " + (tb && tb.title));
+  check("v1.74.4: пиктограмма ЖЁЛТАЯ (#e8c33a), кнопка не сжимается",
+    !!tb && String(tb.style?.cssText || "").includes("color:#e8c33a")
+      && String(tb.style?.cssText || "").includes("flex-shrink:0"),
+    String(tb && tb.style && tb.style.cssText || ""));
+
+  // v1.74.2 (§69.2): на минимальной ширине ноды (MIN_W 470, дерево 34%)
+  // шапка не должна ломать подписи: заголовок сжимается с многоточием, а
+  // кнопки имеют flex-shrink:0 (принцип v1.53 — режется подпись, не кнопки).
+  const titleCss = String(st.treeTitle?.style?.cssText || "");
+  const btnsCss = String(st.treeHeadBtns?.style?.cssText || "");
+  check("v1.74.4: заголовок шапки сжимается с многоточием (min-width:0)",
+    titleCss.includes("min-width:0") && titleCss.includes("text-overflow:ellipsis")
+      && titleCss.includes("white-space:nowrap"),
+    titleCss || "нет стиля");
+  check("v1.74.4: группа кнопок и «+ Категория» не сжимаются (flex-shrink:0)",
+    btnsCss.includes("flex-shrink:0")
+      && String(st.newFolderBtn?.style?.cssText || "").includes("flex-shrink:0"),
+    "btns=" + (btnsCss || "нет") + " / new=" + String(st.newFolderBtn?.style?.cssText || ""));
+
+  // Сани: до клика всё развёрнуто, маркер на точной глубокой папке.
+  check("v1.74.4: до клика видны все папки, маркер на «Глубже»",
+    !!rowOf("Глубже") && !!rowOf("ПодB") && hasBar("Глубже", "#4a9eff"),
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+
+  // Первый клик — свернуть всё: видны только корневые папки, маркер поднялся.
+  if (tb && tb.onclick) tb.onclick({ stopPropagation() {} });
+  check("v1.74.4: клик свернул всё до корневых папок",
+    !!rowOf("КореньA") && !!rowOf("КореньB")
+      && !rowOf("Под1") && !rowOf("Глубже") && !rowOf("ПодB"),
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+  check("v1.74.4: свёрнуты только папки с подпапками (листы не в наборе)",
+    st.collapsedFolders.has("КореньA") && st.collapsedFolders.has("КореньA/Под1")
+      && st.collapsedFolders.has("КореньB")
+      && !st.collapsedFolders.has("Глубже") && !st.collapsedFolders.has("КореньB/ПодB"),
+    JSON.stringify([...st.collapsedFolders]));
+  check("v1.74.4: маркер скрытой глубокой папки поднялся на «КореньA»",
+    hasBar("КореньA", "#4a9eff") && !hasBar("Глубже", "#4a9eff"),
+    "КореньA blue=" + hasBar("КореньA", "#4a9eff"));
+  check("v1.74.4: состояние записано в node.properties",
+    !!(node.properties && Array.isArray(node.properties.pl_collapsed_folders)
+      && node.properties.pl_collapsed_folders.includes("КореньA")),
+    JSON.stringify(node.properties && node.properties.pl_collapsed_folders));
+  check("v1.74.4: после сворачивания пиктограмма сменилась на ⊞ (развернуть)",
+    !!tb && tb.textContent === "⊞" && /Развернуть все/i.test(tb.title),
+    (tb && tb.textContent) + " / " + (tb && tb.title));
+
+  // Повторный клик той же кнопки — развернуть всё.
+  if (tb && tb.onclick) tb.onclick({ stopPropagation() {} });
+  check("v1.74.4: повторный клик очистил набор свёрнутых",
+    st.collapsedFolders.size === 0, JSON.stringify([...st.collapsedFolders]));
+  check("v1.74.4: после разворота видны все папки и маркер на «Глубже»",
+    !!rowOf("Под1") && !!rowOf("Глубже") && !!rowOf("ПодB")
+      && hasBar("Глубже", "#4a9eff") && !hasBar("КореньA", "#4a9eff"),
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+  check("v1.74.4: пустое состояние тоже записано в properties",
+    !!(node.properties && Array.isArray(node.properties.pl_collapsed_folders)
+      && node.properties.pl_collapsed_folders.length === 0),
+    JSON.stringify(node.properties && node.properties.pl_collapsed_folders));
+  check("v1.74.4: пиктограмма вернулась к ⊟ (состояние синхронно)",
+    !!tb && tb.textContent === "⊟", String(tb && tb.textContent));
+
+  // Синхронизация пиктограммы — в рендер-пути, не только в кнопке.
+  const arrowA = arrowOf("КореньB");
+  if (arrowA && arrowA.onclick) arrowA.onclick({ stopPropagation() {} });
+  check("v1.74.4: сворачивание стрелкой папки переключает пиктограмму на ⊞",
+    !!tb && tb.textContent === "⊞", String(tb && tb.textContent));
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
