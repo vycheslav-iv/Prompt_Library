@@ -139,10 +139,13 @@ if (!tuple) {
   bad("не найден возврат result в execute (§40)");
 } else {
   // Первый элемент — обязательно путь категории, а второй — НЕ он.
+  // v1.73.1: путь — только `cat_path` (из cat_pick); возврат фолбэка
+  // (`cat_path or _sanitize_folder_path(folder)`) детектор ловит как
+  // лишний хвост в первом элементе.
   const parts = tuple[1].split(",").map((s) => s.trim());
-  if (!/_sanitize_folder_path\(folder\)/.test(parts[0] || "")) {
+  if (parts[0] !== "cat_path") {
     bad(`порядок выходов не совпадает с RETURN_NAMES (первым ждали путь): ${tuple[1].trim()}`);
-  } else if (/_sanitize_folder_path/.test(parts[1] || "")) {
+  } else if (/cat_path|_sanitize_folder_path/.test(parts[1] || "")) {
     bad(`путь категории отдаётся дважды/вторым — подсказка «промпт 1 (основной)» соврала бы: ${parts[1]}`);
   } else ok("выход 0 — путь категории, выход 1 — текст промпта");
 }

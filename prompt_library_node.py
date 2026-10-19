@@ -1896,8 +1896,8 @@ class PromptLibrary:
         # Совместимость: старые workflow несли folder/category виджетом
         folder = save_folder or kwargs.get("folder", "") or kwargs.get("category", "")
         # v1.73 (§61): путь категории с ДВОЙНОМОГО клика по папке (скрытый
-        # cat_pick пишет JS). Пусто или служебная ветка (санитайзер вернул "") —
-        # фолбэк на путь открытой папки, как раньше.
+        # cat_pick пишет JS). v1.73.1: фолбэк на открытую папку УБРАН — без
+        # выбора выход 0 пуст (одиночный клик его не меняет).
         cp = str(cat_pick or "").strip()
         cat_path = _sanitize_folder_path(cp) if cp else ""
         # Служебные ключи дерева (__all/__fav/__root) — не папки: виджет несёт их
@@ -2159,8 +2159,8 @@ class PromptLibrary:
                 # Порядок = порядок RETURN_NAMES: 0 — путь категории, 1 — основной
                 # текст (prompt_1), дальше доп. слоты 2..11.
                 # v1.73 (§61): выход 0 отдаёт путь категории (cat_pick, двойной
-                # клик по папке); без выбора — прежний путь открытой папки.
-                "result": (cat_path or _sanitize_folder_path(folder), out_text, *slot_texts)}
+                # клик по папке); v1.73.1: без выбора — пусто, без фолбэка.
+                "result": (cat_path, out_text, *slot_texts)}
 
 
 # --- HTTP-endpoints для JS ---------------------------------------------------

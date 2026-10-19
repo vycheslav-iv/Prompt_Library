@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.73.0-category-path-pick";
+    const PL_JS_VERSION = "1.73.2-unlink-circle";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -1692,6 +1692,22 @@ app.registerExtension({
                     renderTree(); render();
                 } catch (e) { /* silent */ }
             };
+            // Кнопка отвязки выхода (v1.73.2): единый тёмный кружок + красный ✕
+            // для строки слота, карточки вывода и битой строки (раньше на
+            // карточках и битых строках был оранжевый ✖, §60.15 — только строка
+            // слота). Оптическая центровка глифа: фикс. 14x14 +
+            // box-sizing:border-box + padding-bottom:1px поднимают чернила ✕
+            // на центр кружка (замер tests/_probe_unlink_center.py: до правки
+            // dy=+0.62..+0.88px — глиф сидел ниже центра).
+            st.mkUnlinkBtn = (extraCss = "") => {
+                const del = document.createElement("button");
+                del.textContent = "✕";
+                del.title = "Отвязать выход (провод отключится, сокет исчезнет)";
+                del.style.cssText = "background:#414141;border:none;border-radius:50%;box-sizing:border-box;width:14px;height:14px;cursor:pointer;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;color:#e05555;padding:0 0 1px;flex-shrink:0;" + extraCss;
+                del.onmouseenter = () => { del.style.background = "#525252"; del.style.color = "#ff6b6b"; };
+                del.onmouseleave = () => { del.style.background = "#414141"; del.style.color = "#e05555"; };
+                return del;
+            };
             // Перетаскивание строки в «Выходах» меняет НОМЕР провода: порядок
             // списка = порядок сокетов, т.е. содержимое едет за позицией, а
             // провода остаются на своих сокетах (им же и адресуют).
@@ -2543,15 +2559,9 @@ const reload = async () => {
                     row.appendChild(num);
                     row.appendChild(name);
                     // Кнопка отвязки. v1.72.11 (§60.15): тёмный кружок с
-                    // красным крестиком вместо оранжевого ✖ (пользователь:
-                    // «темный, но не серый кружок с красным крестиком внутри»).
-                    // Поведение прежнее: stopPropagation + unbindOutSlot.
-                    const del = document.createElement("button");
-                    del.textContent = "✕";
-                    del.title = "Отвязать выход (провод отключится, сокет исчезнет)";
-                    del.style.cssText = "background:#414141;border:none;border-radius:50%;width:14px;height:14px;cursor:pointer;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;color:#e05555;padding:0;flex-shrink:0;";
-                    del.onmouseenter = () => { del.style.background = "#525252"; del.style.color = "#ff6b6b"; };
-                    del.onmouseleave = () => { del.style.background = "#414141"; del.style.color = "#e05555"; };
+                    // красным крестиком; v1.73.2 — единый хелпер с оптической
+                    // центровкой (см. st.mkUnlinkBtn).
+                    const del = st.mkUnlinkBtn();
                     del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
                     row.appendChild(del);
                     st.outSlotDrag(row, idx);
@@ -2717,10 +2727,8 @@ const reload = async () => {
                     body.appendChild(h);
                 }
                 body.appendChild(m);
-                const del = document.createElement("button");
-                del.textContent = "✖";
-                del.title = "Отвязать выход (провод отключится, сокет исчезнет)";
-                del.style.cssText = "background:none;border:none;cursor:pointer;font-size:12px;color:#e08a3c;flex-shrink:0;padding:0 2px;";
+                // v1.73.2: единый кружок-крестик вместо оранжевого ✖ (§60.15).
+                const del = st.mkUnlinkBtn();
                 del.onclick = (ev) => { ev.stopPropagation(); if (slot) st.unbindOutSlot(slot.i); };
                 card.appendChild(img);
                 card.appendChild(body);
@@ -2788,11 +2796,9 @@ const reload = async () => {
                     t.textContent = slot.name || slot.id || "?";
                     m.textContent = "записи нет — выход отдаст «(запись удалена)»";
                 }
-                const del = document.createElement("button");
-                del.textContent = "✖";
-                del.title = "Отвязать выход (провод отключится, сокет исчезнет)";
-                del.style.cssText = "background:none;border:none;cursor:pointer;font-size:13px;color:#e08a3c;flex-shrink:0;"
-                    + (grid ? "align-self:center;" : "");
+                // v1.73.2: единый кружок-крестик вместо оранжевого ✖ (§60.15);
+                // в сетке вертикально центрируем строку.
+                const del = st.mkUnlinkBtn(grid ? "align-self:center;" : "");
                 del.onclick = (ev) => { ev.stopPropagation(); st.unbindOutSlot(slot.i); };
                 body.appendChild(t); body.appendChild(m);
                 row.appendChild(num); row.appendChild(body); row.appendChild(del);

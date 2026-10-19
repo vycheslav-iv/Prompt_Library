@@ -2814,12 +2814,70 @@ await run("slots: рендер «🔌 Выходы» — карточка с п�
   check("мета битой привязки объясняет поведение",
     ghost && ftext(ghost).includes("записи нет"), ghost ? ftext(ghost) : "");
   const delB = ghost && ghost.children[2];
-  check("кнопка ✖ найдена", delB && delB.textContent === "✖");
+  // v1.73.2: контракт кнопки сменился — раньше здесь проверялся текстовый
+  // ✖/оранжевый; теперь это кнопка-кружок (стиль — в фазах v1.73.2 ниже).
+  check("кнопка отвязки найдена (button)", delB && delB.tagName === "BUTTON");
   delB.onclick({ stopPropagation() {} });
   check("✖ отвязала выход", st.outSlotOfEntry("ghost") === null && st.readOutSlots().length === 1);
   check("сокет убран с ноды", node.outputs.length === 3, String(node.outputs.length));
   const stillE1 = st.list.children.find((c) => ftext(c).includes("e1"));
   check("список перерисован без снятого вывода", !!stillE1 && st.outSlotOfEntry("e1") !== null);
+});
+
+// --- v1.73.2 (§60.15-продолжение): кружок-крестик на карточках и битых ---
+// строках вывода (пользователь: «крестики [оранжевые ✖ на карточках] тоже
+// переделать на красный в кружке, такой же как на Выходы») + оптическая
+// центровка крестика (пользователь: «крестик не отцентрован»; замер —
+// tests/_probe_unlink_center.py: dy≈+0.62..+0.88px ниже центра).
+await run("v1.73.2: крестик отвязки карточки вывода — тёмный кружок, не оранжевый ✖", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("e1"));
+  st.entries[0].has_preview = true;
+  st.selFolder = "__all";
+  st.bindOutSlot({ kind: "card", id: "e1", name: "e1" });
+  st.selFolder = "__outs";
+  st.render();
+  const card = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG");
+  const del = card && [...(card.children || [])].find((c) => c.tagName === "BUTTON");
+  const dcss = String(del && del.style ? del.style.cssText : "(нет кнопки)");
+  check("v1.73.2: кнопка отвязки есть на карточке вывода", !!del, dcss.slice(0, 120));
+  check("v1.73.2: карточка — круг (border-radius:50%)", dcss.includes("border-radius:50%"), dcss.slice(0, 200));
+  check("v1.73.2: карточка — фон тёмный #414141", dcss.includes("background:#414141"), dcss.slice(0, 200));
+  check("v1.73.2: карточка — крестик красный #e05555, оранжевого нет",
+    dcss.includes("color:#e05555") && !dcss.includes("#e08a3c"), dcss.slice(0, 200));
+  check("v1.73.2: карточка — глиф ✕/✖", /[✕✖]/.test(String(del ? del.textContent : "")),
+    String(del ? del.textContent : ""));
+  // Охранитель поведения: клик отвязывает карточку (не ломаем wiring).
+  del.onclick({ stopPropagation() {} });
+  check("v1.73.2: клик отвязал карточку (unbindOutSlot)",
+    st.outSlotOfEntry("e1") === null && st.readOutSlots().length === 0,
+    "slots=" + st.readOutSlots().length);
+});
+
+await run("v1.73.2: крестик битой строки вывода — тёмный кружок + оптическая центровка", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selFolder = "__all";
+  st.bindOutSlot({ kind: "card", id: "ghost", name: "ghost" });
+  st.selFolder = "__outs";
+  st.render();
+  const ghost = st.list.children.find((c) => ftext(c).includes("ghost"));
+  const del = ghost && [...(ghost.children || [])].find((c) => c.tagName === "BUTTON");
+  const dcss = String(del && del.style ? del.style.cssText : "(нет кнопки)");
+  check("v1.73.2: кнопка отвязки есть на битой строке", !!del, dcss.slice(0, 120));
+  check("v1.73.2: битая строка — круг (border-radius:50%)", dcss.includes("border-radius:50%"), dcss.slice(0, 200));
+  check("v1.73.2: битая строка — фон тёмный #414141", dcss.includes("background:#414141"), dcss.slice(0, 200));
+  check("v1.73.2: битая строка — крестик красный #e05555, оранжевого нет",
+    dcss.includes("color:#e05555") && !dcss.includes("#e08a3c"), dcss.slice(0, 200));
+  // Оптическая центровка: фикс. 14x14 + border-box, padding-bottom поднимает
+  // глиф на ~0.5px к центру (замер прибором: dy было +0.62..+0.88).
+  check("v1.73.2: box-sizing:border-box (крестик не растит кнопку)",
+    dcss.includes("box-sizing:border-box"), dcss.slice(0, 200));
+  check("v1.73.2: оптическая центровка — padding-bottom:1px",
+    dcss.includes("padding:0 0 1px"), dcss.slice(0, 200));
 });
 
 await run("slots: 10 занято — лишняя привязка предупреждает, дубль молчит", () => {
