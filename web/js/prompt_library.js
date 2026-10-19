@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.73.2-unlink-circle";
+    const PL_JS_VERSION = "1.73.6-gal-card-bright-on";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -2313,6 +2313,20 @@ const reload = async () => {
                             const se = st.entries.find((x) => x.id === aid);
                             zMark = !!(se && se.folder === key);
                         }
+                        // v1.73.4 (§63): ОДИНОЧНАЯ карточка, привязанная к слоту
+                        // «Выходов» (kind === "card") — та же зелёная метка на её
+                        // ТОЧНОЙ папке (без предков, как §60.13). Выше делалась
+                        // только для папки-вывода (folderSlotForPath фильтрует
+                        // kind !== "folder") — отчёт пользователя: «карточка
+                        // подключена, а папка не подсвечена». Выключенная карточка
+                        // (dblclick → off, Python молчит) метки не получает.
+                        if (!zMark) {
+                            for (const s of st.readOutSlots()) {
+                                if (!s || s.kind !== "card" || s.off || !s.id) continue;
+                                const se = st.entries.find((x) => x.id === s.id);
+                                if (se && se.folder === key) { zMark = true; break; }
+                            }
+                        }
                     } catch (e) { /* silent */ }
                 }
                 row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${active ? "#fff" : "#ccc"};background:${marked ? "rgba(224,138,60,.35)" : pick ? "#3a2d66" : active ? activeBg : "transparent"};${marked ? "box-shadow:inset 3px 0 0 #e08a3c;" : pick ? "box-shadow:inset 0 0 0 1px #b388ff;" : active && slotOfFolder ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + depth * 14}px;`;
@@ -2533,8 +2547,12 @@ const reload = async () => {
                     const isActive = isFolder
                         ? st.outsActiveFolder === slot.path
                         : selIdTree === slot.id;
+                    // v1.73.4 (§63): карточка-слот с off (двойной клик выключил —
+                    // Python молчит) затемняется; НЕвыключенная активная строка —
+                    // прежний белый. Цвета галереи/makeOutCard не тронуты (§60.6).
+                    const isOff = !isFolder && !!slot.off;
                     const row = document.createElement("div");
-                    row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${isActive ? "#fff" : "#ccc"};background:${isActive ? "#2e6b4f" : "transparent"};${isActive ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + 14}px;`;
+                    row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${isOff ? "#777" : isActive ? "#fff" : "#ccc"};background:${isActive ? "#2e6b4f" : "transparent"};${isActive ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + 14}px;`;
                     // v1.72.10 (§60.14): зелёный кружок слева от штекера — у
                     // папки-вывода активна карточка (active_id, dblclick →
                     // маршрут 2). Эмодзи 🔌 не перекрашивается CSS-цветом,
@@ -2555,7 +2573,8 @@ const reload = async () => {
                     name.style.cssText = "flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
                     name.textContent = (isFolder ? "📁 " : "") + st.outSlotLabel(slot);
                     name.title = `Выход №${slot.i}: ` + (isFolder ? `папка-вывод «${slot.path}»` : "карточка-вывод")
-                        + " · перетащите строку, чтобы отдать этот текст другому выходу";
+                        + " · перетащите строку, чтобы отдать этот текст другому выходу"
+                        + (isOff ? " · ВЫКЛЮЧЕНА (не выводится) — двойной клик включить обратно" : "");
                     row.appendChild(num);
                     row.appendChild(name);
                     // Кнопка отвязки. v1.72.11 (§60.15): тёмный кружок с
@@ -2585,6 +2604,26 @@ const reload = async () => {
                         st.anchorEntry = slot.id;
                         st.fillDetail(slot.id).then(() => { renderTree(); render(); });
                     };
+                    // v1.73.4 (§63): ДВОЙНОЙ клик по строке карточки-слота —
+                    // тоггл off: карточка молчит (Python off → ""), повторный
+                    // клик включает обратно. Обработчика не было вовсе (два
+                    // клика лишь перерисовывали выбор) — отчёт пользователя:
+                    // «нельзя деактивировать, она всегда выводится». Контекст
+                    // {slot} — маршрут 1/2 activateCard (своя карточка слота).
+                    // Строки ПАПОЧНОГО слота: маршрут 2 на карточках (§60.11),
+                    // сюда не идёт.
+                    if (!isFolder) {
+                        const cardEntry = st.entries.find((x) => x.id === slot.id);
+                        if (cardEntry) {
+                            row.ondblclick = async (ev) => {
+                                if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) return;
+                                st.activateCard(cardEntry, { slot });
+                                await st.fillDetail(cardEntry.id);
+                                renderTree(); render();
+                                if (!st._vuePanes) st.syncNodeSize?.();
+                            };
+                        }
+                    }
                     st.tree.appendChild(row);
                     st.folderOrder.push("__outs_slot_" + slot.i);
                 }
@@ -2690,7 +2729,15 @@ const reload = async () => {
                 // одиночный клик (селект по detailId/sel) → зелёный
                 // #1c3525/#2e6b4f; активация dblclick (fs active_id) →
                 // ярко-зелёный #2e6b4f/#7fe0a8. Активация важнее селекта.
-                const isActive = !!(o.fs && o.fs.active_id === e.id);
+                // v1.73.5 (§64, контракт А): ярко-зелёный и у одиночной
+                // карточки-слота, пока она ВЫВОДИТСЯ (!off) — параллель
+                // active_id папки-вывода и Python-контракта «включена ⇔
+                // выводится». Раньше isActive требовал o.fs, слот-карточка
+                // (:3138) яркого цвета не достигала вовсе — «всегда как при
+                // одиночном клике». o.slot — только слот-контекст (:3138);
+                // fs-карточки (:3117) новое условие не захватывает.
+                const slotOn = !!(o.slot && !o.slot.off);
+                const isActive = !!(o.fs && o.fs.active_id === e.id) || slotOn;
                 const isSel = !!((selWidget && selWidget.value === e.id) || st.detailId === e.id);
                 const card = document.createElement("div");
                 card.draggable = false;
@@ -3135,6 +3182,14 @@ const reload = async () => {
                     const outBind = !!cardSlot0;   // своя привязка к слоту (v1.71-цвет)
                     const outActive = !!folderSlot0; // активный вывод папки-вывода (dblclick)
                     const outMark = outBind || outActive;
+                    // v1.73.6 (§65): контракт А (§64.1) и в проводнике —
+                    // привязанная карточка ЯРКАЯ (#2e6b4f/#7fe0a8), пока она
+                    // ВЫВОДИТСЯ (!off, активна dblclick'ом §63.2). Выключенная
+                    // уходит в ветку outMark → тусклый #1c3525. Яркость важнее
+                    // выделения, как isActive в makeOutCard (§60.8). Раньше
+                    // галерея не различала вкл/выкл вовсе — карточка была
+                    // «в независимости от активности всегда тусклая» (отчёт).
+                    const cardBright = !!(cardSlot0 && !cardSlot0.off);
                     // v1.72.2 (§60.6): цвета галереи дословно как в v1.71
                     // (marked → outMark → selected → серый) плюс ЕДИНСТВЕННОЕ
                     // нововведение v1.72 — цвет активации главной карточки по
@@ -3151,8 +3206,11 @@ const reload = async () => {
                     // fs active_id, folderActOf) в галерее — ЯРКО-зелёная
                     // #2e6b4f/#7fe0a8, как isActive в makeOutCard (§60.8).
                     // Раньше она сливалась с селект-зелёным #1c3525 («обычная,
-                    // не яркая»). Привязка своей карточки к слоту (без
-                    // активации папки) остаётся v1.71-цветом #1c3525.
+                    // не яркая»).
+                    // v1.73.6 (§65): то же яркое правило для ПРИВЯЗАННОЙ
+                    // карточки-слота, пока она !off (cardBright) — прежний
+                    // безусловный v1.71-цвет #1c3525 остался только для
+                    // ВЫКЛЮЧЕННОЙ (outMark-ветка) и для выделения папки.
                     const mainActive = e.id === actVal;
                     const isSelCard = e.id === selVal || st.detailId === e.id;
                     const folderConn = !!(e.folder && st.folderSlotForPath(e.folder));
@@ -3173,11 +3231,11 @@ const reload = async () => {
                     const acct = marked ? "box-shadow:inset 4px 0 0 #e08a3c;" : "";
                     const bg = mainActive
                         ? "#2a5a91"
-                        : marked ? "#4a2f18" : outActive ? "#2e6b4f"
+                        : marked ? "#4a2f18" : outActive || cardBright ? "#2e6b4f"
                         : outMark ? "#1c3525"
                         : isSelCard && folderConn ? "#1c3525"
                         : isSelCard ? "#1e2c44" : "#1e1e1e";
-                    const border = `1px solid ${outActive ? "#7fe0a8" : outMark || (isSelCard && folderConn) ? "#2e6b4f" : (mainActive || isSelCard) ? "#4a9eff" : "#333"}`;
+                    const border = `1px solid ${outActive || cardBright ? "#7fe0a8" : outMark || (isSelCard && folderConn) ? "#2e6b4f" : (mainActive || isSelCard) ? "#4a9eff" : "#333"}`;
                     card.style.cssText = grid
                         ? `display:flex;flex-direction:column;gap:4px;width:${imgSize + 12}px;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}flex-shrink:0;`
                         : `display:flex;gap:6px;align-items:center;padding:4px;border-radius:4px;cursor:pointer;border:${border};background:${bg};${acct}`;

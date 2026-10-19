@@ -2578,6 +2578,15 @@ await run("v1.72.3: одиночный клик в «Выходах» подсв
   const slotCard = st.list.children.find((c) => c.children[0] && c.children[0].tagName === "IMG" && ftext(c).includes("e12"));
   check("слот-карточка e12 отображена в «Выходах»", !!slotCard,
     st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  // v1.73.5 (§64, контракт А): включённая слот-карточка теперь ВСЕГДА яркая
+  // #2e6b4f — ассерт «клик подсветил» на включённой ловил бы не клик, а
+  // состояние. Контракт клика-подсветки (detailId → isSel → #1c3525)
+  // проверяем на выключенной карточке; включённая покрыта фазой v1.73.5.
+  // §2.3: конфликт задача↔тест → правится тест, фикс не откатывается.
+  // readOutSlots каждый раз отдаёт новые объекты — off пишем через writeOutSlots.
+  const e12Arr = st.readOutSlots();
+  const e12S = e12Arr.find((x) => x && x.kind === "card" && x.id === "e12");
+  if (e12S) { e12S.off = true; st.writeOutSlots(e12Arr); }
   await slotCard.onclick({});
   check("слот: панель открыта для e12, selWidget остался e11 (v1.59 не тронут)",
     st.detailId === "e12" && st.selWidget.value === "e11",
@@ -4749,14 +4758,16 @@ await run("v1.72: привязанная карточка — dblclick toggles o
   // 1) Галерея: привязанная карточка светится зелёным, dblclick выключает её.
   st.selFolder = "__all";
   st.renderTree(); st.render();
-  // Контракт v1.72.2 (§60.6, требование пользователя «цвета как были»):
-  // привязанная карточка в галерее несёт v1.71-цвет привязки #1c3525,
-  // зелёная сплошная заливка #2e6b4f отменена — её носит только активная
-  // папка-вывод в «Выходах» (makeOutCard), а здесь она НЕ привязана к папке.
+  // КОНТРАКТ СМЕНИЛСЯ (v1.73.6, §65): раньше (v1.72.2) привязанная карточка
+  // галереи ВСЕГДА несла тусклый v1.71-цвет #1c3525 «независимо от активности».
+  // Контракт А (§64.1, v1.73.5) распространён на проводник: карточка, которая
+  // ВЫВОДИТСЯ (!off), обязана быть ярко-зелёной #2e6b4f/#7fe0a8 — как в
+  // «Выходах». §2.3: конфликт задача↔тест → правится тест, не задача.
+  // Выключенная (после dblclick ниже) остаётся тусклой #1c3525.
   const gCard = st.list.children.find((c) => ftext(c).includes("g1"));
-  check("v1.72.2: привязанная карточка в галерее — фон #1c3525, зелёной заливки нет",
-    !!gCard && String(gCard.style.cssText).includes("background:#1c3525")
-      && !String(gCard.style.cssText).includes("background:#2e6b4f"),
+  check("v1.73.6: привязанная (включённая) карточка в галерее — ярко-зелёная (фон #2e6b4f + рамка #7fe0a8)",
+    !!gCard && String(gCard.style.cssText).includes("background:#2e6b4f")
+      && String(gCard.style.cssText).includes("#7fe0a8"),
     gCard ? String(gCard.style.cssText).slice(0, 140) : "карточки нет");
   if (gCard) gCard.onclick({});
   const slot0 = st.outSlotOfEntry("g1");
@@ -4770,8 +4781,9 @@ await run("v1.72: привязанная карточка — dblclick toggles o
   check("v1.72: dblclick ставит off (слот молчит)", !!slot1 && slot1.off === true,
     JSON.stringify(slot1));
   st.render();
-  // v1.71 не различал вкл/выкл цветом (привязанная всегда #1c3525) — после
-  // v1.72.2 контракт тот же: важно, что НЕТ v1.72-заливки #2e6b4f.
+  // Охранитель контракта §65 (v1.73.6): выключенная (off) привязанная
+  // карточка — тусклая #1c3525, яркой заливки #2e6b4f НЕТ. На старом коде
+  // зелёный (там всегда тусклая) — ловит мутацию «яркая без учёта off».
   const gOff = st.list.children.find((c) => ftext(c).includes("g1"));
   check("v1.72.2: выключенная карточка — фон #1c3525, зелёной заливки нет",
     !!gOff && String(gOff.style.cssText).includes("background:#1c3525")
@@ -4786,13 +4798,15 @@ await run("v1.72: привязанная карточка — dblclick toggles o
   st.selFolder = "__outs";
   st.outsActiveFolder = "";
   st.renderTree(); st.render();
-  // v1.72.4 (§60.8): слот-контекст не даёт активации (ярко-зелёный #2e6b4f
-  // от dblclick — только у папки-вывода), но селект-зелёный #1c3525 от
-  // одиночного клика/sel теперь законен и на слот-карточке (новый контракт
-  // подсветки «Выходов»). Тест v1.72.2 запрещал оба — правится под контракт.
+  // КОНТРАКТ СМЕНИЛСЯ (v1.73.5, §64, контракт А): раньше v1.72.4-проверка
+  // требовала, что слот-карточка НИКОГДА не несёт #2e6b4f («яркий только у
+  // папки-вывода»). Отчёт пользователя + согласование: яркая = карточка
+  // ВЫВОДИТСЯ (!off), параллель active_id папки. Тест правится под новый
+  // контракт (§2.3: конфликт задача↔тест → правится тест): карточка сейчас
+  // включена (slot4 без off) → обязана быть ярко-зелёной.
   const oCard = st.list.children.find((c) => ftext(c).includes("g1"));
-  check("v1.72.4: карточка слота в «Выходах» без активации (#2e6b4f не появляется)",
-    !!oCard && !String(oCard.style.cssText).includes("background:#2e6b4f"),
+  check("v1.73.5: включённая карточка слота в «Выходах» — ярко-зелёная (фон #2e6b4f)",
+    !!oCard && String(oCard.style.cssText).includes("background:#2e6b4f"),
     oCard ? String(oCard.style.cssText).slice(0, 140) : "карточки нет");
   check("v1.72: у карточки слота есть dblclick",
     typeof (oCard && oCard.ondblclick) === "function",
@@ -5420,6 +5434,267 @@ await run("v1.73: приоритет стилей — активная папк�
     cssM.includes("background:rgba(224,138,60,.35)"), cssM);
   check("v1.73: пометка не трогает значение cat_pick",
     String(cpW.value || "") === "Котики", String(cpW.value));
+});
+
+// --- v1.73.4 (§63): одиночная карточка в «Выходах» ---------------------------
+// Задача пользователя (две части): (1) «при подключении одиночной карточки в
+// "Выходы" папка/подпапка не подсвечивается зелёным маркером» — контракт §60.13
+// строился ТОЛЬКО на папке-выводе (folderSlotForPath → pickFolderSlot фильтрует
+// kind !== "folder", active_id), карточка-слот в выборку не попадала;
+// (2) «нельзя деактивировать двойным кликом, она всегда выводится» — у строки
+// карточки-слота в ДЕРЕВЕ обработчика ondblclick НЕТ вовсе (два клика
+// подряд лишь перерисовывают выбор). Контракт: папка (точная, без предков)
+// подключённой НЕвыключенной карточки-слота несёт зелёную ЭЛЕМЕНТ-метку
+// #7fe0a8; выключенная (off) карточка молчит и метки не получает; dblclick
+// по строке карточки-слота тогглит off (маршрут 1/2 activateCard), строка
+// при off затемняется (color:#777); строка ПАПОЧНОГ�� слота dblclick не
+// получает (маршрут 2 — на карточках, §60.11).
+await run("v1.73.4: папка подключённой одиночной карточки-слота — зелёная метка", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("m1", "SYSTEM PROMPT/Видео"), mkSlotEntry("m2", "SYSTEM PROMPT"));
+  st.folders.push("SYSTEM PROMPT", "SYSTEM PROMPT/Видео", "Другая");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  await st.plDrop({ kind: "entry", ids: ["m1"], id: "m1" }, "__outs");
+  st.renderTree(); st.render();
+  const folderRowOf = (key) => st.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(key) && (t.includes("📍") || t.includes("📌"));
+  });
+  const markOf = (key) => {
+    const r = folderRowOf(key);
+    return r && [...(r.children || [])]
+      .find((c) => String(c.style?.cssText || "").includes("background:#7fe0a8"));
+  };
+  const cssRow = (key) => String((folderRowOf(key) || {}).style?.cssText || "(нет строки)");
+  const setOff = (on) => {
+    const arr = st.readOutSlots();
+    const s = arr.find((x) => x && x.kind === "card" && x.id === "m1");
+    if (s) { if (on) s.off = true; else delete s.off; }
+    st.writeOutSlots(arr);
+    st.renderTree(); st.render();
+  };
+  check("v1.73.4: карточка-слот привязан (прибор в порядке)",
+    !!st.outSlotOfEntry("m1"), JSON.stringify(st.outSlotOfEntry("m1")));
+  // КРАСНОЕ до правки JS: метка строится только из папок-выводов.
+  check("v1.73.4: точная папка карточки-слота «Видео» — зелёная ЭЛЕМЕНТ-метка",
+    !!markOf("Видео"),
+    cssRow("Видео").slice(0, 200) + " | children="
+    + [...((folderRowOf("Видео") || {}).children || [])].length);
+  check("v1.73.4: предок «SYSTEM PROMPT» без метки (точная папка, как §60.13)",
+    !markOf("SYSTEM PROMPT"), cssRow("SYSTEM PROMPT").slice(0, 160));
+  check("v1.73.4: соседняя «Другая» чиста",
+    !markOf("Другая"), cssRow("Другая").slice(0, 160));
+  // Выключенная карточка молчит (Python: off → "") — метки не получает.
+  setOff(true);
+  check("v1.73.4: карточка с off:true — метки НЕТ (не выводится)",
+    !markOf("Видео"), cssRow("Видео").slice(0, 160));
+  setOff(false);
+  // КРАСНОЕ до правки JS: снятие off метку не возвращает (её и не было).
+  check("v1.73.4: снятие off вернуло зелёную метку",
+    !!markOf("Видео"), cssRow("Видео").slice(0, 160));
+});
+
+await run("v1.73.4: dblclick по строке карточки-слота в дереве — тоггл off", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("m3", "Музыка"));
+  st.folders.push("Музыка");
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  await st.plDrop({ kind: "entry", ids: ["m3"], id: "m3" }, "__outs");
+  st.renderTree(); st.render();
+  const slotRowOf = (needle) => st.tree.children.find((r) =>
+    [...(r.children || [])]
+      .some((c) => /^🔌\d+$/.test(String(c.textContent || "")) && ftext(r).includes(needle)));
+  const rowCss = (row) => String(row && row.style ? row.style.cssText : "(нет строки)");
+  const row = slotRowOf("m3");
+  check("v1.73.4: строка карточки-слота в дереве отрисована", !!row,
+    st.tree.children.map((r) => ftext(r)).join(" ; "));
+  // КРАСНОЕ до правки JS: обработчика dblclick у строки слота нет вовсе.
+  check("v1.73.4: у строки карточки-слота есть ondblclick",
+    !!(row && typeof row.ondblclick === "function"),
+    String(row && typeof row.ondblclick));
+  if (row && row.ondblclick) await row.ondblclick({});
+  const s1 = st.outSlotOfEntry("m3");
+  // КРАСНОЕ до правки JS: без обработчика off не появился — карточка «всегда выводится».
+  check("v1.73.4: dblclick поставил off (карточка молчит)",
+    !!(s1 && s1.off === true), JSON.stringify(s1));
+  const row2 = slotRowOf("m3");
+  // КРАСНОЕ до правки JS: строки не перерисовались/не затемнились.
+  check("v1.73.4: выключенная строка затемнена (color:#777)",
+    !!row2 && rowCss(row2).includes("color:#777"), rowCss(row2).slice(0, 200));
+  // Охранитель: у строки ПАПОЧНОГО слота dblclick не появляется.
+  await st.plDrop({ kind: "folder", path: "Музыка" }, "__outs");
+  st.renderTree(); st.render();
+  const fRow = slotRowOf("Музыка");
+  check("v1.73.4: у строки папки-слота НЕТ ondblclick (охранитель)",
+    !!(fRow && typeof fRow.ondblclick !== "function"),
+    String(fRow && typeof fRow.ondblclick));
+  // Повторный dblclick включает обратно; строка перестаёт быть тёмной.
+  const row3 = slotRowOf("m3");
+  if (row3 && row3.ondblclick) await row3.ondblclick({});
+  const s2 = st.outSlotOfEntry("m3");
+  check("v1.73.4: повторный dblclick снял off",
+    !!(s2 && !s2.off), JSON.stringify(s2));
+  const row4 = slotRowOf("m3");
+  check("v1.73.4: включённая строка снова НЕ затемнена",
+    !!row4 && !rowCss(row4).includes("color:#777"), rowCss(row4).slice(0, 160));
+});
+
+// --- v1.73.5 (§64): яркая зелёная у одиночной карточки-слота в «Выходах» -----
+// Отчёт пользователя: «яркая зелёная подсветка — это при двойном клике, а при
+// одиночном — менее яркая; всегда как при одиночном клике». Контракт А
+// (согласован): ярко-зелёный #2e6b4f/#7fe0a8 = карточка ВЫВОДИТСЯ (!off) —
+// параллель активной карточки папки-вывода (active_id) и Python-контракта
+// (включена ⇔ выводится); выключенная — тусклая, одиночный клик = выделение
+// #1c3525 (яркость важнее выделения). Причина бага: isActive в makeOutCard
+// требовал o.fs (:2732), слот-карточка (:3138) яркого цвета не достигала вовсе.
+await run("v1.73.5: карточка-слот «Выходов» — яркая пока выводится, тусклая когда выключена", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.folders.push("Космос");
+  st.entries.push(mkSlotEntry("c1", "Космос"));
+  st.selFolder = "__outs";
+  st.outsActiveFolder = null;
+  st.renderTree(); st.render();
+  await st.plDrop({ kind: "entry", ids: ["c1"], id: "c1" }, "__outs");
+  st.renderTree(); st.render();
+
+  const find = () => st.list.children.find((c) => ftext(c).includes("c1"));
+  const css = (el) => String(el && el.style ? el.style.cssText : "(нет карточки)");
+  const card0 = find();
+  check("v1.73.5: карточка-слот c1 отображена в «Выходах»", !!card0,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  const slot0 = st.outSlotOfEntry("c1");
+  check("v1.73.5: на старте карточка включена (off нет)", !!slot0 && !slot0.off,
+    JSON.stringify(slot0));
+  // КРАСНОЕ до правки JS: isActive требует o.fs — слот-карточка всегда тусклая.
+  check("v1.73.5: включённая карточка-слот — ярко-зелёная (фон #2e6b4f)",
+    !!card0 && css(card0).includes("background:#2e6b4f"), css(card0).slice(0, 160));
+  // КРАСНОЕ до правки JS: рамка активной — #7fe0a8, у слот-карточки #333/#2e6b4f.
+  check("v1.73.5: …и яркая рамка #7fe0a8",
+    !!card0 && css(card0).includes("#7fe0a8"), css(card0).slice(0, 160));
+
+  // Одиночный клик: яркость включённой важнее выделения — не гаснет.
+  await card0.onclick({});
+  const d1 = st.detailId;
+  st.render();
+  const card1 = find();
+  check("v1.73.5: одиночный клик открыл панель (detailId=c1)",
+    d1 === "c1", String(d1));
+  // КРАСНОЕ до правки JS: после клика карточка уходит в isSel #1c3525.
+  check("v1.73.5: клик по включённой НЕ гасит яркость (фон #2e6b4f)",
+    !!card1 && css(card1).includes("background:#2e6b4f"), css(card1).slice(0, 160));
+
+  // Двойной клик выключает (v1.73.4 toggleOff) → тусклая «менее яркая».
+  if (card1 && card1.ondblclick) await card1.ondblclick({});
+  const slot1 = st.outSlotOfEntry("c1");
+  check("v1.73.5: dblclick выключил карточку (off=true)",
+    !!(slot1 && slot1.off === true), JSON.stringify(slot1));
+  const card2 = find();
+  // Охранители (на старом коде зелёные): выключенная не яркая, селект-тёмная.
+  check("v1.73.5: выключенная карточка НЕ ярко-зелёная (нет #2e6b4f)",
+    !!card2 && !css(card2).includes("background:#2e6b4f"), css(card2).slice(0, 160));
+  check("v1.73.5: …но выделение осталось — «менее яркая» #1c3525",
+    !!card2 && css(card2).includes("background:#1c3525"), css(card2).slice(0, 160));
+
+  // Повторный dblclick включает → снова яркая.
+  if (card2 && card2.ondblclick) await card2.ondblclick({});
+  const slot2 = st.outSlotOfEntry("c1");
+  check("v1.73.5: повторный dblclick включил обратно (off снят)",
+    !!(slot2 && !slot2.off), JSON.stringify(slot2));
+  const card3 = find();
+  // КРАСНОЕ до правки JS: включённая снова должна быть яркой.
+  check("v1.73.5: включённая снова ярко-зелёная (фон #2e6b4f)",
+    !!card3 && css(card3).includes("background:#2e6b4f"), css(card3).slice(0, 160));
+});
+
+// --- v1.73.6 (§65): яркая привязанная карточка в ПРОВОДНИКЕ ------------------
+// Отчёт пользователя: карточка, подключённая к выходам, в проводнике «в
+// независимости от активности всегда тускло-зелёная, а должна подсвечиваться
+// ярко-зелёным, если активна» (активация — dblclick тогглит off, §63.2).
+// Контракт А (§64.1, v1.73.5) распространён на обычный список галереи:
+// ярко #2e6b4f/#7fe0a8 ⇔ !off; выключенная — тусклая #1c3525; яркость
+// важнее выделения (одиночный клик не гасит).
+await run("v1.73.6: проводник — привязанная карточка яркая пока активна, тусклая когда выключена", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.folders.push("Новая");
+  st.entries.push(mkSlotEntry("n1", "Новая"), mkSlotEntry("n2", "Новая"));
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  await st.plDrop({ kind: "entry", ids: ["n1"], id: "n1" }, "__outs");
+  st.selFolder = "Новая";
+  st.renderTree(); st.render();
+
+  const find = (id) => st.list.children.find((c) => ftext(c).includes(id));
+  const css = (el) => String(el && el.style ? el.style.cssText : "(нет карточки)");
+  const slot0 = st.outSlotOfEntry("n1");
+  check("v1.73.6: карточка n1 привязана и включена (прибор)", !!slot0 && !slot0.off,
+    JSON.stringify(slot0));
+  const card0 = find("n1");
+  check("v1.73.6: карточка n1 отображена в проводнике", !!card0,
+    st.list.children.map((c) => ftext(c)).join(" ; ") || "—");
+  // КРАСНОЕ до правки JS: bg-цепочка галереи не знает про cardBright —
+  // привязанная всегда идёт веткой outMark → тусклый #1c3525.
+  check("v1.73.6: активная (включённая) привязанная карточка — ЯРКО-зелёная (фон #2e6b4f)",
+    !!card0 && css(card0).includes("background:#2e6b4f"), css(card0).slice(0, 160));
+  // КРАСНОЕ до правки JS: рамка у привязанной #2e6b4f, не #7fe0a8.
+  check("v1.73.6: …и яркая рамка #7fe0a8",
+    !!card0 && css(card0).includes("#7fe0a8"), css(card0).slice(0, 160));
+  // Охранитель: непривязанная соседняя карточка НЕ яркая (фикс не должен
+  // заливать всю галерею).
+  const plain = find("n2");
+  check("v1.73.6: непривязанная карточка n2 не яркая (нет #2e6b4f)",
+    !!plain && !css(plain).includes("background:#2e6b4f"), css(plain).slice(0, 160));
+
+  // Одиночный клик: яркость включённой важнее выделения — не гаснет.
+  await card0.onclick({});
+  const d1 = st.detailId;
+  st.render();
+  const card1 = find("n1");
+  check("v1.73.6: одиночный клик открыл панель (detailId=n1)", d1 === "n1", String(d1));
+  // КРАСНОЕ до правки JS: после клика карточка уходит в ветку outMark → #1c3525.
+  check("v1.73.6: клик по активной НЕ гасит яркость (фон #2e6b4f)",
+    !!card1 && css(card1).includes("background:#2e6b4f"), css(card1).slice(0, 160));
+
+  // Двойной клик выключает (activateCard → toggleOff) → тусклая.
+  if (card1 && card1.ondblclick) await card1.ondblclick({});
+  const slot1 = st.outSlotOfEntry("n1");
+  check("v1.73.6: dblclick выключил карточку (off=true)",
+    !!(slot1 && slot1.off === true), JSON.stringify(slot1));
+  const card2 = find("n1");
+  // Охранители (зелёные и до, и после фикса): выключенная тусклая, без #2e6b4f.
+  check("v1.73.6: выключенная карточка НЕ яркая (нет #2e6b4f)",
+    !!card2 && !css(card2).includes("background:#2e6b4f"), css(card2).slice(0, 160));
+  check("v1.73.6: …но привязка видна — тусклый #1c3525",
+    !!card2 && css(card2).includes("background:#1c3525"), css(card2).slice(0, 160));
+
+  // Повторный dblclick включает → снова яркая.
+  if (card2 && card2.ondblclick) await card2.ondblclick({});
+  const slot2 = st.outSlotOfEntry("n1");
+  check("v1.73.6: повторный dblclick включил обратно (off снят)",
+    !!(slot2 && !slot2.off), JSON.stringify(slot2));
+  const card3 = find("n1");
+  // КРАСНОЕ до правки JS: включённая снова обязана быть яркой.
+  check("v1.73.6: активная снова ярко-зелёная (фон #2e6b4f)",
+    !!card3 && css(card3).includes("background:#2e6b4f"), css(card3).slice(0, 160));
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
