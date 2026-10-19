@@ -1778,7 +1778,7 @@ class PromptLibrary:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mode": ([cls.MODE_WRITE, cls.MODE_ISSUE, cls.MODE_BOTH], {"default": cls.MODE_WRITE}),
+                "mode": ([cls.MODE_WRITE, cls.MODE_ISSUE, cls.MODE_BOTH], {"default": cls.MODE_ISSUE}),
                 "selected": ("STRING", {"multiline": False, "default": ""}),
                 "save_folder": ("STRING", {"multiline": False, "default": ""}),
                 # id узла, из которого брать текст для сохранения после прогона

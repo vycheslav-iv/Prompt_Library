@@ -2700,6 +2700,15 @@ res50d = node50.execute(mode=node50.MODE_ISSUE, selected="", save_folder="Отк
 check("50: служебный префикс __ в cat_pick → выход 0 пуст",
       res50d["result"][0] == "", str(res50d["result"][0]))
 
+print("\n51. режим по умолчанию — «Выдача» (новая нода не пишет в базу)")
+
+# (1) default в INPUT_TYPES combo — MODE_ISSUE, не MODE_WRITE (задача пользователя:
+#     при добавлении ноды в воркфлоу по умолчанию должна стоять «Выдача»)
+_def51 = mod.PromptLibrary.INPUT_TYPES()["required"]["mode"][1].get("default")
+check("51: default режим — «Выдача», не «Запись»",
+      _def51 == mod.PromptLibrary.MODE_ISSUE,
+      f"default={_def51!r}")
+
 
 # --- итог -------------------------------------------------------------------
 _p(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")
