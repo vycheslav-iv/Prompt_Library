@@ -6,63 +6,58 @@
 ---
 
 ## 1. Что делали в этой сессии (кратко)
-- Завершены и запушены две версии одним коммитом `91ae0be` (master):
-  **v1.73.1** — выход 0 без dblclick-выбора отдаёт `""` (убран фолбэк на
-  открытую папку; фикс в `prompt_library_node.py:2163`);
-  **v1.73.2** — кнопка отвязки: единый хелпер `st.mkUnlinkBtn` на трёх
-  сайтах (строка слота, карточка вывода, битая строка) + оптическая
-  центровка ✕ в кружке (`box-sizing:border-box` + `padding:0 0 1px`).
-- SPEC дополнен: шапка v1.73.2, §60.16 (кружок/центровка), §61 (cat_pick).
-- Память: снапшот прошлой — `SESSION_MEMORY-history/2026-10-19-0627.md`.
+- Запушены три версии: **v1.73.1+v1.73.2** одним коммитом `91ae0be`
+  (выход 0 без выбора — пусто; кнопка отвязки — единый тёмный кружок на
+  3 сайтах + оптическая центровка ✕), затем **v1.73.3** коммитом `f0e9959`
+  (режим по умолчанию — «Выдача», не «Запись»).
+- SPEC дополнен: §60.16 (кружок/центровка), §61 (cat_pick), §62 (default mode).
+- Память: снапшоты `SESSION_MEMORY-history/2026-10-19-0627.md` и `-0705.md`.
 
 ## 2. Итоговое состояние кода
+- `prompt_library_node.py:1781` — combo `mode` default = `MODE_ISSUE`
+  («📤 Выдача»; v1.73.3 — свежие ноды не пишут в базу сами; сохранённые
+  графы хранят своё значение в `widgets_values`).
+- `prompt_library_node.py:2163` — возврат `(cat_path, out_text, *slot_texts)`;
+  фолбэк на открытую папку УБРАН (v1.73.1). 8 полей required, `cat_pick` 8-м.
 - `web/js/prompt_library.js:154` — `PL_JS_VERSION = "1.73.2-unlink-circle"`
-  (бамп обязателен при любой JS-правке; смоук читает версию из исходника).
-- `web/js/prompt_library.js:1702` — `st.mkUnlinkBtn(extraCss="")`: кнопка
-  14×14, круг, `#414141`/`#e05555`, `box-sizing:border-box`,
-  `padding:0 0 1px` (оптическая центровка — НЕ убирать), hover
-  `#525252`/`#ff6b6b`, title «Отвязать выход…».
-- Вызовы хелпера: строка слота `:2564`, карточка `:2731`, битая строка
-  `:2801` (`extraCss="align-self:center;"` — grid-контейнер).
-- `prompt_library_node.py:1902` — `cat_path = _sanitize_folder_path(cp) if cp else ""`;
-  `:2163` — возврат `(cat_path, out_text, *slot_texts)` — фолбэк на открытую
-  папку УБРАН (v1.73.1); 8 полей required, `execute`/`_execute` с `cat_pick`.
-- `tests/_probe_unlink_center.py` — прибор центрирования (headless Chrome
-  DPR=4, инк-скан, порог 0.5px; ComfyUI не нужен, Chrome нужен).
-- Смоук: 155 фаз; v1.73.2-фазы `:2832` (карточка) и `:2859` (битая строка
-  + центровка); чек `:2817` — контракт button (не `"✖"`).
+  (JS в v1.73.3 не менялся; бамп обязателен при любой JS-правке).
+- `web/js/prompt_library.js:1702` — `st.mkUnlinkBtn(extraCss="")`: круг 14×14,
+  `#414141`/`#e05555`, `box-sizing:border-box`, `padding:0 0 1px`
+  (оптическая центровка — НЕ убирать). Вызовы: строка слота `:2564`,
+  карточка `:2731`, битая строка `:2801` (`"align-self:center;"`).
+- `tests/_test_prompt_library.py` — 461 тест; тест 51 (default mode == ISSUE).
+- `tests/_probe_unlink_center.py` — прибор центрирования (Chrome, порог 0.5px).
+- Смоук: 155 фаз. Проверки: `python _process/check.py Prompt_Library` — ЗЕЛЁНОЕ.
+- Git: `master` @ `f0e9959`, remote `vycheslav-iv/Prompt_Library`.
 
 ## 3. Проблемы, которые встречались (и как решали)
-- Крестик ✕ сидел ниже центра кружка (dy=+0.62…+0.88px) — UA-геометрия
-  шрифта; лечится нижним padding при border-box, замер прибором.
-- Pre-commit-хук Prompt_Library блокирует коммит, если сообщение упоминает
-  файл, которого нет в diff (поймалось на «check.py ЗЕЛЁНЫЙ») — убрать
-  упоминание из сообщения, не `--no-verify`.
-- Оранжевые ✖ дублировались в трёх местах со стилями — вынесено в один
-  хелпер; при добавлении четвёртого сайта — только вызов хелпера.
+- Крестик ✕ ниже центра кружка (dy=+0.62…+0.88) — лечится нижним padding
+  при border-box; замер прибором `_probe_unlink_center.py`.
+- Pre-commit-хук блокирует коммит, если сообщение упоминает файл вне diff
+  (поймалось на «check.py») — убрать упоминание, не `--no-verify`.
+- `SESSION_MEMORY-history/` в .gitignore — снапшоты локальные, в git идёт
+  только `SESSION_MEMORY.md`.
 
 ## 4. Что важно не сломать при продолжении работы
-- `padding:0 0 1px` в `mkUnlinkBtn` — оптическая центровка; удаление =
-  регрессия (мутация даёт смоук 1 FAIL + прибор FAIL).
-- Старый смоук-чек «кнопка ✖ найдена» (текст `"✖"`) заменён на button —
-  не возвращать textual-контракт.
+- `padding:0 0 1px` в `mkUnlinkBtn` — оптическая центровка (мутация = FAIL).
 - v1.73.1: без dblclick-выбора cat_pick пустой — фолбэк НЕ возвращать.
+- v1.73.3: default mode = MODE_ISSUE — не возвращать MODE_WRITE; порядок
+  опций combo не трогать (протокол).
 - Порядок выходов 0=путь категории, 1=промпт 1 — детектор аудита
   `_audit_prompt_library.mjs:141-147`.
 - После JS-правок: бамп `PL_JS_VERSION`; после всего — `sync.py` + рестарт
   ComfyUI + Ctrl+F5.
 
 ## 5. Следующие шаги (идеи, не сделано)
-- Живая визуальная проверка пользователем (рестарт ComfyUI + Ctrl+F5):
-  центровка ✕ на карточке/битой строке — приёмка по факту.
+- Живая визуальная проверка пользователем после рестарта ComfyUI + Ctrl+F5:
+  центровка ✕ (v1.73.2) и новый дефолт «Выдача» у свежей ноды (v1.73.3).
 - Возможный скил по оптической центровке эмодзи-глифов в DOM-кнопках
   (инк-замер + padding-коррекция) — предложить, если тема повторится.
 
 ## 6. Связанные файлы
+- `prompt_library_node.py` — Python-нода (v1.73.3)
 - `web/js/prompt_library.js` — JS-расширение (v1.73.2-unlink-circle)
-- `prompt_library_node.py` — Python-нода (v1.73.1, 8 полей)
-- `tests/_smoke_prompt_library.mjs`, `tests/_test_prompt_library.py`,
+- `tests/_test_prompt_library.py` (461), `tests/_smoke_prompt_library.mjs` (155),
   `tests/_audit_prompt_library.mjs`, `tests/_probe_unlink_center.py`
-- `SPECIFICATION.md` — §60.16 (кружок/центровка), §61 (cat_pick)
+- `SPECIFICATION.md` — §60.16, §61, §62
 - `check.json` — 3 проверки; запуск: `python _process/check.py Prompt_Library`
-- Git: `master` @ `91ae0be`, remote `vycheslav-iv/Prompt_Library`
