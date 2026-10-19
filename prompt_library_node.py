@@ -1797,6 +1797,10 @@ class PromptLibrary:
                 # пусто — сквозной проход входа. selected остаётся только
                 # выделением панели (ui["selected"]) и на текст не влияет.
                 "active": ("STRING", {"multiline": False, "default": ""}),
+                # v1.73: путь категории — значение пишет ДВОЙНОЙ клик по папке
+                # в дереве (скрытый виджет). Выход 0 отдаёт ЭТОТ путь;
+                # пусто — фолбэк на путь открытой папки (save_folder).
+                "cat_pick": ("STRING", {"multiline": False, "default": ""}),
             },
             "optional": {
                 "source": ("*", {}),
@@ -1865,18 +1869,18 @@ class PromptLibrary:
             return float("nan")
         return None
 
-    def execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", active="", source=None, image=None,
-                extra_pnginfo=None, unique_id=None, **kwargs):
+    def execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", active="", cat_pick="",
+                source=None, image=None, extra_pnginfo=None, unique_id=None, **kwargs):
         # Весь прогон узла держит общий с HTTP-роутами замок (§25.3.2): execute()
         # исполняется в потоке ComfyUI, а роуты — в event loop; без замка их циклы
         # «load -> mutate -> save» могли наложиться и потерять чужое изменение
         # (например, только что созданную вручную запись или удаление).
         with _DB_LOCK:
-            return self._execute(mode, selected, save_folder, pickup, slots_out, quick_test, active, source, image,
+            return self._execute(mode, selected, save_folder, pickup, slots_out, quick_test, active, cat_pick, source, image,
                                  extra_pnginfo, unique_id, **kwargs)
 
-    def _execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", active="", source=None, image=None,
-                 extra_pnginfo=None, unique_id=None, **kwargs):
+    def _execute(self, mode="", selected="", save_folder="", pickup="", slots_out="", quick_test="", active="", cat_pick="",
+                 source=None, image=None, extra_pnginfo=None, unique_id=None, **kwargs):
         # mode может прийти как список (ComfyUI COMBO через map-over-list) —
         # приводим к строке, как уже делаем для pickup.
         if isinstance(mode, (list, tuple)):
@@ -1885,9 +1889,17 @@ class PromptLibrary:
         # (map-over-list, как pickup) — разворачиваем до единого вида.
         if isinstance(active, (list, tuple)):
             active = active[0] if len(active) else ""
+        # v1.73: cat_pick — та же схема (map-over-list), дальше работаем строкой.
+        if isinstance(cat_pick, (list, tuple)):
+            cat_pick = cat_pick[0] if len(cat_pick) else ""
         # Папка сохранения = выбранная в дереве (скрытый save_folder, пишет JS).
         # Совместимость: старые workflow несли folder/category виджетом
         folder = save_folder or kwargs.get("folder", "") or kwargs.get("category", "")
+        # v1.73 (§61): путь категории с ДВОЙНОМОГО клика по папке (скрытый
+        # cat_pick пишет JS). Пусто или служебная ветка (санитайзер вернул "") —
+        # фолбэк на путь открытой папки, как раньше.
+        cp = str(cat_pick or "").strip()
+        cat_path = _sanitize_folder_path(cp) if cp else ""
         # Служебные ключи дерева (__all/__fav/__root) — не папки: виджет несёт их
         # для round-trip выбора, но записи сохраняем в корень (_storage_folder)
         if not mode:
@@ -2050,9 +2062,9 @@ class PromptLibrary:
                             # Порядок = порядок INPUT_TYPES required:
                             # mode, selected, save_folder, pickup, slots_out,
                             # quick_test, active (quick_test — v1.61,
-                            # active — v1.72)
+                            # active — v1.72), cat_pick (v1.73)
                             # (prompt-виджет удалён в v1.7; slots_out — v1.44)
-                            node_data["widgets_values"] = [mode, selected, save_folder, pickup, slots_out, quick_test, active]
+                            node_data["widgets_values"] = [mode, selected, save_folder, pickup, slots_out, quick_test, active, cat_pick]
                             break
             except Exception:
                 pass
@@ -2146,7 +2158,9 @@ class PromptLibrary:
                         "mode_notice": [notice]},
                 # Порядок = порядок RETURN_NAMES: 0 — путь категории, 1 — основной
                 # текст (prompt_1), дальше доп. слоты 2..11.
-                "result": (_sanitize_folder_path(folder), out_text, *slot_texts)}
+                # v1.73 (§61): выход 0 отдаёт путь категории (cat_pick, двойной
+                # клик по папке); без выбора — прежний путь открытой папки.
+                "result": (cat_path or _sanitize_folder_path(folder), out_text, *slot_texts)}
 
 
 # --- HTTP-endpoints для JS ---------------------------------------------------

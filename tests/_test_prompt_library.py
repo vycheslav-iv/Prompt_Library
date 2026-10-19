@@ -197,8 +197,8 @@ res = node.execute(mode=node.MODE_WRITE, selected="", save_folder="Фото",
 check("«Запись»: выход пуст + ui на месте", res["result"][1] == "" and "ui" in res,
       str(res["result"]))
 check("входной текст обрезан", res["ui"]["text"] == ["Портрет девушки"])
-check("PNG-патч записал widgets_values позиционно (7 значений, v1.44+v1.61+v1.72)",
-      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото", "", "", "", ""],
+check("PNG-патч записал widgets_values позиционно (8 значений, v1.44+v1.61+v1.72+v1.73)",
+      workflow["nodes"][0]["widgets_values"] == [node.MODE_WRITE, "", "Фото", "", "", "", "", ""],
       str(workflow["nodes"][0]["widgets_values"]))
 check("чужой node id не тронут", len(workflow["nodes"]) == 1)
 entries, folders = mod._load_db()
@@ -929,8 +929,8 @@ check("подхват: снапшот воркфлоу отложен под т�
 check("подхват: подсказка о том, почему вход не сохраняется",
       "не сохраняется" in (res_pick["ui"]["mode_notice"][0] or ""),
       str(res_pick["ui"]["mode_notice"]))
-check("подхват: PNG-патч несёт pickup 4-м значением, slots_out 5-м, active 7-м",
-      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_BOTH, "", "Подхват", "1622", "", "", ""],
+check("подхват: PNG-патч несёт pickup 4-м значением, slots_out 5-м, active 7-м, cat_pick 8-м",
+      wf_pick["nodes"][0]["widgets_values"] == [node3.MODE_BOTH, "", "Подхват", "1622", "", "", "", ""],
       str(wf_pick["nodes"][0]["widgets_values"]))
 # Без подхвата поведение прежнее (pickup="")
 res_off = node3.execute(mode=node3.MODE_WRITE, selected="", save_folder="", pickup="",
@@ -1649,8 +1649,8 @@ check("27: slots_out списком (map-over-list) работает", len(res27
 wf27 = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
 node27.execute(mode=node27.MODE_ISSUE, selected="", save_folder="", slots_out=slots27,
                extra_pnginfo={"workflow": wf27}, unique_id=7)
-check("27: PNG-патч несёт slots_out 5-м значением, active 7-м",
-      wf27["nodes"][0]["widgets_values"] == [node27.MODE_ISSUE, "", "", "", slots27, "", ""],
+check("27: PNG-патч несёт slots_out 5-м значением, active 7-м, cat_pick 8-м",
+      wf27["nodes"][0]["widgets_values"] == [node27.MODE_ISSUE, "", "", "", slots27, "", "", ""],
       str(wf27["nodes"][0]["widgets_values"]))
 
 # Выдача + слоты одновременно: prompt_out своим, слоты своими
@@ -2571,8 +2571,8 @@ check("48: пустой quick -> выдача карточки как раньш
 wf48 = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
 node48.execute(mode=node48.MODE_ISSUE, selected="", save_folder="Фото", slots_out="[]",
                quick_test="квик-в-png", extra_pnginfo={"workflow": wf48}, unique_id=7)
-check("48: PNG-патч несёт quick_test 6-м, active 7-м значением",
-      wf48["nodes"][0]["widgets_values"] == [node48.MODE_ISSUE, "", "Фото", "", "[]", "квик-в-png", ""],
+check("48: PNG-патч несёт quick_test 6-м, active 7-м, cat_pick 8-м значением",
+      wf48["nodes"][0]["widgets_values"] == [node48.MODE_ISSUE, "", "Фото", "", "[]", "квик-в-png", "", ""],
       str(wf48["nodes"][0]["widgets_values"]))
 
 
@@ -2635,18 +2635,18 @@ check("49: слот-карточка off:true -> на выходе пусто (�
 check("49: слот-карточка без off выдаёт текст (guard)",
       res49_6["result"][3] == "текст-Б", str(res49_6["result"][3]))
 
-# (7) PNG-патч несёт 7 значений, active последним (порядок INPUT_TYPES required)
+# (7) PNG-патч несёт 8 значений, active 7-м, cat_pick 8-м (порядок INPUT_TYPES required)
 wf49 = {"nodes": [{"id": 7, "widgets_values": ["x"]}], "links": []}
 node49.execute(mode=node49.MODE_ISSUE, selected="", active=_e49b["id"], save_folder="",
                slots_out="[]", quick_test="", extra_pnginfo={"workflow": wf49}, unique_id=7)
-check("49: PNG-патч — 7 значений, active последним",
-      wf49["nodes"][0]["widgets_values"] == [node49.MODE_ISSUE, "", "", "", "[]", "", _e49b["id"]],
+check("49: PNG-патч — 8 значений, active 7-м, cat_pick 8-м",
+      wf49["nodes"][0]["widgets_values"] == [node49.MODE_ISSUE, "", "", "", "[]", "", _e49b["id"], ""],
       str(wf49["nodes"][0]["widgets_values"]))
 
-# (8) INPUT_TYPES: active — 7-й required после quick_test
+# (8) INPUT_TYPES: active — 7-й, cat_pick — 8-й required
 _req49 = list(mod.PromptLibrary.INPUT_TYPES()["required"].keys())
-check("49: INPUT_TYPES required — 7 полей, active последним",
-      _req49 == ["mode", "selected", "save_folder", "pickup", "slots_out", "quick_test", "active"],
+check("49: INPUT_TYPES required — 8 полей, cat_pick последним",
+      _req49 == ["mode", "selected", "save_folder", "pickup", "slots_out", "quick_test", "active", "cat_pick"],
       str(_req49))
 
 # (9) guard: «Запись» active не читает — выход пуст, запись сохранена
@@ -2656,6 +2656,47 @@ res49_9 = node49.execute(mode=node49.MODE_WRITE, selected="", active=_e49b["id"]
 check("49: «Запись» игнорирует active (выход пуст, запись есть)",
       res49_9["result"][1] == "" and _entry("запись-49") is not None,
       str(res49_9["result"][1]))
+
+
+# ============================================================================
+# 50. cat_pick — путь категории с ДВОЙНОГО клика по папке (v1.73, SPEC §61)
+# ============================================================================
+# Контракт: двойной клик по строке папки в дереве JS пишет путь в скрытый
+# виджет cat_pick; выход 0 ноды отдаёт ЭТОТ путь (а не путь открытой
+# папки). Пустой cat_pick — фолбэк на save_folder (прежнее поведение).
+print("\n50. cat_pick — путь категории (двойной клик по папке, §61)")
+
+# (1) cat_pick — required-поле INPUT_TYPES, последним (порядок = widgets_values)
+_req50 = list(mod.PromptLibrary.INPUT_TYPES()["required"].keys())
+check("50: INPUT_TYPES — cat_pick есть и последним",
+      _req50 == ["mode", "selected", "save_folder", "pickup", "slots_out",
+                 "quick_test", "active", "cat_pick"],
+      str(_req50))
+
+# (2) cat_pick перебивает путь открытой папки на выходе 0
+node50 = mod.PromptLibrary()
+res50 = node50.execute(mode=node50.MODE_ISSUE, selected="", save_folder="Открытая",
+                       cat_pick="Выбранная/Путь", extra_pnginfo=None, unique_id=1)
+check("50: выход 0 = путь категории из cat_pick",
+      res50["result"][0] == "Выбранная/Путь/", str(res50["result"][0]))
+
+# (3) охранитель: пустой cat_pick → путь save_folder (прежнее поведение)
+res50b = node50.execute(mode=node50.MODE_ISSUE, selected="", save_folder="Открытая",
+                        cat_pick="", extra_pnginfo=None, unique_id=1)
+check("50: пустой cat_pick → путь save_folder (фолбэк)",
+      res50b["result"][0] == "Открытая/", str(res50b["result"][0]))
+
+# (4) cat_pick списком (map-over-list, как pickup/active)
+res50c = node50.execute(mode=node50.MODE_ISSUE, selected="", save_folder="Открытая",
+                        cat_pick=["Лист/Путь"], extra_pnginfo=None, unique_id=1)
+check("50: cat_pick списком (map-over-list) работает",
+      res50c["result"][0] == "Лист/Путь/", str(res50c["result"][0]))
+
+# (5) служебная ветка в cat_pick не даёт мусорный путь (санитайзер → "", фолбэк)
+res50d = node50.execute(mode=node50.MODE_ISSUE, selected="", save_folder="Открытая",
+                        cat_pick="__all", extra_pnginfo=None, unique_id=1)
+check("50: служебный префикс __ в cat_pick → фолбэк на save_folder",
+      res50d["result"][0] == "Открытая/", str(res50d["result"][0]))
 
 
 # --- итог -------------------------------------------------------------------

@@ -232,6 +232,10 @@ function makeNode() {
     { name: "slots_out", value: "[]", type: "text", options: { hidden: true, hideInPanel: true }, serialize: true },
     // v1.72: основной выход держит ТОЛЬКО active (selected — про выделение)
     { name: "active", value: "", type: "text", options: { hidden: true, hideInPanel: true }, serialize: true },
+    // v1.73 (§61): путь категории — пишет ДВОЙНОЙ клик по папке. options
+    // пустые: hideInPanel ставит сам onNodeCreated (иначе проверка скрытия
+    // была бы слепо-зелёной уже на старом коде).
+    { name: "cat_pick", value: "", type: "text", options: {}, serialize: true },
   ];
   const node = {
     id: 1, pos: [0, 0], size: [470, 700], flags: {}, bgcolor: null, widgets,
@@ -5255,6 +5259,109 @@ await run("v1.72.11: кнопка отвязки слота — тёмный к�
   check("v1.72.11: клик по кнопке отвязал слот (unbindOutSlot)",
     st.readOutSlots().length === before - 1,
     "было " + before + " → стало " + st.readOutSlots().length);
+});
+
+// --- v1.73 (§61): ДВОЙНОЙ клик по папке → путь категории на выходе 0 ---------
+await run("v1.73: cat_pick — двойной клик выбирает папку, строка фиолетовая", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("k1", "Котики/Пушистые"), mkSlotEntry("k2", "Псы"));
+  st.folders.push("Котики", "Котики/Пушистые", "Псы");
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  const cpW = node.widgets.find((w) => w.name === "cat_pick");
+  const rowOf = (key) => st.tree.children.find((r) =>
+    [...(r.children || [])].some((c) => c.title === key));
+  check("v1.73: виджет cat_pick есть в харнессе", !!cpW, String(!!cpW));
+  check("v1.73: cat_pick скрыт из панели свойств (hideInPanel)",
+    !!(cpW && cpW.options && cpW.options.hideInPanel === true),
+    String(cpW && cpW.options && cpW.options.hideInPanel));
+  const rowK = rowOf("Котики/Пушистые");
+  check("v1.73: строка вложенной папки отрисована (плоский обход)",
+    !!rowK, st.tree.children.map((r) => ftext(r)).join(" ; "));
+  check("v1.73: у строки папки есть обработчик dblclick",
+    !!(rowK && typeof rowK.ondblclick === "function"),
+    String(rowK && typeof rowK.ondblclick));
+  // Двойной клик: cat_pick = путь папки, строка фиолетовая с кружком-меткой
+  if (rowK && rowK.ondblclick) rowK.ondblclick({});
+  const rowK2 = rowOf("Котики/Пушистые");
+  check("v1.73: cat_pick === путь папки после dblclick",
+    !!cpW && String(cpW.value || "") === "Котики/Пушистые",
+    String(cpW && cpW.value));
+  const cssPick = String((rowK2 && rowK2.style.cssText) || "");
+  check("v1.73: заливка строки — фиолетовая #3a2d66", cssPick.includes("background:#3a2d66"), cssPick);
+  check("v1.73: рамка-кольцо — inset #b388ff", cssPick.includes("box-shadow:inset 0 0 0 1px #b388ff"), cssPick);
+  const mkP = rowK2 && rowK2.children[0];
+  // Стиль читаем целиком из cssText: стаб style не парсит строку в свойства
+  // (width/height как отдельные поля в стабе пусты всегда).
+  const mkCss = String((mkP && mkP.style && mkP.style.cssText) || "");
+  check("v1.73: метка-кружок 6px первым ребёнком строки",
+    !!(mkP && mkCss.includes("width:6px") && mkCss.includes("border-radius:50%")),
+    mkCss);
+  check("v1.73: подсказка метки — «Путь категории»",
+    !!(mkP && String(mkP.title || "").includes("Путь категории")),
+    String(mkP && mkP.title));
+  check("v1.73: title строки упоминает двойной клик",
+    !!(rowK2 && String(rowK2.title || "").includes("Двойной клик")),
+    String(rowK2 && rowK2.title));
+  // Повторный dblclick по той же папке — снять выбор
+  if (rowK2 && rowK2.ondblclick) rowK2.ondblclick({});
+  const rowK3 = rowOf("Котики/Пушистые");
+  check("v1.73: повторный dblclick снимает выбор (cat_pick пуст)",
+    !!cpW && String(cpW.value || "") === "", String(cpW && cpW.value));
+  check("v1.73: без выбора строка снова прозрачная",
+    String((rowK3 && rowK3.style.cssText) || "").includes("background:transparent"),
+    String(rowK3 && rowK3.style.cssText));
+  // Охранители: чужая строка не красится; служебная ветка без обработчика
+  const rowP = rowOf("Псы");
+  check("v1.73: чужая строка папки прозрачная",
+    String((rowP && rowP.style.cssText) || "").includes("background:transparent"),
+    String(rowP && rowP.style.cssText));
+  const rowAll = st.tree.children.find((r) => ftext(r).includes("📚"));
+  check("v1.73: служебная ветка «Всё» без dblclick-обработчика",
+    !!(rowAll && typeof rowAll.ondblclick !== "function"),
+    String(rowAll && typeof rowAll.ondblclick));
+});
+
+await run("v1.73: приоритет стилей — активная папка синяя, пометка ☑ важнее pick", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.entries.push(mkSlotEntry("k1", "Котики"), mkSlotEntry("k2", "Псы"));
+  st.folders.push("Котики", "Псы");
+  st.selFolder = "__all";
+  st.renderTree(); st.render();
+  const cpW = node.widgets.find((w) => w.name === "cat_pick");
+  const rowOf = (key) => st.tree.children.find((r) =>
+    [...(r.children || [])].some((c) => c.title === key));
+  // Путь категории задан напрямую — здесь тестируются СТИЛИ (логика dblclick
+  // — в фазе выше): папка pick остаётся фиолетовой, когда открыта другая.
+  cpW.value = "Котики";
+  st.renderTree();
+  const rowK = rowOf("Котики");
+  check("v1.73: папка cat_pick фиолетовая, когда открыта другая",
+    !!(rowK && String(rowK.style.cssText).includes("background:#3a2d66")),
+    String(rowK && rowK.style.cssText));
+  // Клик по «Псы» — активная строка синяя, cat_pick-строка не перекрашивается
+  const rowD = rowOf("Псы");
+  if (rowD && rowD.onclick) rowD.onclick({});
+  const cssD = String((rowOf("Псы") && rowOf("Псы").style.cssText) || "");
+  check("v1.73: активная (открытая) папка — прежний синий #2c4a73",
+    cssD.includes("background:#2c4a73"), cssD);
+  const cssK = String((rowOf("Котики") && rowOf("Котики").style.cssText) || "");
+  check("v1.73: cat_pick-строка не перекрашена в синий (фиолетовая стоит)",
+    cssK.includes("background:#3a2d66"), cssK);
+  check("v1.73: cat_pick пережил клик по чужой папке",
+    String(cpW.value || "") === "Котики", String(cpW.value));
+  // Пометка ☑ важнее cat_pick (оранжевая заливка по-прежнему сверху)
+  st.markFolders.add("Котики");
+  st.renderTree();
+  const cssM = String((rowOf("Котики") && rowOf("Котики").style.cssText) || "");
+  check("v1.73: помеченная строка (☑) важнее cat_pick — оранжевая",
+    cssM.includes("background:rgba(224,138,60,.35)"), cssM);
+  check("v1.73: пометка не трогает значение cat_pick",
+    String(cpW.value || "") === "Котики", String(cpW.value));
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);

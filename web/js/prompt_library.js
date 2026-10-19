@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.72.11-outslot-del-button";
+    const PL_JS_VERSION = "1.73.0-category-path-pick";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -187,6 +187,16 @@ app.registerExtension({
                 activeW.hidden = true;
                 activeW.options && (activeW.options.hideInPanel = true);
                 activeW.computeSize = () => [0, -4];
+            }
+            // v1.73 (§61): путь категории — значение пишет ДВОЙНОЙ клик по
+            // строке папки в дереве; выход 0 ноды отдаёт ЭТОТ путь (пусто —
+            // фолбэк на открытую папку, как раньше). Скрыт тем же способом,
+            // что active/save_folder: в панели поле не нужно.
+            const catPickW = this.widgets?.find((w) => w.name === "cat_pick");
+            if (catPickW) {
+                catPickW.hidden = true;
+                catPickW.options && (catPickW.options.hideInPanel = true);
+                catPickW.computeSize = () => [0, -4];
             }
             const saveFolderW = this.widgets?.find((w) => w.name === "save_folder");
             if (saveFolderW) {
@@ -2195,7 +2205,23 @@ const reload = async () => {
                             ? ""
                             : target;
                         const moved = await st.apiPost("/prompt_library/move_many", { folder_paths: paths, new_parent });
-                        if (moved.ok) { st.syncSaveFolder(); await reload(); }
+                        if (moved.ok) {
+                            // v1.73 (§61): перенос папок едет следом за путём
+                            // категории — каждая перемещённая папка (и её
+                            // подпапки) переписывает cat_pick по префиксу
+                            if (catPickW) {
+                                let cp = String(catPickW.value || "");
+                                for (const p of paths) {
+                                    if (cp === p || cp.startsWith(p + "/")) {
+                                        const leaf = p.split("/").pop();
+                                        const np = new_parent ? `${new_parent}/${leaf}` : leaf;
+                                        cp = np + cp.slice(p.length);
+                                    }
+                                }
+                                catPickW.value = cp;
+                            }
+                            st.syncSaveFolder(); await reload();
+                        }
                     }
                 } catch (e) { /* silent */ }
             };
@@ -2216,6 +2242,12 @@ const reload = async () => {
                 const row = document.createElement("div");
                 const active = st.selFolder === key;
                 const marked = st.markFolders.has(key);
+                // v1.73 (§61): путь категории — выбор ДВОЙНЫМ кликом по папке
+                // (cat_pick пишет JS, читаем напрямую — без зеркала в st, как
+                // activeW). Приоритет стиля: пометка ☑ > cat_pick > открытая
+                // папка; служебные ветки и файлы выбором не бывают.
+                const pick = isFolder && !key.startsWith("__") && !!catPickW
+                    && String(catPickW.value || "") === key;
                 // v1.72.6 (§60.10): подключённая папка (есть её строка-слот
                 // в «Выходах» — 🔌N-бейдж справа) при выборе светится зелёным
                 // #2e6b4f с inset-полосой #7fe0a8 — тем же цветом, что у
@@ -2267,8 +2299,8 @@ const reload = async () => {
                         }
                     } catch (e) { /* silent */ }
                 }
-                row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${active ? "#fff" : "#ccc"};background:${marked ? "rgba(224,138,60,.35)" : active ? activeBg : "transparent"};${marked ? "box-shadow:inset 3px 0 0 #e08a3c;" : active && slotOfFolder ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + depth * 14}px;`;
-                if (isFolder) row.title = "Клик — открыть · Ctrl+клик — пометить · Shift+клик — диапазон";
+                row.style.cssText = `display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:4px;cursor:pointer;font-size:11px;color:${active ? "#fff" : "#ccc"};background:${marked ? "rgba(224,138,60,.35)" : pick ? "#3a2d66" : active ? activeBg : "transparent"};${marked ? "box-shadow:inset 3px 0 0 #e08a3c;" : pick ? "box-shadow:inset 0 0 0 1px #b388ff;" : active && slotOfFolder ? "box-shadow:inset 3px 0 0 #7fe0a8;" : ""}padding-left:${4 + depth * 14}px;`;
+                if (isFolder) row.title = "Клик — открыть · Двойной клик — путь категории · Ctrl+клик — пометить · Shift+клик — диапазон";
                 const name = document.createElement("span");
                 name.style.cssText = "flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
                 name.title = isFolder ? key : label;
@@ -2286,21 +2318,25 @@ const reload = async () => {
                 } else {
                     name.textContent = (marked ? "☑ " : "") + label;
                 }
-                const mkColor = actMark ? "#4a9eff" : zMark ? "#7fe0a8" : "";
+                // Метка строки (§60.12/§60.13, §61): первый ребёнок строки
+                // — сразу слева от 📁, вместе с depth-отступом. Приоритет:
+                // синяя #4a9eff — папка активной карточки основного промпта;
+                // зелёная #7fe0a8 — карточка выбрана и активна на папку-вывод;
+                // фиолетовый кружок — путь категории (cat_pick). Inset-тень
+                // синей заменена элементом: на скруглённой строке она
+                // сужалась краями и висела у левого края («костыльно»).
+                const pickMark = pick && !actMark && !zMark;
+                const mkColor = pickMark ? "#b388ff" : actMark ? "#4a9eff" : zMark ? "#7fe0a8" : "";
                 if (mkColor) {
-                    // Элемент-метка (§60.12/§60.13): первый ребёнок строки
-                    // — сразу слева от 📁, вместе с depth-отступом. Синяя
-                    // #4a9eff — папка активной карточки основного промпта;
-                    // зелёная #7fe0a8 — карточка выбрана и активна на
-                    // папку-вывод. Inset-тень синей заменена элементом: на
-                    // скруглённой строке она сужалась краями и висела у
-                    // левого края, вдали от иконки («костыльно», отчёт
-                    // по скриншоту).
                     const mk = document.createElement("span");
-                    mk.style.cssText = `width:4px;height:13px;border-radius:2px;background:${mkColor};flex-shrink:0;`;
-                    mk.title = actMark
-                        ? "Папка карточки, включённой в основной промпт"
-                        : "Папка с выбранной и активной карточкой вывода";
+                    mk.style.cssText = pickMark
+                        ? `width:6px;height:6px;border-radius:50%;background:${mkColor};flex-shrink:0;`
+                        : `width:4px;height:13px;border-radius:2px;background:${mkColor};flex-shrink:0;`;
+                    mk.title = pickMark
+                        ? "Путь категории (двойной клик)"
+                        : actMark
+                            ? "Папка карточки, включённой в основной промпт"
+                            : "Папка с выбранной и активной карточкой вывода";
                     row.appendChild(mk);
                 }
                 row.appendChild(name);
@@ -2376,6 +2412,13 @@ const reload = async () => {
                                     // Метки/якорь переименованного пути едут следом
                                     if (st.markFolders.delete(key)) st.markFolders.add(newPath);
                                     if (st.anchorFolder === key) st.anchorFolder = newPath;
+                                    // v1.73 (§61): путь категории переименованной
+                                    // папки едет следом (и подпапки — по префиксу)
+                                    if (catPickW) {
+                                        const cp = String(catPickW.value || "");
+                                        if (cp === key) catPickW.value = newPath;
+                                        else if (cp.startsWith(key + "/")) catPickW.value = newPath + cp.slice(key.length);
+                                    }
                                     st.syncSaveFolder();
                                     await reload();
                                 } else st.toast("warn", "Prompt Library", "Не удалось переименовать.");
@@ -2392,6 +2435,13 @@ const reload = async () => {
                             const r = await st.apiPost("/prompt_library/folder_delete", { path: key });
                             if (r.ok) {
                                 if (st.selFolder === key || st.selFolder.startsWith(key + "/")) st.selFolder = "__all";
+                                // v1.73 (§61): удалённая папка не может оставаться
+                                // путём категории — выбор сбрасывается (фолбэк
+                                // на открытую папку, как до выбора)
+                                if (catPickW) {
+                                    const cp = String(catPickW.value || "");
+                                    if (cp === key || cp.startsWith(key + "/")) catPickW.value = "";
+                                }
                                 st.syncSaveFolder();
                                 await reload();
                             }
@@ -2425,6 +2475,20 @@ const reload = async () => {
                     renderTree();
                     render();
                 };
+                // v1.73 (§61): ДВОЙНОЙ клик по папке — путь категории на
+                // выходе 0 ноды. Повторный dblclick по той же папке снимает
+                // выбор; клик по чужой папке cat_pick не трогает (он обычный
+                // клик). Обработчик ставится только на реальные папки (не на
+                // служебные ветки __all/__fav/__outs и не на файлы) и только
+                // при наличии виджета: ветка без обработчика — честный no-op.
+                if (isFolder && !key.startsWith("__") && catPickW) {
+                    row.ondblclick = (ev) => {
+                        if (ev && (ev.ctrlKey || ev.metaKey || ev.shiftKey)) return;
+                        catPickW.value = String(catPickW.value || "") === key ? "" : key;
+                        renderTree();
+                        render();
+                    };
+                }
                 return row;
             };
 
