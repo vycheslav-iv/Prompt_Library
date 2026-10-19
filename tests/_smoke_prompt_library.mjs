@@ -5697,6 +5697,78 @@ await run("v1.73.6: проводник — привязанная карточк
     !!card3 && css(card3).includes("background:#2e6b4f"), css(card3).slice(0, 160));
 });
 
+// v1.73.7 (§66, задача пользователя): «если отдельно из папки подключить
+// карточку в "Выходы" и из этой же папки активировать ДРУГУЮ карточку в
+// основной промпт — папка помечается только синим». Контракт: синяя
+// (activeW, основной промпт) и зелёная (карточка на выходе) метки — ДВА
+// независимых статуса и СОСУЩЕСТВУЮТ: порядок 🟦🩵 (синяя слева, зелёная
+// справа), marked (☑) как раньше гасит обе, pick-кружок вытесняется
+// полосками (как было). КРАСНОЕ до правки: гейт zMark стоял под !actMark
+// (стр. 2308), зелёная даже не считалась — тест падает на «зелёная есть».
+await run("v1.73.7: папка с карточкой вывода И карточкой основного промпта — ДВЕ полоски", async () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.folders.push("Рабочая");
+  st.entries.push(mkSlotEntry("m1", "Рабочая"), mkSlotEntry("m2", "Рабочая"));
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "";
+  st.detailId = null;
+  st.selFolder = "__all";
+  const activeW = node.widgets.find((w) => w.name === "active");
+  // Карточка m1 подключена к «Выходам» (kind "card") → зелёная.
+  await st.plDrop({ kind: "entry", ids: ["m1"], id: "m1" }, "__outs");
+  st.renderTree(); st.render();
+  // Хелперы строки папки (по 📍/📌, как в v1.72.8/v1.72.9).
+  const folderRowOf = (key) => st.tree.children.find((r) => {
+    const t = ftext(r);
+    return t.includes(key) && (t.includes("📍") || t.includes("📌"));
+  });
+  const markChildOf = (key, color) => {
+    const r = folderRowOf(key);
+    return r && [...(r.children || [])]
+      .find((c) => String(c.style?.cssText || "").includes("background:" + color));
+  };
+  const markPosOf = (key, color) => {
+    const r = folderRowOf(key);
+    return r ? [...(r.children || [])].indexOf(markChildOf(key, color)) : -1;
+  };
+  // Сани: только подключённая m1 → одна зелёная, синей нет.
+  check("v1.73.7: только вывод — зелёная есть, синей нет",
+    !!markChildOf("Рабочая", "#7fe0a8") && !markChildOf("Рабочая", "#4a9eff"),
+    "green=" + !!markChildOf("Рабочая", "#7fe0a8") + " blue=" + !!markChildOf("Рабочая", "#4a9eff"));
+  // Активируем m2 в основной промпт → синяя. Обе должны сосуществовать.
+  activeW.value = "m2";
+  st.renderTree(); st.render();
+  // КРАСНОЕ до правки JS: гейт zMark под !actMark — зелёная не считается.
+  check("v1.73.7: вывод + основной промпт — синяя полоска ЕСТЬ",
+    !!markChildOf("Рабочая", "#4a9eff"),
+    "blue=" + !!markChildOf("Рабочая", "#4a9eff"));
+  check("v1.73.7: вывод + основной промпт — зелёная полоска ТОЖЕ ЕСТЬ",
+    !!markChildOf("Рабочая", "#7fe0a8"),
+    "green=" + !!markChildOf("Рабочая", "#7fe0a8"));
+  // Порядок: синяя слева (меньший индекс), зелёная справа.
+  check("v1.73.7: порядок — синяя левее зелёной",
+    markPosOf("Рабочая", "#4a9eff") >= 0
+      && markPosOf("Рабочая", "#7fe0a8") >= 0
+      && markPosOf("Рабочая", "#4a9eff") < markPosOf("Рабочая", "#7fe0a8"),
+    "bluePos=" + markPosOf("Рабочая", "#4a9eff") + " greenPos=" + markPosOf("Рабочая", "#7fe0a8"));
+  // Охранитель: сброс основного промпта → снова одна зелёная.
+  activeW.value = "";
+  st.renderTree(); st.render();
+  check("v1.73.7: сброс activeW — снова одна зелёная, синей нет",
+    !!markChildOf("Рабочая", "#7fe0a8") && !markChildOf("Рабочая", "#4a9eff"),
+    "green=" + !!markChildOf("Рабочая", "#7fe0a8") + " blue=" + !!markChildOf("Рабочая", "#4a9eff"));
+  // Охранитель marked (☑): гасит обе полоски (контракт не менялся).
+  activeW.value = "m2";
+  st.markFolders.add("Рабочая");
+  st.renderTree(); st.render();
+  check("v1.73.7: marked (☑) гасит обе полоски",
+    !markChildOf("Рабочая", "#4a9eff") && !markChildOf("Рабочая", "#7fe0a8"),
+    "blue=" + !!markChildOf("Рабочая", "#4a9eff") + " green=" + !!markChildOf("Рабочая", "#7fe0a8"));
+  st.markFolders.clear();
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");

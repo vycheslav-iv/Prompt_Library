@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.73.6-gal-card-bright-on";
+    const PL_JS_VERSION = "1.73.7-dual-folder-marks";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -2301,11 +2301,14 @@ const reload = async () => {
                 // пользователь: «активировал карточку в подпапке, а зелёный
                 // маркер стоит на основной корневой папке, а должен быть на
                 // подпапке». Без требования «карточка выбрана (selWidget)».
-                // Приоритет: синяя activeW-метка > зелёная; marked (☑) и
-                // открытая слот-папка (active && slotOfFolder, уже залита
-                // зелёным §60.11) гасят зелёную.
+                // Приоритет: marked (☑) и открытая слот-папка (active &&
+                // slotOfFolder, уже залита зелёным §60.11) гасят обе полоски.
+                // v1.73.7 (§66): синяя и зелёная метки — ДВА независимых
+                // статуса и СОСУЩЕСТВУЮТ (порядок 🟦🩵: синяя слева, зелёная
+                // справа). Раньше zMark считалась только при !actMark, и
+                // папка с выводом + основным промптом показывала одну синюю.
                 let zMark = false;
-                if (!actMark && !marked && isFolder && !(active && slotOfFolder)) {
+                if (!marked && isFolder && !(active && slotOfFolder)) {
                     try {
                         const fSlot = st.folderSlotForPath(key);
                         const aid = fSlot ? String(fSlot.active_id || "") : "";
@@ -2348,25 +2351,29 @@ const reload = async () => {
                 } else {
                     name.textContent = (marked ? "☑ " : "") + label;
                 }
-                // Метка строки (§60.12/§60.13, §61): первый ребёнок строки
-                // — сразу слева от 📁, вместе с depth-отступом. Приоритет:
-                // синяя #4a9eff — папка активной карточки основного промпта;
-                // зелёная #7fe0a8 — карточка выбрана и активна на папку-вывод;
-                // фиолетовый кружок — путь категории (cat_pick). Inset-тень
-                // синей заменена элементом: на скруглённой строке она
-                // сужалась краями и висела у левого края («костыльно»).
-                const pickMark = pick && !actMark && !zMark;
-                const mkColor = pickMark ? "#b388ff" : actMark ? "#4a9eff" : zMark ? "#7fe0a8" : "";
-                if (mkColor) {
+                // Метка строки (§60.12/§60.13, §61, §66): ребёнок строки —
+                // сразу слева от 📁, вместе с depth-отступом. v1.73.7 (§66):
+                // синяя и зелёная СОСУЩЕСТВУЮТ как две полоски — синяя слева
+                // (основной промпт activeW), зелёная справа (карточка на
+                // выходе). Полоски вытесняют фиолетовый кружок pick (как
+                // раньше вытесняла одна метка). Inset-тень синей заменена
+                // элементом: на скруглённой строке она сужалась краями и
+                // висела у левого края («костыльно»).
+                const bars = [];
+                if (actMark) bars.push({ c: "#4a9eff", t: "Папка карточки, включённой в основной промпт" });
+                if (zMark) bars.push({ c: "#7fe0a8", t: "Папка с карточкой, активной на выходе" });
+                const pickDot = pick && !actMark && !zMark;
+                if (bars.length) {
+                    for (const b of bars) {
+                        const mk = document.createElement("span");
+                        mk.style.cssText = `width:4px;height:13px;border-radius:2px;background:${b.c};flex-shrink:0;`;
+                        mk.title = b.t;
+                        row.appendChild(mk);
+                    }
+                } else if (pickDot) {
                     const mk = document.createElement("span");
-                    mk.style.cssText = pickMark
-                        ? `width:6px;height:6px;border-radius:50%;background:${mkColor};flex-shrink:0;`
-                        : `width:4px;height:13px;border-radius:2px;background:${mkColor};flex-shrink:0;`;
-                    mk.title = pickMark
-                        ? "Путь категории (двойной клик)"
-                        : actMark
-                            ? "Папка карточки, включённой в основной промпт"
-                            : "Папка с выбранной и активной карточкой вывода";
+                    mk.style.cssText = `width:6px;height:6px;border-radius:50%;background:#b388ff;flex-shrink:0;`;
+                    mk.title = "Путь категории (двойной клик)";
                     row.appendChild(mk);
                 }
                 row.appendChild(name);
