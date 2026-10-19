@@ -1,4 +1,4 @@
-# Память сессии — Prompt_Library (2026-10-19)
+# Память сессии — Prompt Library (2026-10-19, сессия 2: v1.73.6)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -6,58 +6,61 @@
 ---
 
 ## 1. Что делали в этой сессии (кратко)
-- Запушены три версии: **v1.73.1+v1.73.2** одним коммитом `91ae0be`
-  (выход 0 без выбора — пусто; кнопка отвязки — единый тёмный кружок на
-  3 сайтах + оптическая центровка ✕), затем **v1.73.3** коммитом `f0e9959`
-  (режим по умолчанию — «Выдача», не «Запись»).
-- SPEC дополнен: §60.16 (кружок/центровка), §61 (cat_pick), §62 (default mode).
-- Память: снапшоты `SESSION_MEMORY-history/2026-10-19-0627.md` и `-0705.md`.
+- Приняли баг-репорт: в обычном проводнике карточка, подключённая к выходам,
+  «независимо от активности всегда тускло-зелёная» — фикс v1.73.6 (контракт А
+  §64.1 распространён на галерею, SPEC §65): привязанная и `!off` → яркая
+  `#2e6b4f`/`#7fe0a8`, выключенная (dblclick) → тусклая `#1c3525`.
+- Красная ДО правки: правленная фаза v1.72 + новая фаза → ровно `FAIL: 5`.
+  После фикса: смоук 159 фаз SMOKE OK (было 158), Python 461/FAIL: 0, аудит чист.
+- Мутации 3/3 красные: (1) `cardBright` без `off` → 3 FAIL; (2) фикс убран из
+  обеих цепочек → 5 FAIL; (3) только border без `cardBright` → 2 FAIL;
+  восстановления зелёные. Пользователь: «Работает».
+- SPEC: шапка → v1.73.6, новый §65. `python _process/check.py Prompt_Library`
+  → ЗЕЛЁНОЕ, `python sync.py Prompt_Library` → 5 файлов, `__pycache__` очищен.
+- Коммит `921b0e2` (v1.73.4+v1.73.5+v1.73.6 — всё было в одном диффе от
+  `abaca9b`), запушено `abaca9b..921b0e2` в `vycheslav-iv/Prompt_Library`.
 
 ## 2. Итоговое состояние кода
-- `prompt_library_node.py:1781` — combo `mode` default = `MODE_ISSUE`
-  («📤 Выдача»; v1.73.3 — свежие ноды не пишут в базу сами; сохранённые
-  графы хранят своё значение в `widgets_values`).
-- `prompt_library_node.py:2163` — возврат `(cat_path, out_text, *slot_texts)`;
-  фолбэк на открытую папку УБРАН (v1.73.1). 8 полей required, `cat_pick` 8-м.
-- `web/js/prompt_library.js:154` — `PL_JS_VERSION = "1.73.2-unlink-circle"`
-  (JS в v1.73.3 не менялся; бамп обязателен при любой JS-правке).
-- `web/js/prompt_library.js:1702` — `st.mkUnlinkBtn(extraCss="")`: круг 14×14,
-  `#414141`/`#e05555`, `box-sizing:border-box`, `padding:0 0 1px`
-  (оптическая центровка — НЕ убирать). Вызовы: строка слота `:2564`,
-  карточка `:2731`, битая строка `:2801` (`"align-self:center;"`).
-- `tests/_test_prompt_library.py` — 461 тест; тест 51 (default mode == ISSUE).
-- `tests/_probe_unlink_center.py` — прибор центрирования (Chrome, порог 0.5px).
-- Смоук: 155 фаз. Проверки: `python _process/check.py Prompt_Library` — ЗЕЛЁНОЕ.
-- Git: `master` @ `f0e9959`, remote `vycheslav-iv/Prompt_Library`.
+- `web/js/prompt_library.js:3192` — `cardBright = !!(cardSlot0 && !cardSlot0.off)`
+  (галерейный блок, рядом с `outBind`/`outActive`).
+- `web/js/prompt_library.js:3234/3238` — цепочки `bg`/`border`: `outActive || cardBright`
+  на уровне яркости; порядок `mainActive > marked > outActive||cardBright > outMark > селект`.
+- `web/js/prompt_library.js:2727` — `makeOutCard` («Выходы», контракт А v1.73.5,
+  §64 — в этой сессии не менялся).
+- `web/js/prompt_library.js:154` — `PL_JS_VERSION = "1.73.6-gal-card-bright-on"`.
+- `tests/_smoke_prompt_library.mjs:5631` — фаза v1.73.6; правленная фаза v1.72
+  ~:4761 (комментарий раскрывает §2.3); всего 159 фаз.
+- `SPECIFICATION.md:5766` — §65; шапка v1.73.6.
 
 ## 3. Проблемы, которые встречались (и как решали)
-- Крестик ✕ ниже центра кружка (dy=+0.62…+0.88) — лечится нижним padding
-  при border-box; замер прибором `_probe_unlink_center.py`.
-- Pre-commit-хук блокирует коммит, если сообщение упоминает файл вне diff
-  (поймалось на «check.py») — убрать упоминание, не `--no-verify`.
-- `SESSION_MEMORY-history/` в .gitignore — снапшоты локальные, в git идёт
-  только `SESSION_MEMORY.md`.
+- **Конфликт задача↔старый тест (§2.3):** фаза v1.72 «привязанная — фон #1c3525,
+  заливки нет» требовала НЕ яркости для включённой карточки — правлен ТЕСТ под
+  контракт §65 (ассерт «включённая — ярко-зелёная»), охранитель выключенной остался.
+- **MUT3 (border-only)** дала только 2 FAIL — комбинированная проверка «фон+рамка»
+  ловит обе мутации, но фон-ассерт при этом зелёный: мутация корректно
+  дискриминирующая (фон яркий, рамка тусклая).
+- Старая гипотеза «fs теряется в подпапке Выходов» отвергнута уточнением
+  пользователя — целевой блок был обычный проводник, не «Выходы».
 
 ## 4. Что важно не сломать при продолжении работы
-- `padding:0 0 1px` в `mkUnlinkBtn` — оптическая центровка (мутация = FAIL).
-- v1.73.1: без dblclick-выбора cat_pick пустой — фолбэк НЕ возвращать.
-- v1.73.3: default mode = MODE_ISSUE — не возвращать MODE_WRITE; порядок
-  опций combo не трогать (протокол).
-- Порядок выходов 0=путь категории, 1=промпт 1 — детектор аудита
-  `_audit_prompt_library.mjs:141-147`.
-- После JS-правок: бамп `PL_JS_VERSION`; после всего — `sync.py` + рестарт
-  ComfyUI + Ctrl+F5.
+- Порядок цепочек `bg`/`border` галереи: `mainActive > marked >
+  outActive||cardBright > outMark > (isSelCard&&folderConn) > isSelCard`;
+  логику `folderConn`/`folderActOf` папок (§60.10/§60.11) не трогать.
+- `cardBright` обязан иметь guard `!cardSlot0.off` — мутация 1 доказала:
+  без него выключенные карточки светятся (3 FAIL).
+- `readOutSlots()` каждый вызов отдаёт НОВЫЕ объекты — мутация слота только
+  через `st.readOutSlots()` → мутация → `st.writeOutSlots(arr)`.
+- Python в этой сессии не менялся (461 тест — контракт не трогали).
+- Незакоммичено: только `SESSION_MEMORY.md` (коммит «память сессии» — по
+  шаблону репозитория).
 
 ## 5. Следующие шаги (идеи, не сделано)
-- Живая визуальная проверка пользователем после рестарта ComfyUI + Ctrl+F5:
-  центровка ✕ (v1.73.2) и новый дефолт «Выдача» у свежей ноды (v1.73.3).
-- Возможный скил по оптической центровке эмодзи-глифов в DOM-кнопках
-  (инк-замер + padding-коррекция) — предложить, если тема повторится.
+- Предложен скил `comfyui-out-card-brightness` (два кейса подряд: §64 «Выходы»,
+  §65 «проводник») — ответа пользователя нет, молча не создавать.
+- Живая проверка v1.73.6 пользователем подтверждена («Работает»).
 
 ## 6. Связанные файлы
-- `prompt_library_node.py` — Python-нода (v1.73.3)
-- `web/js/prompt_library.js` — JS-расширение (v1.73.2-unlink-circle)
-- `tests/_test_prompt_library.py` (461), `tests/_smoke_prompt_library.mjs` (155),
-  `tests/_audit_prompt_library.mjs`, `tests/_probe_unlink_center.py`
-- `SPECIFICATION.md` — §60.16, §61, §62
-- `check.json` — 3 проверки; запуск: `python _process/check.py Prompt_Library`
+- `F:\AI_projects\Custom_node_ComfyUI\Prompt_Library\web\js\prompt_library.js`
+- `F:\AI_projects\Custom_node_ComfyUI\Prompt_Library\tests\_smoke_prompt_library.mjs`
+- `F:\AI_projects\Custom_node_ComfyUI\Prompt_Library\SPECIFICATION.md` (§63-§65)
+- `F:\AI_projects\Custom_node_ComfyUI\Prompt_Library\SESSION_MEMORY-history\2026-10-19-1155.md`
