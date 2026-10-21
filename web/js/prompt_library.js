@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.74.5-pick-bar";
+    const PL_JS_VERSION = "1.75.0-audit-fixes";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -668,7 +668,6 @@ app.registerExtension({
                 try {
                     const selId = selWidget ? String(selWidget.value || "") : "";
                     const ent = selId ? st.entries.find((x) => x.id === selId) : null;
-                    const before = st.readOutSlots().length;
                     if (ent) {
                         const already = st.outSlotOfEntry(ent.id);
                         if (already) {
@@ -677,7 +676,15 @@ app.registerExtension({
                             return;
                         }
                         st.bindOutSlot({ kind: "card", id: ent.id, name: ent.title || ent.head || ent.id });
-                        st.hintSticky = `Карточка «${(ent.title || ent.head || ent.id).slice(0, 40)}» подключена к выходу «промпт ${before + 2}» (категория «🔌 Выходы»).`;
+                        // bindOutSlot мог отказать (лимит 10) — причина уже в
+                        // тосте; раньше подсказка всё равно писала «подключена».
+                        const slotNow = st.outSlotOfEntry(ent.id);
+                        if (!slotNow) {
+                            st.hintSticky = "Выход не подключён — все 10 заняты.";
+                            st.renderHint?.();
+                            return;
+                        }
+                        st.hintSticky = `Карточка «${(ent.title || ent.head || ent.id).slice(0, 40)}» подключена к выходу «промпт ${slotNow.i}» (категория «🔌 Выходы»).`;
                         st.renderHint?.();
                         return;
                     }
@@ -690,7 +697,13 @@ app.registerExtension({
                             return;
                         }
                         st.bindOutSlot({ kind: "folder", path: f, active_id: "", name: f.split("/").pop() || f });
-                        st.hintSticky = `Категория «${f}» подключена к выходу «промпт ${before + 2}» — внутри неё выберите карточку вывода.`;
+                        const slotNow = st.outSlotOfFolder(f);
+                        if (!slotNow) {
+                            st.hintSticky = "Выход не подключён — все 10 заняты.";
+                            st.renderHint?.();
+                            return;
+                        }
+                        st.hintSticky = `Категория «${f}» подключена к выходу «промпт ${slotNow.i}» — внутри неё выберите карточку вывода.`;
                         st.renderHint?.();
                         return;
                     }
@@ -1165,6 +1178,31 @@ app.registerExtension({
                 }
                 return r;
             };
+            // Строгий вариант apiPost: отказ сервера (4xx/5xx) БРОСАЕТ.
+            // Причина: `apiPost` не бросает на non-2xx, а bSave/переименование/
+            // удаление раньше принимали любой ответ за успех — закрывали правку
+            // и выкидывали запись из кэша, хотя сервер ничего не записал
+            // (текст пользователя пропадал). Тихий режим здесь не нужен:
+            // обновление соседей делает сам apiPostOk только при успехе.
+            st.apiPostOk = async (path, payload) => {
+                const r = await st.apiPost(path, payload, { quiet: true });
+                if (r && r.ok) {
+                    try { plRefreshLocal(st); } catch (e) { /* silent */ }
+                    return r;
+                }
+                let msg = "";
+                try { msg = String(await r.text()).slice(0, 300); } catch (e) { /* silent */ }
+                const err = new Error(msg || `HTTP ${r ? r.status : "?"}`);
+                err.status = (r && r.status) || 0;
+                throw err;
+            };
+            // Отказ мутации — видимая причина в нижней строке. Без неё отказ
+            // выглядел как «ничего не произошло» (и правка молча закрывалась).
+            st.failHint = (what, err) => {
+                const code = err && err.status ? `HTTP ${err.status}` : "сеть";
+                st.hintSticky = `${what}: сервер отказал (${code}). ${err && err.message ? String(err.message).slice(0, 160) : ""}`.trim();
+                st.renderHint?.();
+            };
 
             // Открыть воркфлоу записи на канвасе (как дроп PNG с workflow).
             // Деструктивно (заменяет текущий граф) — всегда через confirm.
@@ -1206,9 +1244,12 @@ app.registerExtension({
             // наш тип забираем себе (stopImmediatePropagation), чужое не трогаем.
             st.hookCanvasDrop = () => {
                 try {
-                    if (window.__plCanvasDropHooked) return;
                     const cv = app.canvas && app.canvas.canvas;
                     if (!cv || typeof cv.addEventListener !== "function") return;
+                    // Канвас пересоздаётся при смене legacy ↔ Nodes 2.0. Флаг без
+                    // ссылки на элемент считал «уже подключено» и новый канвас
+                    // оставался без дропа до F5.
+                    if (window.__plCanvasDropHooked && window.__plCanvasDropEl === cv) return;
                     cv.addEventListener("dragover", (ev) => {
                         try {
                             const t = (ev.dataTransfer && ev.dataTransfer.types) || [];
@@ -1234,6 +1275,7 @@ app.registerExtension({
                         await (live || st).openWorkflow(ids[0]);
                     }, true);
                     window.__plCanvasDropHooked = true;
+                    window.__plCanvasDropEl = cv;
                 } catch (e) { /* silent */ }
             };
             st.hookCanvasDrop();
@@ -1902,7 +1944,13 @@ app.registerExtension({
 const reload = async () => {
     try {
         const r = await fetch("/prompt_library/list");
-        if (!r.ok) return;
+        if (!r.ok) {
+            // Молчаливый return оставлял пустой UI без объяснения (а после сбоя
+            // сервера выглядел как «библиотека пуста»). Причина — в нижней строке.
+            st.hintSticky = `Не удалось прочитать библиотеку (HTTP ${r.status}).`;
+            st.renderHint?.();
+            return;
+        }
         const data = await r.json();
         st.entries = (data.entries || []).map(plMap);
                     st.folders = data.folders || [];
@@ -2945,7 +2993,16 @@ const reload = async () => {
                 if (by === "title") arr = [...arr].sort((a, b) => (a.title || a.head).localeCompare(b.title || b.head, "ru"));
                 else if (by === "old") arr = [...arr].sort((a, b) => ts(a.created_at) < ts(b.created_at) ? -1 : ts(a.created_at) > ts(b.created_at) ? 1 : 0);
                 else if (by === "used") arr = [...arr].sort((a, b) => ts(b.last_used || "") < ts(a.last_used || "") ? -1 : ts(b.last_used || "") > ts(a.last_used || "") ? 1 : 0);
-                else if (by === "freq") arr = [...arr].sort((a, b) => (b.use_count || 0) - (a.use_count || 0) || ts(b.last_used || "") < ts(a.last_used || "") ? -1 : ts(b.last_used || "") > ts(a.last_used || "") ? 1 : 0);
+                else if (by === "freq") arr = [...arr].sort((a, b) => {
+                    // Порядок по use_count, затем свежесть. Раньше здесь стоял
+                    // `a - b || X ? -1 : ...` — из-за приоритета `||` над `?:`
+                    // компаратор возвращал -1 на ЛЮБОЙ паре с разными счётчиками,
+                    // то есть «Частые» сортировались как попало.
+                    const d = (b.use_count || 0) - (a.use_count || 0);
+                    if (d) return d;
+                    const la = ts(a.last_used || ""), lb = ts(b.last_used || "");
+                    return la < lb ? 1 : la > lb ? -1 : 0;
+                });
                 else arr = [...arr].sort((a, b) => ts(b.created_at) < ts(a.created_at) ? -1 : ts(b.created_at) > ts(a.created_at) ? 1 : 0);
                 // Закреп (v1.30, §36): ТОЛЬКО в папке — закреплённые всплывают
                 // поверх выбранного порядка, внутри групп порядок сохраняется.
@@ -2956,6 +3013,8 @@ const reload = async () => {
                 }
                 return arr;
             };
+            // Доступно тестам: выборка/порядок одним местом.
+            st.sortedFiltered = sortedFiltered;
 
             // Карточка вывода (категория «Выходы»): превью и название, как у
             // обычной карточки — раньше здесь была голая текстовая строка без
@@ -3563,10 +3622,15 @@ const reload = async () => {
                         card.draggable = false; // пока правим — карточку нельзя утащить
                         st.inlineEdit(title, e.title || e.head || "", async (next) => {
                             try {
-                                await st.apiPost("/prompt_library/update", { id: e.id, title: next });
-                                e.title = next;
-                                st.full.delete(e.id);
-                            } catch (err) { /* silent */ }
+                                await st.apiPostOk("/prompt_library/update", { id: e.id, title: next });
+                            } catch (err) {
+                                // Отказ: старое название остаётся, причина видна.
+                                st.failHint("Переименовать", err);
+                                renderTree(); render();
+                                return;
+                            }
+                            e.title = next;
+                            st.full.delete(e.id);
                             render();
                         });
                     };
@@ -3579,14 +3643,18 @@ const reload = async () => {
                         ev.stopPropagation();
                         if (!confirm(`Удалить «${e.title || e.head}»?`)) return;
                         try {
-                            await st.apiPost("/prompt_library/delete", { id: e.id });
-                            st.entries = st.entries.filter((x) => x.id !== e.id);
-                            st.full.delete(e.id);
-                            st.previewStamp.delete(e.id);
-                            if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; st.shrinkBack?.(); }
-                            renderTree(); render();
-                            if (!st._vuePanes) st.syncNodeSize?.();
-                        } catch (err) { /* silent */ }
+                            await st.apiPostOk("/prompt_library/delete", { id: e.id });
+                        } catch (err) {
+                            // Карточка ОСТАЁТСЯ: сервер её не удалил.
+                            st.failHint("Удалить", err);
+                            return;
+                        }
+                        st.entries = st.entries.filter((x) => x.id !== e.id);
+                        st.full.delete(e.id);
+                        st.previewStamp.delete(e.id);
+                        if (st.detailId === e.id) { st.detailId = null; st.detail.style.display = "none"; st.shrinkBack?.(); }
+                        renderTree(); render();
+                        if (!st._vuePanes) st.syncNodeSize?.();
                     };
 
                     card.onclick = async (ev) => {
@@ -3722,14 +3790,15 @@ const reload = async () => {
                 if (paths.length) parts.push(`категорий: ${paths.length}`);
                 const extra = paths.length ? " Записи из удалённых категорий не пропадут — переедут в корень." : "";
                 if (!confirm(`Удалить ${parts.join(" и ")}?${extra}`)) return;
+                let failed = null;
                 try {
                     if (ids.length) {
-                        await st.apiPost("/prompt_library/delete_many", { ids });
+                        await st.apiPostOk("/prompt_library/delete_many", { ids });
                     }
                     if (paths.length) {
-                        await st.apiPost("/prompt_library/folder_delete_many", { paths });
+                        await st.apiPostOk("/prompt_library/folder_delete_many", { paths });
                     }
-                } catch (err) { /* silent */ }
+                } catch (err) { failed = err; }
                 st.markEntries.clear(); st.markFolders.clear();
                 st.anchorEntry = null; st.anchorFolder = null;
                 for (const id of ids) st.previewStamp.delete(id); // метки удалённых записей
@@ -3743,7 +3812,10 @@ const reload = async () => {
                     st.selFolder = "__all";
                     st.syncSaveFolder();
                 }
+                // Сервер авторитетен: перечитываем список и при отказе — иначе UI
+                // показывал бы «удалено», хотя delete_many вернул 4xx/5xx.
                 await reload();
+                if (failed) st.failHint("Удаление", failed);
             };
             // Переименование на месте (без prompt() сверху браузера): текстовый
             // узел заменяется input'ом. Enter/уход фокуса — применить (пусто или
@@ -3914,16 +3986,23 @@ const reload = async () => {
             bSave.onclick = async () => {
                 if (!st.detailId || st._savingEdit) return; // защита от двойного клика (§32)
                 st._savingEdit = true;
+                const saveId = st.detailId;
                 try {
-                    await st.apiPost("/prompt_library/update", { id: st.detailId, title: st.dTitle.value,
+                    await st.apiPostOk("/prompt_library/update", { id: saveId, title: st.dTitle.value,
                         prompt: st.dText.value, folder: st.dFolder.value });
-                    st.full.delete(st.detailId);
-                    for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
-                    st.bSave.style.display = "none";
-                    if (st.bCancel) st.bCancel.style.display = "none";
-                    if (st.bPreview) st.bPreview.style.display = "none";
-                    await reload();
-                } catch (err) { /* silent */ }
+                } catch (err) {
+                    // Отказ сервера: правка ОСТАЁТСЯ открытой, введённый текст и
+                    // режим на месте — иначе несохранённое молча пропадало.
+                    st._savingEdit = false;
+                    st.failHint("Сохранить", err);
+                    return;
+                }
+                st.full.delete(saveId);
+                for (const el of [st.dTitle, st.dFolder, st.dText]) el.readOnly = true;
+                st.bSave.style.display = "none";
+                if (st.bCancel) st.bCancel.style.display = "none";
+                if (st.bPreview) st.bPreview.style.display = "none";
+                await reload();
                 st._savingEdit = false;
             };
 
@@ -5670,7 +5749,7 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
                     return usedByDir.get(key);
                 };
                 const cards = [];
-                let done = 0, failed = 0;
+                let done = 0, failed = 0, writeErr = null;
                 const badNames = [];
                 try {
                     for (const e of sel) {
@@ -5702,14 +5781,23 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
                     const wtr = await fh.createWritable();
                     await wtr.write(html);
                     await wtr.close();
+                } catch (err) {
+                    // Провал записи самого prompt_library.html (папка защищена,
+                    // файл занят, нет прав) — это НЕ «готово»: раньше ошибка
+                    // улетала в unhandled rejection, а подсказка врала об успехе.
+                    writeErr = err;
                 } finally {
                     st.setExportProgress(false);
-                    st.hintSticky = failed
-                        ? `Готово: ${done} из ${sel.length}${badNames.length ? `, не удались: ${badNames.join(", ")}` : ""}.`
-                        : `${hintPrefix}: ${done} записей → prompt_library.html.`;
+                    if (writeErr) {
+                        st.hintSticky = `${hintPrefix}: галерея НЕ сохранена (${writeErr?.message || writeErr}). Собрано карточек: ${done} из ${sel.length}.`;
+                    } else if (failed) {
+                        st.hintSticky = `Готово: ${done} из ${sel.length}${badNames.length ? `, не удались: ${badNames.join(", ")}` : ""}.`;
+                    } else {
+                        st.hintSticky = `${hintPrefix}: ${done} записей → prompt_library.html.`;
+                    }
                     st.renderHint?.();
                 }
-                return { done, failed };
+                return { done, failed, written: !writeErr, error: writeErr };
             };
             // Галерея по текущей категории / «Всё» / «Избранное» / «Без категории» —
             // та же умная выборка и зеркало, что у .md-экспорта (§39).
@@ -5835,12 +5923,68 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
                 st.renderHint?.();
             };
 
-            // --- Сторож цикла: IMAGE подключён + выход куда-то идёт = кольцо в графе ---
+            // --- Сторож цикла: кольцо = путь от НАШЕГО выхода назад к источнику IMAGE ---
+            // Раньше сторож кричал на «IMAGE подключён + любой выход занят», хотя
+            // такая схема законна (IMAGE от LoadImage выше, промпт в CLIP ниже) и
+            // кольца не образует. Кольцо — это когда, идя ПО ПРОВОДАМ вперёд от
+            // нашей ноды, мы возвращаемся к узлу, который питает наш вход image
+            // (или к себе). Проверяем именно это.
+            const _linkById = (id) => {
+                try {
+                    const links = this.graph?.links;
+                    if (!links) return null;
+                    if (typeof links.get === "function") return links.get(id) || null;
+                    return links[id] || null;
+                } catch (e) { return null; }
+            };
+            const _nodeById = (id) => {
+                try {
+                    const g = this.graph;
+                    if (!g) return null;
+                    if (typeof g.getNodeById === "function") return g.getNodeById(id) || null;
+                    const arr = g._nodes || [];
+                    return arr.find((n) => n && n.id === id) || null;
+                } catch (e) { return null; }
+            };
+            st.hasCycleByWires = () => {
+                try {
+                    const imgIdx = this.inputs?.findIndex((i) => i.name === "image") ?? -1;
+                    if (imgIdx < 0) return false;
+                    const inLinkId = this.inputs[imgIdx]?.link;
+                    if (inLinkId == null) return false;
+                    const inLink = _linkById(inLinkId);
+                    if (!inLink) return false;
+                    const srcNode = _nodeById(inLink.origin_id);
+                    // Источника нет в графе — проверить нечем, НЕ пугаем.
+                    if (!srcNode) return false;
+                    const seen = new Set([this.id]);
+                    const queue = [this];
+                    while (queue.length) {
+                        const n = queue.shift();
+                        // Кольцо на себя (выход в свой же вход)
+                        for (const out of n.outputs || []) {
+                            for (const lid of out.links || []) {
+                                const l = _linkById(lid);
+                                if (!l) continue;
+                                if (l.target_id === this.id) return true;
+                                const next = _nodeById(l.target_id);
+                                if (!next) continue;
+                                if (next === srcNode || next.id === srcNode.id) return true;
+                                if (seen.has(next.id)) continue;
+                                seen.add(next.id);
+                                queue.push(next);
+                            }
+                        }
+                    }
+                    return false;
+                } catch (e) { return false; }
+            };
             const checkCycle = () => {
                 try {
                     const imgLinked = (this.inputs?.find((i) => i.name === "image")?.link ?? null) != null;
-                    const outLinked = (this.outputs?.[0]?.links?.length || 0) > 0;
-                    const bad = imgLinked && outLinked;
+                    const outLinked = (this.outputs || []).some((o) => (o?.links?.length || 0) > 0);
+                    // Дешёвый отсев, затем настоящая проверка пути по проводам.
+                    const bad = imgLinked && outLinked && !!st.hasCycleByWires?.();
                     let changed = false;
                     if (bad && !st.cycleWarned) {
                         st.cycleWarned = true;
@@ -5905,7 +6049,11 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
             st.ensureIssueSafe = async () => {
                 try {
                     const idx = this.inputs?.findIndex((i) => i.name === "image");
-                    if (idx !== undefined && idx >= 0 && this.inputs[idx].link != null) {
+                    const inLinkId = (idx != null && idx >= 0) ? this.inputs[idx]?.link : null;
+                    // Спрашиваем про отключение только при НАСТОЯЩЕМ кольце:
+                    // IMAGE + занятый выход сами по себе кольца не создают.
+                    const realCycle = inLinkId != null && !!st.hasCycleByWires?.();
+                    if (realCycle) {
                         let ok = false;
                         try {
                             ok = await app.extensionManager.dialog.confirm({

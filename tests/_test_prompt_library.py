@@ -2261,8 +2261,26 @@ _wf50r = {"nodes": [
      "widgets_values": [1024, 1840, 1]},
 ], "links": [[701, 20, 0, 2, 0, "INT"], [702, 20, 1, 2, 1, "INT"]]}
 _meta50r = mod._gen_meta(_wf50r, role_of=_role41c)
-check("41c: разрешение из Degg Res Set (preset 1: 16:9, 0.5 МП) — 960x536, а не виджет 1024x1840",
-      (_meta50r.get("width"), _meta50r.get("height")) == (960, 536), str(_meta50r))
+check("41c: разрешение из Degg Res Set (preset 1: 16:9, 0.5 МП) — 968x544 (round, как в deg_res_set), а не виджет 1024x1840",
+      (_meta50r.get("width"), _meta50r.get("height")) == (968, 544), str(_meta50r))
+# Паритет формулы с deg_res_set.py (M2): масштаб считается от ПЛОЩАДИ аспекта,
+# к кратности — round(), а не floor(). Таблица — реальные выходы deg_res_set.py;
+# старый floor() давал 1928x1080 / 1176x880 / 1560x664 / 768x1360 / 1360x768,
+# то есть галерея показывала разрешение, которого нода не выдавала.
+def _drs_res(aspect, mp, mult):
+    _n = dict(_drs50, widgets_values_named={"select": 1, "aspect_ratio": aspect,
+                                            "megapixels": mp, "multiple": mult,
+                                            "w1": 512, "h1": 512, "w2": 768, "h2": 768,
+                                            "w3": 1088, "h3": 2336})
+    return (mod._degg_res_set_output(_n, 0), mod._degg_res_set_output(_n, 1))
+for _asp, _mp, _mult, _want in (
+        ("16:9 (Widescreen)", 2.0, 8, (1928, 1088)),
+        ("4:3 (Standard)", 1.0, 8, (1184, 888)),
+        ("21:9 (Ultrawide)", 1.0, 8, (1568, 672)),
+        ("9:16 (Portrait)", 1.0, 8, (768, 1368)),
+        ("16:9 (Widescreen)", 1.0, 8, (1368, 768))):
+    check(f"41d: паритет deg_res_set {_asp} {_mp}МП ×{_mult} → {_want[0]}x{_want[1]}",
+          _drs_res(_asp, _mp, _mult) == _want, str(_drs_res(_asp, _mp, _mult)))
 _drs50b = dict(_drs50, widgets_values_named={"select": 3, "aspect_ratio": "1:1 (Square)",
                                               "megapixels": 1.0, "multiple": 8,
                                               "w1": 512, "h1": 512, "w2": 768, "h2": 768,
@@ -2709,6 +2727,37 @@ check("51: default режим — «Выдача», не «Запись»",
       _def51 == mod.PromptLibrary.MODE_ISSUE,
       f"default={_def51!r}")
 
+
+print("")
+print("52. атомарная запись PNG (M8): обрыв не оставляет битый файл")
+
+check("52: _atomic_write существует", hasattr(mod, "_atomic_write"))
+if hasattr(mod, "_atomic_write"):
+    _dst = out_dir / "atomic-test.png"
+
+    class _BoomImg:
+        def save(self, path, fmt=None, **kw):
+            with open(path, "wb") as fh:
+                fh.write(b"partial")
+            raise OSError("disk full")
+
+    try:
+        mod._atomic_write(_dst, lambda p: _BoomImg().save(p, "PNG"))
+        check("52: ошибка записи пробрасывается", False, "исключения не было")
+    except OSError:
+        check("52: ошибка записи пробрасывается", True)
+    check("52: битого файла по рабочему пути нет", not _dst.exists())
+    check("52: временный файл убран",
+          not list(out_dir.glob("atomic-test.png.*")), str(list(out_dir.glob("atomic-test.png.*"))))
+
+    class _OkImg:
+        def save(self, path, fmt=None, **kw):
+            with open(path, "wb") as fh:
+                fh.write(b"png")
+
+    mod._atomic_write(_dst, lambda p: _OkImg().save(p, "PNG"))
+    check("52: успешная запись даёт файл по рабочему пути",
+          _dst.exists() and _dst.read_bytes() == b"png")
 
 # --- итог -------------------------------------------------------------------
 _p(f"\n=== ok: {len(oks)} | FAIL: {len(fails)}")

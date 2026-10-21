@@ -466,22 +466,37 @@ await run("checkCycle: без изменений — без запросов п�
   node._pl.checkCycle(); node._pl.checkCycle();
   check("спокойное состояние не дёргает канвас", dirty === 0, `dirty=${dirty}`);
 
-  // кольцо: image подключён + выход ведёт куда-то → ровно одна перерисовка на смену
+  // Сторож кольца ищет ПУТЬ назад к источнику IMAGE (M4). Законная схема
+  // «IMAGE от LoadImage выше, промпт в CLIP ниже» кольца не образует — раньше
+  // сторож кричал на неё ложно.
+  const nUp = { id: 100, inputs: [], outputs: [{ links: [7] }] };   // источник IMAGE
+  const nDown = { id: 200, inputs: [{ link: 3 }], outputs: [] };    // потребитель промпта
+  node.graph.links = {
+    7: { id: 7, origin_id: 100, origin_slot: 0, target_id: 1, target_slot: 1 },
+    3: { id: 3, origin_id: 1, origin_slot: 1, target_id: 200, target_slot: 0 },
+  };
+  node.graph.getNodeById = (id) => ({ 1: node, 100: nUp, 200: nDown }[id] || null);
   node.inputs.find((i) => i.name === "image").link = 7;
-  node.outputs[0].links = [3];
+  node.outputs[1].links = [3];
   const before = dirty;
   node._pl.checkCycle();
-  check("кольцо подсвечивается одним запросом", dirty === before + 1, `dirty=${dirty}`);
+  check("законная схема (IMAGE выше, промпт ниже) — НЕ кольцо", dirty === before, `dirty=${dirty}`);
+
+  // А вот выход, идущий В источник IMAGE, — настоящее кольцо
+  node.graph.links[3] = { id: 3, origin_id: 1, origin_slot: 1, target_id: 100, target_slot: 0 };
+  const mid = dirty;
   node._pl.checkCycle();
-  check("повторный вызов не дёргает канвас", dirty === before + 1, `dirty=${dirty}`);
+  check("кольцо подсвечивается одним запросом", dirty === mid + 1, `dirty=${dirty}`);
+  node._pl.checkCycle();
+  check("повторный вызов не дёргает канвас", dirty === mid + 1, `dirty=${dirty}`);
 
   // снятие кольца — снова ровно одна перерисовка
   node.inputs.find((i) => i.name === "image").link = null;
-  const mid = dirty;
+  const mid2 = dirty;
   node._pl.checkCycle();
-  check("снятие кольца — один запрос", dirty === mid + 1, `dirty=${dirty}`);
+  check("снятие кольца — один запрос", dirty === mid2 + 1, `dirty=${dirty}`);
   node._pl.checkCycle();
-  check("после снятия — тишина", dirty === mid + 1, `dirty=${dirty}`);
+  check("после снятия — тишина", dirty === mid2 + 1, `dirty=${dirty}`);
 });
 
 // --- Мультивыделение: диапазон и эксклюзив (исполнение настоящего кода) ---
@@ -1560,6 +1575,117 @@ await run("редактирование: ✖ Отмена возвращает �
   } finally {
     appStub.extensionManager.dialog.confirm = origConfirm;
   }
+});
+
+// --- H1 (аудит): отказ сервера не выдаётся за успех --------------------------
+// `apiPost` не бросает на 4xx/5xx. До правки bSave закрывал правку и удалял
+// запись из кэша при любом ответе — введённый текст пропадал, а карточки
+// «удалялись» из UI, оставаясь на сервере.
+await run("H1: отказ /update оставляет правку открытой и текст в поле", async () => {
+  const node = makeNode();
+  node.id = 52;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  st.full.set("e1", { id: "e1", title: "Запись", folder: "Фото", prompt: "старый", media: "image" });
+  await st.fillDetail("e1");
+  const origFetch = sandbox.fetch;
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    if (url.includes("/prompt_library/update"))
+      return { ok: false, status: 500, json: async () => ({}), text: async () => "boom" };
+    return jsonResponse({});
+  };
+  try {
+    st.bEdit.onclick();
+    st.dText.value = "новый текст, который нельзя терять";
+    await st.bSave.onclick();
+    check("H1: правка осталась открытой (💾 виден)", st.bSave.style.display === "",
+      String(st.bSave.style.display));
+    check("H1: поле всё ещё редактируется", st.dText.readOnly === false);
+    check("H1: введённый текст не потерян",
+      st.dText.value === "новый текст, который нельзя терять", String(st.dText.value));
+    check("H1: запись не выброшена из кэша", st.full.has("e1"));
+    check("H1: причина отказа видна в нижней строке",
+      String(st.hintSticky || "").includes("500"), String(st.hintSticky));
+    check("H1: защита от двойного клика снята", st._savingEdit === false);
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+await run("H1: отказ delete_many не прячет записи и сообщает причину", async () => {
+  const node = makeNode();
+  node.id = 53;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const srv = { id: "e1", title: "e1", prompt: "e1", folder: "A", favorite: false,
+    pinned: false, created_at: "2026-09-19T01:00:00", last_used: null,
+    preview: null, has_workflow: false, media: null };
+  const origFetch = sandbox.fetch;
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list"))
+      return jsonResponse({ entries: [srv], folders: ["A"] });
+    if (url.includes("/prompt_library/delete_many"))
+      return { ok: false, status: 409, json: async () => ({}), text: async () => "locked" };
+    return jsonResponse({});
+  };
+  try {
+    await st.reload();
+    st.markEntries.add("e1");
+    await st.bulkDelete();
+    // Сервер — источник истины: запись осталась, UI перечитал список.
+    check("H1: запись не исчезла из локального списка после отказа",
+      st.entries.some((e) => e.id === "e1"), JSON.stringify(st.entries.map((e) => e.id)));
+    check("H1: причина отказа delete видна",
+      String(st.hintSticky || "").includes("409"), String(st.hintSticky));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+// --- M5: «Частые» сортирует по счётчику, затем по свежести ------------------
+// Было `a - b || X ? -1 : ...`: приоритет `||` над `?:` превращал компаратор
+// в «всегда -1» на паре с разными счётчиками — порядок был произвольным.
+await run("M5: «Частые» — use_count, затем свежесть", () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const mk = (id, n, used) => ({ id, title: id, head: id, folder: "", favorite: false,
+    created_at: "2026-01-01T00:00:00", last_used: used, use_count: n,
+    has_preview: false, has_workflow: false, media: "image" });
+  st.entries = [mk("a", 2, "2025-01-01T00:00:00"), mk("b", 5, "2025-01-01T00:00:00"),
+                mk("c", 5, "2026-03-01T00:00:00"), mk("d", 0, null)];
+  st.selFolder = "__all";
+  st.sortSel.value = "freq";
+  const ids = st.sortedFiltered().map((e) => e.id).join(",");
+  check("M5: порядок c,b,a,d (5 свежее → 2 → 0)", ids === "c,b,a,d", ids);
+  st.sortSel.value = "new";
+  const ids2 = st.sortedFiltered().map((e) => e.id).join(",");
+  check("M5: прочие сортировки не задеты", ids2.length === 7, ids2);
+});
+
+// --- M5: провал записи prompt_library.html не выдаётся за успех -------------
+await run("M5: провал записи галереи — честная подсказка и written:false", async () => {
+  const node = makeNode();
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  st.loadFulls = async (ids) => new Map(ids.map((id) => [id, { id, title: id, prompt: "p", folder: "" }]));
+  st.loadMetas = async () => new Map();
+  st.ensureDirPath = async () => ({});
+  st.writeGalleryPreview = async () => "x.png";
+  st.entryToHtml = () => "<div></div>";
+  st.galleryShell = () => "<html></html>";
+  st.gallerySections = () => "";
+  st.setExportProgress = () => {};
+  st.renderHint = () => {};
+  const root = { getFileHandle: async () => { throw new Error("denied"); } };
+  const res = await st._galleryWrite(root, [{ id: "e1", title: "e1", folder: "" }],
+    "Всё", () => "", "Галерея «Всё»");
+  check("M5: written=false при отказе записи", res && res.written === false, JSON.stringify(res));
+  check("M5: подсказка говорит «НЕ сохранена», а не «Готово»",
+    /НЕ сохранена/.test(String(st.hintSticky || "")), String(st.hintSticky));
 });
 
 // --- v1.32: панель свойств не трогает наши виджеты (§37.10) ------------------
@@ -2788,6 +2914,48 @@ await run("slots: кнопка «🔌 Подключить выход» берё
   btn.onclick();
   check("повторное подключение того же — предупреждение, без дубля",
     st.readOutSlots().length === 2 && toasts.length === 2, `slots=${st.readOutSlots().length}, toasts=${toasts.length}`);
+});
+
+await run("M6: при 10 занятых выходах кнопка не врёт об успехе", () => {
+  const node = mkSlotNode();
+  const st = node._pl;
+  addSlotEnv(node);
+  st.toast = () => {};
+  for (let i = 0; i < 10; i++) st.bindOutSlot({ kind: "card", id: "x" + i, name: "x" + i });
+  st.entries.push(mkSlotEntry("e-limit", "Фото"));
+  st.selWidget = node.widgets.find((w) => w.name === "selected");
+  st.selWidget.value = "e-limit";
+  st.selFolder = "__all";
+  st.hintSticky = null;
+  const btn = st.listHead.children[0];
+  btn.onclick();
+  check("M6: сверх лимита не добавилось", st.readOutSlots().length === 10, String(st.readOutSlots().length));
+  check("M6: подсказка не утверждает, что подключено",
+    !/подключена/i.test(String(st.hintSticky || "")), String(st.hintSticky));
+});
+
+await run("M7: хук дропа переподключается к пересозданному канвасу", () => {
+  const prevCv = appStub.canvas.canvas;
+  const prevFlag = windowStub.__plCanvasDropHooked;
+  const prevEl = windowStub.__plCanvasDropEl;
+  const added = [];
+  appStub.canvas.canvas = { addEventListener: (t) => added.push(t) };
+  windowStub.__plCanvasDropHooked = true;   // «старый» хук уже стоял на другом элементе
+  windowStub.__plCanvasDropEl = null;
+  try {
+    const node = makeNode();
+    proto.onNodeCreated.call(node);         // внутри вызывается hookCanvasDrop
+    check("M7: новый канвас получил dragover",
+      added.includes("dragover"), JSON.stringify(added));
+    check("M7: новый канвас получил drop",
+      added.includes("drop"), JSON.stringify(added));
+    check("M7: запомнен именно новый элемент",
+      windowStub.__plCanvasDropEl === appStub.canvas.canvas);
+  } finally {
+    appStub.canvas.canvas = prevCv;
+    windowStub.__plCanvasDropHooked = prevFlag;
+    windowStub.__plCanvasDropEl = prevEl;
+  }
 });
 
 await run("slots: рендер «🔌 Выходы» — карточка с превью, битая привязка, отвязка ✖", () => {

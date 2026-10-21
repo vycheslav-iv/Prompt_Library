@@ -12,6 +12,7 @@
 невозможно. См. SPECIFICATION.md.
 """
 
+import asyncio
 import datetime
 import hashlib
 import json
@@ -479,6 +480,24 @@ def _extract_frame(source):
     return source
 
 
+def _atomic_write(dst, write_fn):
+    """Запись файла через временный сосед + os.replace.
+
+    Прямая запись в рабочий путь оставляет битый PNG, если процесс упал или
+    диск кончился на середине (а имя уже отдано как preview). Исключение
+    пробрасывается, но рабочего файла после обрыва не остаётся."""
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        write_fn(tmp)
+        os.replace(tmp, dst)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+
+
 def _save_thumbnail(image, entry_id, workflow=None):
     """Первый кадр IMAGE-тензора как PNG-превью 512px со встроенным workflow
     (как SaveImage). Видео — это тот же IMAGE-батч (B,H,W,C), поэтому берём
@@ -534,7 +553,8 @@ def _save_thumbnail(image, entry_id, workflow=None):
         name = f"{entry_id}.png"
         pnginfo = _workflow_pnginfo(workflow)
         kw = {"pnginfo": pnginfo} if pnginfo is not None else {}
-        img.convert("RGB").save(root / "previews" / name, "PNG", **kw)
+        _atomic_write(root / "previews" / name,
+                      lambda p: img.convert("RGB").save(p, "PNG", **kw))
         _drop_legacy_preview_file(entry_id)
         return f"previews/{name}"
     except Exception as e:
@@ -563,7 +583,8 @@ def _upgrade_preview_to_png(entry, workflow):
         if src.parent != root / "previews" or not src.exists():
             return False
         with Image.open(src) as img:
-            img.convert("RGB").save(root / "previews" / f"{entry_id}.png", "PNG", pnginfo=pnginfo)
+            _atomic_write(root / "previews" / f"{entry_id}.png",
+                          lambda p: img.convert("RGB").save(p, "PNG", pnginfo=pnginfo))
         entry["preview"] = f"previews/{entry_id}.png"
         try:
             src.unlink()
@@ -587,14 +608,45 @@ def _dataurl_bytes(data_url):
         return b""
 
 
-def _save_preview_upload(data_url, entry_id, workflow=None):
+# Тяжёлая работа превью (PIL: decode/resize/PNG) и чтение медиа — sync.
+# Вызванная прямо в `async def`-роуте, она морозит event loop ComfyUI (вся
+# очередь и прогресс сэмплера), поэтому идёт через asyncio.to_thread.
+# Семафор ограничивает параллелизм: импорт сотни карточек иначе забивает CPU.
+_PREVIEW_SEM = None
+_PREVIEW_SEM_LOCK = threading.Lock()
+
+
+def _preview_sem():
+    global _PREVIEW_SEM
+    if _PREVIEW_SEM is None:
+        with _PREVIEW_SEM_LOCK:
+            if _PREVIEW_SEM is None:
+                _PREVIEW_SEM = threading.Semaphore(2)
+    return _PREVIEW_SEM
+
+
+async def _in_preview_pool(fn, *args):
+    """Выполнить sync-работу превью в отдельном потоке под семафором."""
+    sem = _preview_sem()
+
+    def _run():
+        with sem:
+            return fn(*args)
+
+    return await asyncio.to_thread(_run)
+
+
+def _save_preview_upload(data_url, entry_id, workflow=None, raw=None):
     """Превью из ручной загрузки (PNG/JPEG dataURL или голый base64).
     Сохраняет даунскейл 512px в previews/{id}.png. Возвращает относительный
     путь или None (битый файл — запись создаётся и без превью).
 
     Кадр видео сюда тоже приходит — но уже картинкой: браузер достаёт первый
     кадр через <video>+canvas (файл с диска серверу не виден). Воркфлоу
-    встраиваем, если он есть: карточка должна остаться самодостаточной (§24)."""
+    встраиваем, если он есть: карточка должна остаться самодостаточной (§24).
+
+    `raw` — уже раскодированные байты: вызывающий, который УЖЕ декодировал
+    dataURL ради workflow-чанка, не декодирует те же мегабайты второй раз."""
     try:
         from PIL import Image
     except Exception:
@@ -602,10 +654,11 @@ def _save_preview_upload(data_url, entry_id, workflow=None):
     try:
         import base64
         import io
-        s = str(data_url or "")
-        if s.startswith("data:") and "," in s:
-            s = s.split(",", 1)[1]
-        raw = base64.b64decode(s[:8_000_000], validate=True)
+        if raw is None:
+            s = str(data_url or "")
+            if s.startswith("data:") and "," in s:
+                s = s.split(",", 1)[1]
+            raw = base64.b64decode(s[:8_000_000], validate=True)
         img = Image.open(io.BytesIO(raw)).convert("RGB")
         img.thumbnail((512, 512), Image.LANCZOS)
         root = _ensure_dirs()
@@ -1125,10 +1178,16 @@ def _degg_res_set_output(node, out_slot):
                 return None
             ratio_w, ratio_h = int(m.group(1)), int(m.group(2))
             total = megapixels * 1048576
-            w = int(math.sqrt(total * ratio_w / ratio_h))
-            h = int(math.sqrt(total * ratio_h / ratio_w))
-            return (max((w // multiple) * multiple, multiple),
-                    max((h // multiple) * multiple, multiple))[out_slot]
+            # Точная копия deg_res_set.py / nodes_resolution.py: масштаб от
+            # ПЛОЩАДИ аспекта и round() к кратности. Прежний floor()
+            # (sqrt(total*w/h) → //multiple*multiple) давал другие числа:
+            # 16:9/2MP/×8 → 1928×1080 вместо 1928×1088, 4:3/1MP → 1176×880
+            # вместо 1184×888 — галерея показывала разрешение, которого на
+            # выходе ноды не было.
+            scale = math.sqrt(total / (ratio_w * ratio_h))
+            w = round(scale * ratio_w / multiple) * multiple
+            h = round(scale * ratio_h / multiple) * multiple
+            return (max(w, multiple), max(h, multiple))[out_slot]
         keys = {2: ("w1", "h1"), 3: ("w2", "h2")}.get(select, ("w3", "h3"))
         value = named.get(keys[out_slot])
         return int(value) if value is not None else None
@@ -2203,6 +2262,21 @@ try:
         _wrapped.__name__ = getattr(handler, "__name__", "_wrapped")
         return _wrapped
 
+    def _with_body(handler):
+        """Тело запроса БЕЗ _DB_LOCK.
+
+        Нужен там, где хендлер сам берёт замок короткими участками, а тяжёлую
+        работу (PIL/видео/чтение медиа) делает между ними вне замка: держать
+        RLock через `await` нельзя — он реентерабелен ПО ПОТОКУ, поэтому
+        соседняя задача event loop пройдёт «сквозь» него, и взаимного
+        исключения не будет."""
+        async def _wrapped(request, body=None, *args, **kwargs):
+            if body is None:
+                body = await _req_body(request)
+            return await handler(request, body)
+        _wrapped.__name__ = getattr(handler, "__name__", "_wrapped")
+        return _wrapped
+
     def _locked_get(handler):
         """GET-роут под тем же замком: `_load_db()` умеет ПИСАТЬ (миграции
         формата и починка битых записей), поэтому чтение тоже сериализуем."""
@@ -2213,7 +2287,7 @@ try:
         return _wrapped
 
     @routes.post("/prompt_library/attach_preview")
-    @_locked
+    @_with_body
     async def _pl_attach_preview(request, body=None):
         """Обложка записи: автоподхват из прогона (v1.24) ИЛИ замена кадром (v1.26).
 
@@ -2252,52 +2326,80 @@ try:
             src = _resolve_output_file(filename, subfolder, kind)
             if src is None:
                 return web.json_response({"error": "file not found"}, status=404)
-        entries, folders = _load_db()
-        target = None
-        for e in entries:
-            if e.get("id") == entry_id:
-                target = e
-                break
-        if target is None:
-            # Запись могли удалить между Queue и завершением прогона — не ошибка.
-            # Для ручной замены (force) этого не должно случаться — говорим прямо.
-            if force:
-                return web.json_response({"error": "entry not found"}, status=404)
-            return web.json_response({"ok": True, "skipped": "no_entry"})
-        if target.get("preview") and not force:
-            return web.json_response({"ok": True, "skipped": "has_preview"})
+        # Замок держим ТОЛЬКО вокруг чтения/записи базы: threading.RLock
+        # реентерабелен ПО ПОТОКУ, поэтому `await` под ним не исключает
+        # параллельные задачи event loop (они проходят «сквозь» замок), зато
+        # блокирует поток исполнения ComfyUI. Тяжёлую работу (PIL/видео)
+        # выносим между двумя короткими захватами.
+        with _DB_LOCK:
+            entries, folders = _load_db()
+            target = None
+            for e in entries:
+                if e.get("id") == entry_id:
+                    target = e
+                    break
+            if target is None:
+                # Запись могли удалить между Queue и завершением прогона — не ошибка.
+                # Для ручной замены (force) этого не должно случаться — говорим прямо.
+                if force:
+                    return web.json_response({"error": "entry not found"}, status=404)
+                return web.json_response({"ok": True, "skipped": "no_entry"})
+            if target.get("preview") and not force:
+                return web.json_response({"ok": True, "skipped": "has_preview"})
+            # Снимок того, что нужно тяжёлой фазе (сам dict — уже не читаем).
+            _wf_now = _entry_workflow(target)
+            _need_wf = not _entry_has_workflow(target)
+        # --- тяжёлая фаза: без замка, в потоке ---
+        _raw = b""
+        _wf_chunk = None
         if preview_data:
             # Кадр, снятый браузером: первый кадр видео с диска или замена обложки
             media = media_hint or "image"
             # v1.40: граф может лежать файлом — чанк в новом превью обязан его
             # перенести, иначе карточка потеряет воркфлоу (§24.2)
-            prev = _save_preview_upload(preview_data, entry_id, _entry_workflow(target))
+            prev = await _in_preview_pool(
+                _save_preview_upload, preview_data, entry_id, _wf_now)
             if not prev:
                 return web.json_response({"error": "preview_data rejected"}, status=400)
+            # Импорт обложки (v1.56): если у записи графа ещё нет, а картинка его
+            # несёт (наш экспорт выгружает превью со встроенным workflow),
+            # забираем граф из неё. Байты декодируем ОДИН раз (раньше dataURL
+            # разбирался здесь и второй раз внутри _save_preview_upload).
+            if _need_wf:
+                _raw = _dataurl_bytes(preview_data)
+                _wf_chunk = _workflow_chunk_from_bytes(_raw)
+                if _wf_chunk:
+                    await _in_preview_pool(
+                        _save_preview_upload, preview_data, entry_id, _wf_chunk, _raw)
         else:
             media = media_hint or ("video" if _is_video_file(src) else "image")
             try:
-                arr = _load_media_frame(src)
+                arr = await _in_preview_pool(_load_media_frame, src)
             except Exception as exc:
                 return web.json_response({"error": f"media read failed: {exc}"}, status=400)
-            prev = _save_thumbnail(arr, entry_id, _entry_workflow(target))
+            prev = await _in_preview_pool(_save_thumbnail, arr, entry_id, _wf_now)
             if not prev:
                 return web.json_response({"error": "thumbnail failed"}, status=500)
-        target["preview"] = prev
-        # Метка типа описывает ТЕКУЩУЮ обложку: заменили видео на картинку —
-        # метка меняется, иначе фильтр «Видео» показывал бы не то.
-        target["media"] = media
-        # Импорт обложки (v1.56): если у записи графа ещё нет, а картинка его
-        # несёт (наш экспорт выгружает превью вместе со встроенным workflow),
-        # забираем граф из неё — иначе «Параметры генерации» в галерее потеряются.
-        if preview_data and not _entry_has_workflow(target):
-            _wf_chunk = _workflow_chunk_from_bytes(_dataurl_bytes(preview_data))
-            if _wf_chunk and _attach_workflow(entries, entry_id, _wf_chunk):
-                _save_preview_upload(preview_data, entry_id, _wf_chunk)
-        try:
-            _save_db(entries, folders)
-        except Exception as exc:
-            return web.json_response({"error": f"save failed: {exc}"}, status=500)
+        # --- короткая фаза записи: перечитываем базу под замком ---
+        with _DB_LOCK:
+            entries, folders = _load_db()
+            target = None
+            for e in entries:
+                if e.get("id") == entry_id:
+                    target = e
+                    break
+            if target is None:
+                return web.json_response({"ok": True, "skipped": "no_entry"})
+            target["preview"] = prev
+            # Метка типа описывает ТЕКУЩУЮ обложку: заменили видео на картинку —
+            # метка меняется, иначе фильтр «Видео» показывал бы не то.
+            target["media"] = media
+            if _wf_chunk:
+                _attach_workflow(entries, entry_id, _wf_chunk)
+            try:
+                _save_db(entries, folders)
+            except Exception as exc:
+                return web.json_response({"error": f"save failed: {exc}"}, status=500)
         _broadcast_refresh()
         return web.json_response({"ok": True, "preview": prev})
 
@@ -2393,7 +2495,6 @@ try:
         return web.json_response({"error": "not found"}, status=404)
 
     @routes.get("/prompt_library/meta")
-    @_locked_get
     async def _pl_meta(request):
         """Метаданные для HTML-галереи (v1.46, §41): читаем workflow-чанк
         прямо из превью-файла записи, без загрузки базы. Фолбэк — граф
@@ -2405,14 +2506,21 @@ try:
         «нет данных прогона»)."""
         entry_id = request.query.get("id", "")
         f = _preview_path(entry_id)
-        workflow = _preview_workflow_chunk(f)
+        # Чтение PNG-чанка и разбор графа — sync-работа с файлом: в потоке,
+        # иначе каждый запрос /meta (галерея зовёт его на каждую карточку)
+        # подвешивает очередь ComfyUI.
+        workflow = await _in_preview_pool(_preview_workflow_chunk, f)
         if workflow is None:
-            entries, _ = _load_db()
+            # Замок — только на чтение базы (она может писаться миграцией),
+            # а не на разбор графа: держать его через await нельзя.
+            with _DB_LOCK:
+                entries, _ = _load_db()
             for e in entries:
                 if e.get("id") == entry_id:
                     workflow = _entry_workflow(e)
                     break
-        return web.json_response({"id": entry_id, "meta": _gen_meta(workflow) if workflow else {}})
+        meta = await _in_preview_pool(_gen_meta, workflow) if workflow else {}
+        return web.json_response({"id": entry_id, "meta": meta})
 
     @routes.get("/prompt_library/preview")
     async def _pl_preview(request):
@@ -2425,7 +2533,7 @@ try:
         return web.FileResponse(str(f))
 
     @routes.post("/prompt_library/add")
-    @_locked
+    @_with_body
     async def _pl_add(request, body=None):
         """Ручное сохранение из виджетов (кнопка «Сохранить») — без запуска Queue."""
         prompt = str(body.get("prompt", "")).strip()
@@ -2433,21 +2541,32 @@ try:
             return web.json_response({"error": "empty prompt"}, status=400)
         folder = _storage_folder(body.get("folder", body.get("category", "")))
         title = str(body.get("title", "")).strip()
-        entries, folders = _load_db()
-        dup = _find_text_match(entries, prompt)
-        if dup is not None:
-            print(f"[PromptLibrary] duplicate skipped (already in '{dup.get('folder', '') or 'root'}')", flush=True)
-            return web.json_response({"ok": True, "id": dup.get("id"), "duplicate": True,
-                                      "folder": dup.get("folder", "")})
         # Тип превью: браузер уже знает, картинку он выбрал или видео (снял кадр),
         # и передаёт метку — по ней работают 🎬/📷-бейдж и фильтр «Тип».
         media = str(body.get("media") or "").strip().lower()
         if media not in ("image", "video"):
             media = None
-        entry_id, created = _add_entry(entries, prompt, folder, title=title, media=media)
-        if created:
-            # Превью с диска (без провода): прикрепляем как PNG 512px
-            prev = _save_preview_upload(body.get("preview_data"), entry_id)
+        # Замок — только на чтение/запись базы; PIL-обработка превью ниже идёт
+        # вне замка и в отдельном потоке (иначе она морозит event loop ComfyUI,
+        # а `await` под RLock не даёт взаимного исключения между задачами).
+        with _DB_LOCK:
+            entries, folders = _load_db()
+            dup = _find_text_match(entries, prompt)
+            if dup is not None:
+                print(f"[PromptLibrary] duplicate skipped (already in '{dup.get('folder', '') or 'root'}')", flush=True)
+                return web.json_response({"ok": True, "id": dup.get("id"), "duplicate": True,
+                                          "folder": dup.get("folder", "")})
+            entry_id, created = _add_entry(entries, prompt, folder, title=title, media=media)
+            if not created:
+                return web.json_response({"ok": True, "id": entry_id, "duplicate": False})
+            # Сохраняем запись ДО тяжёлой фазы: ниже база перечитывается под
+            # замком, и незаписанная запись потерялась бы вместе с превью.
+            _save_db(entries, folders)
+        # Превью с диска (без провода): прикрепляем как PNG 512px
+        prev = await _in_preview_pool(
+            _save_preview_upload, body.get("preview_data"), entry_id)
+        with _DB_LOCK:
+            entries, folders = _load_db()
             if prev:
                 for e in entries:
                     if e.get("id") == entry_id:
@@ -2457,9 +2576,9 @@ try:
             if folder and folder not in folders:
                 folders = sorted(set(folders) | {folder} | set(_parent_folders(folder)))
             _save_db(entries, folders)
-            # Ручное сохранение (кнопка) рассылает тот же сигнал, что и Queue:
-            # без него соседние Library-ноды и другие вкладки остаются со старым списком.
-            _broadcast_refresh()
+        # Ручное сохранение (кнопка) рассылает тот же сигнал, что и Queue:
+        # без него соседние Library-ноды и другие вкладки остаются со старым списком.
+        _broadcast_refresh()
         return web.json_response({"ok": True, "id": entry_id, "duplicate": False})
 
     @routes.post("/prompt_library/import")
