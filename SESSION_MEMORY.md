@@ -1,4 +1,4 @@
-# Память сессии — Prompt Library (2026-10-19, сессия 4: v1.74.2–v1.74.5, сдано)
+# Память сессии — Prompt Library (2026-10-21, сессия 5: аудит v1.75.0)
 
 > Покажи этот файл агенту, чтобы продолжить работу.
 > Всегда сверяйся с `AGENTS.md` и `SPECIFICATION.md`.
@@ -7,55 +7,70 @@
 
 ## 1. Что делали в этой сессии (кратко)
 
-Серия сворачивания проводника доведена до сдания: §69 (стрелка −20% + кнопки ⊟/⊞),
-§70–§71 (одна кнопка с жёлтой пиктограммой ⊟/⊞ `#e8c33a`), §72 (фиолетовый маркер
-пути категории: кружок 6px → полоска 4×13 `#b388ff` + подъём на свёрнутого предка —
-на свёрнутой папке ТРИ полоски 🟦🩵🟪). Всё закоммичено (`c3d7432`, `ca37fdf`,
-`f95c593`) и запушено. **Живая проверка пользователя пройдена: работает** (и кнопка,
-и три полоски) — отмечено в шапке SPEC и §72.4.
+Полный аудит Python+JS и исправление всего найденного (HIGH+MEDIUM+MINOR), каждый
+пункт — red-first, каждая правка подтверждена мутацией. Закоммичено `c3c7d8d`,
+запушено в `origin/master`. **Живая проверка (перезапуск ComfyUI + Ctrl+F5) —
+за пользователем**: сервер был запущен внешним процессом (PID 12268), синхронизация
+выполнена, но процесс ещё не перезапускался.
 
 ## 2. Итоговое состояние кода
 
-- `web/js/prompt_library.js` — `PL_JS_VERSION = "1.74.5-pick-bar"`
-- `st.collapseRep` (1495) — верхний свёрнутый предок пути (или сам путь)
-- `st.toggleFolderCollapsed` (1506) — тоггл + persist §68
-- `st.activeFolderMarks` (1544) — возвращает `{blue, green, purple}`; purple =
-  `catPickW.value` (без `__*`), тот же `reps/collapseRep`
-- `folderRow`: `pickMark` (2517) = `isFolder && treeMarks.purple.has(key) && !marked`;
-  `bars` — три полоски 4×13 в порядке синяя `#4a9eff` → зелёная `#7fe0a8` →
-  фиолетовая `#b388ff`; ветки `pickDot` (кружок) НЕТ
-- Заливка `#3a2d66` + inset-кольцо `#b388ff` — только на ТОЧНОЙ видимой папке (`pick`)
-- `st.syncCollapseToggle` (2889) / `st.toggleCollapseAll` (2895) — глиф ⊟/⊞
-- `treeHead` (546) — шапка проводника: одна кнопка-пиктограмма перед «+ Категория»
+- `web/js/prompt_library.js` — `PL_JS_VERSION = "1.75.0-audit-fixes"` (154)
+- H1: `st.apiPostOk(path,payload)` + `st.failHint(what,err)`; `bSave` при отказе
+  оставляет правку открытой (`_savingEdit=false`, текст цел); delete/rename/
+  `bulkDelete`/`reload` — `await reload()` + явная причина
+- M4: `st.hasCycleByWires()` — BFS по `outputs[].links` до себя/узла-источника
+  `image`; `checkCycle` учитывает ЛЮБОЙ выход; confirm только при реальном кольце
+- M5: компаратор «Частые» (`use_count`, затем `last_used` desc); `st.sortedFiltered`
+  выставлен для тестов; `_galleryWrite` возвращает `{done,failed,written,error}` и
+  пишет «галерея НЕ сохранена»
+- M6: `bindOutBtn.onclick` сверяет `outSlotOfEntry/outSlotOfFolder` после
+  `bindOutSlot` — при лимите 10 не врёт «подключена», номер слота фактический
+- M7: `st.hookCanvasDrop` помнит `window.__plCanvasDropEl` и перепривязывается при
+  пересоздании канваса (legacy ↔ Nodes 2.0)
+- `prompt_library_node.py` — `_atomic_write(dst, write_fn)` (`*.tmp` + `os.replace`)
+  для `_save_thumbnail` / `_upgrade_preview_to_png`; `_degg_res_set_output` на
+  round-паритете `deg_res_set.py`; `_pl_attach_preview`/`_pl_add`/`_pl_meta` —
+  тяжёлое вне `_DB_LOCK` через `asyncio.to_thread` + `_in_preview_pool`;
+  `_with_body` парсит тело без замка; `_save_preview_upload(raw=...)`
+- `SPECIFICATION.md` — §73 (H1, M2–M8, проверки, мутации, версия)
 
 ## 3. Проблемы, которые встречались (и как решали)
 
-- Pre-commit `commit-msg` останавливал коммит: сообщение называло `check.py` файлом
-  вне индекса → переформулировать на «проверка проекта», не `--no-verify`.
-- Мутация «вернуть кружок» маскируется цветом `#b388ff` → в новой фазе `barsOf`
-  строгий: `width:4px` + `height:13px`, кружок маркером не считает.
+- `threading.RLock` реентерабелен ПО ПОТОКУ → `await` под замком не даёт взаимного
+  исключения задачам event loop, зато морозит поток ComfyUI. Решение — снимок под
+  замком → тяжёлая фаза вне → запись под замком.
+- `a - b || X ? -1 : …` — `||` приоритетнее `?:`, компаратор всегда возвращал `-1`.
+- `_pl_add`: если сохранять БД только в конце, `reload` во второй секции терял запись.
+- Системный python БЕЗ numpy/PIL → тест атомарной записи сделан на хелпере
+  `_atomic_write` с фейковым изображением (save пишет «partial» и бросает).
+- Смоук печатает только провалы; исключение в `run()` выглядит как
+  `[label] Error: …`, а не `ASSERT FAIL` — грепать оба паттерна, вывод cp1251 → `grep -a`.
 
 ## 4. Что важно не сломать при продолжении работы
 
-- `bars` — порядок строго 🟦🩵🟪; `marked` гасит ВСЕ три; `pickMark` обязан читать
-  `treeMarks.purple` (карту подъёма), НЕ точный `pick` — иначе фиолетовая пропадает
-  при сворачивании (мутация B красная).
-- Заливка/кольцо pick — только точная папка; поднятый предок — только полоску.
-- Свёрнутость — в `node.properties.pl_collapsed_folders`; remap/delete чистит.
-- Глиф ⊟/⊞ синхронизируется ТОЛЬКО в `syncCollapseToggle` в конце `renderTree`.
-- Python во всей серии не менялся.
+- Значения combo — протокол; подписи через `getOptionLabel` (скил
+  `comfyui-combo-protocol-values`).
+- Nodes 2.0: `const { app } = window.comfyAPI.app`, api — `window.comfyAPI.api.api`.
+- `_DB_LOCK` не держать на время PIL/видео/чтения файлов (M3); `_preview_sem` ленив.
+- `_atomic_write` обязателен для любых записей в `previews/`: прямая запись оставляет
+  битый PNG под рабочим именем.
+- `bars` — порядок 🟦🩵🟪 (синяя, зелёная, фиолетовая), `marked` гасит все.
+- Статические детекторы `tests/_audit_prompt_library.mjs` держат отпечатки выражений —
+  при смене контракта правится ДЕТЕКТОР (+ мутация), а не откатывается задача.
 
 ## 5. Следующие шаги (идеи, не сделано)
 
-- Вопрос без ответа: вынести урок серии в скил (`comfyui-dual-folder-marks` /
-  `comfyui-row-status-dot` / `comfyui-native-button`) — предложено twice, «да» не было;
-  молча не делать (AGENTS.md §3.1).
+- Пользователю: перезапустить ComfyUI + Ctrl+F5 и подтвердить живой работу
+  (превью/выходы/двойной клик/кольцо, drag&drop после смены режима).
+- Не отвечено: выносить ли уроки аудита в скилы (`comfyui-async-route-blocking`
+  дополнить примером `_pl_add`, `comfyui-task-acceptance` — кейсом M6/M7).
+  Без явного «да» скилы не трогать (AGENTS.md §3.1).
 
 ## 6. Связанные файлы
 
-- `web/js/prompt_library.js` — UI проводника (маркеры, сворачивание, шапка)
-- `tests/_smoke_prompt_library.mjs` — фазы v1.73 (контракт полоски), v1.74.0–v1.74.5
-- `tests/_audit_prompt_library.mjs`, `tests/_test_prompt_library.py` — аудит/Python
-- `SPECIFICATION.md` — шапка v1.74.5 (+ живая проверка), §67–§72
-- `README.md` — раздел «Сворачивание папок в проводнике»
-- Git: `c3d7432` (серия §67–§72), `ca37fdf` (память), `f95c593` (живая проверка в SPEC)
+- `web/js/prompt_library.js` — UI, отказы, выходы, дроп, «Частые», галерея
+- `prompt_library_node.py` — база, превью, разрешение, атомарная запись
+- `tests/_smoke_prompt_library.mjs` (170 фаз), `tests/_test_prompt_library.py` (471)
+- `SPECIFICATION.md` §73; `README.md`; `check.json`
+- Git: `c3c7d8d` (аудит v1.75.0) — запушен в `origin/master`
