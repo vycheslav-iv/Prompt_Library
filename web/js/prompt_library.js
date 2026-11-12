@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.76.4-save-run";
+    const PL_JS_VERSION = "1.77.0-clear-preview";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -962,6 +962,56 @@ app.registerExtension({
                     setTimeout(restore, 1500);
                 }
             };
+            // v1.77: очистка обложки — карточка остаётся, превью исчезает.
+            // Значок 🧹 (метла): 🗑 в ноде уже занят «Удалить запись», а ✖ —
+            // «Отмена», поэтому значок должен быть отдельным.
+            const bClearPreview = mkBtn("🧹 Очистить превью", "Убрать обложку записи: карточка останется без превью. Файл обложки удаляется — вернуть его нельзя");
+            bClearPreview.style.display = "none";
+            bClearPreview.onclick = async () => {
+                const id = st.detailId;
+                if (!id || st._clearingPreview) return;
+                let ok = false;
+                try {
+                    ok = await app.extensionManager.dialog.confirm({
+                        title: "Очистить превью",
+                        message: `Обложка записи «${st.dTitle.value || id}» будет удалена. `
+                            + "Запись и её текст останутся — вернуть обложку нельзя.",
+                    });
+                } catch (e) {
+                    ok = confirm(`Удалить обложку записи «${st.dTitle.value || id}»? `
+                        + "Запись останется, но вернуть обложку нельзя.");
+                }
+                if (!ok) return;
+                st._clearingPreview = true;
+                const base = "🧹 Очистить превью";
+                bClearPreview.textContent = "⏳ Чищу...";
+                try {
+                    // apiPostOk бросает на отказе — иначе «успех» был бы враньём.
+                    await st.apiPostOk("/prompt_library/clear_preview", { id });
+                } catch (err) {
+                    console.warn("[PromptLibrary] clear_preview failed:", err);
+                    st.failHint("Очистить превью", err);
+                    bClearPreview.textContent = "❌ Ошибка";
+                    st._clearingPreview = false;
+                    setTimeout(() => { bClearPreview.textContent = base; }, 1500);
+                    return;
+                }
+                const known = st.full.get(id);
+                if (known) { known.preview = null; known.media = null; }
+                // Метка превью кэшируется по created_at — без сброса карточка
+                // продолжала бы показывать старую обложку из кэша браузера.
+                st.previewStamp.set(id, Date.now());
+                st.fillMeta?.(known || { id });
+                bClearPreview.textContent = "✅ Очищено";
+                await reload();
+                st.hintSticky = "Превью удалено — карточка осталась без обложки.";
+                st.renderHint?.();
+                st.syncClearPreview?.();
+                // Замок снимаем в самом конце: пока идёт reload, второй клик
+                // не должен слать второй POST.
+                st._clearingPreview = false;
+                setTimeout(() => { bClearPreview.textContent = base; }, 1500);
+            };
             dBtns.appendChild(dPreviewFile);
             dBtns.appendChild(bCopy);
             dBtns.appendChild(bEdit);
@@ -969,6 +1019,7 @@ app.registerExtension({
             dBtns.appendChild(bCancel);
             dBtns.appendChild(bWorkflow);
             dBtns.appendChild(bPreview);
+            dBtns.appendChild(bClearPreview);
             bWorkflow.onclick = () => { try { st.openWorkflow?.(st.detailId); } catch (e) { /* silent */ } };
 
             // Экспорт записи в папку на диске (v1.33, §38): по клику —
@@ -1018,6 +1069,10 @@ app.registerExtension({
                 // v1.76: придержанный прогон режима «Выдача»: { text, image, prompt_id }.
                 // image — то, что сервер сам разослал в `executed` (обложка).
                 lastRun: null,
+                // v1.77: открыт ли режим правки записи (✏️ «Редактировать»).
+                // Кнопка «🧹 Очистить превью» живёт только в нём и только
+                // у записи, у которой обложка есть.
+                editing: false,
                 // prompt_id -> текст, который ОТДАЛА наша нода в этом прогоне.
                 // Нужен кнопке: runTexts общий кэш и может нести прошлый прогон.
                 runMine: new Map(),
@@ -1027,7 +1082,7 @@ app.registerExtension({
                 // Наружу — чтобы живая проба мерила ряд действий именно на том
                 // минимуме, которым живёт нода (без дублирования числа в тесте).
                 minW: MIN_W,
-                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bEdit, bCancel, bExport, bGallery,
+                dTitle, dFolder, dText, dMeta, bSave, bWorkflow, bPreview, bClearPreview, bEdit, bCancel, bExport, bGallery,
                 entries: [], folders: [], full: new Map(),
                 pinnedFolders: new Set(),
                 // id записей, найденных серверным полнотекстовым поиском (v1.27);
@@ -4138,6 +4193,8 @@ const reload = async () => {
                 st.bSave.style.display = "";
                 if (st.bCancel) st.bCancel.style.display = "";
                 if (st.bPreview) st.bPreview.style.display = "";
+                st.editing = true;
+                st.syncClearPreview?.();
                 st.dTitle.focus();
             };
             bSave.onclick = async () => {
@@ -4159,6 +4216,8 @@ const reload = async () => {
                 st.bSave.style.display = "none";
                 if (st.bCancel) st.bCancel.style.display = "none";
                 if (st.bPreview) st.bPreview.style.display = "none";
+                st.editing = false;
+                st.syncClearPreview?.();
                 await reload();
                 st._savingEdit = false;
             };
@@ -4171,6 +4230,18 @@ const reload = async () => {
                     const mediaLabel = f.media === "video" ? " · 🎬 видео" : f.media === "image" ? " · 📷 фото" : "";
                     const freq = f.use_count ? ` · ×${f.use_count}` : "";
                     st.dMeta.textContent = `№ ${f.id} · создана ${f.created_at || "—"} · выдана ${f.last_used || "—"}${freq}${mediaLabel}`;
+                } catch (e) { /* silent */ }
+            };
+
+            // Кнопка «🧹 Очистить превью» (v1.77): одна точка видимости —
+            // режим правки И обложка у записи. Вне правки кнопки нет: обложка
+            // — содержимое записи, а не действие просмотра (как «Заменить превью»).
+            st.syncClearPreview = () => {
+                try {
+                    const id = st.detailId;
+                    const full = id ? (st.full.get(id) || {}) : {};
+                    const show = !!(st.editing && full.preview);
+                    st.bClearPreview.style.display = show ? "" : "none";
                 } catch (e) { /* silent */ }
             };
 
@@ -4187,6 +4258,7 @@ const reload = async () => {
                 const full = st.full.get(id);
                 if (!full) return null;
                 st.detailId = id;
+                st.editing = false;
                 st.dTitle.value = full.title || "";
                 st.dFolder.value = full.folder || "";
                 st.dText.value = full.prompt || "";
@@ -4199,6 +4271,7 @@ const reload = async () => {
                     st.bPreview.textContent = bPreviewLabel(full.media);
                     st.bPreview.style.display = "none";
                 }
+                st.syncClearPreview?.();
                 st.panelOpened?.();
                 st.detail.style.display = "flex";
                 st.hintMsg = "Запись выбрана. Для выдачи текста переключите режим на «📤 Выдача» или «📤📥 Выдача + запись».";

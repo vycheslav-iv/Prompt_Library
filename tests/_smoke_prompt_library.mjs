@@ -6670,6 +6670,93 @@ await run("v1.76: нечего сохранять — кнопка молчит 
   }
 });
 
+// --- v1.77: очистка превью записи -----------------------------------------
+await run("v1.77: кнопка «Очистить превью» — только у записи с обложкой, только в режиме правки", async () => {
+  const node = makeNode();
+  node.id = 31;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  check("v1.77: кнопка создана", !!st.bClearPreview);
+  check("v1.77: подпись — «🧹 Очистить превью»",
+    st.bClearPreview.textContent === "🧹 Очистить превью", st.bClearPreview.textContent);
+  st.full.set("e10", { id: "e10", title: "С обложкой", prompt: "текст", folder: "",
+    preview: "previews/e10.png", media: "image" });
+  await st.fillDetail("e10");
+  check("v1.77: в режиме просмотра кнопки нет",
+    st.bClearPreview.style.display === "none", String(st.bClearPreview.style.display));
+  st.bEdit.onclick();
+  check("v1.77: в режиме правки кнопка есть (обложка есть)",
+    st.bClearPreview.style.display === "", String(st.bClearPreview.style.display));
+  st.full.set("e11", { id: "e11", title: "Без обложки", prompt: "текст2", folder: "" });
+  await st.fillDetail("e11");
+  st.bEdit.onclick();
+  check("v1.77: у записи без обложки кнопки нет",
+    st.bClearPreview.style.display === "none", String(st.bClearPreview.style.display));
+});
+
+await run("v1.77: очистка превью убирает обложку и говорит об этом", async () => {
+  const node = makeNode();
+  node.id = 32;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  st.full.set("e12", { id: "e12", title: "С обложкой", prompt: "текст", folder: "",
+    preview: "previews/e12.png", media: "image" });
+  await st.fillDetail("e12");
+  st.bEdit.onclick();
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("/prompt_library/clear_preview")) return jsonResponse({ ok: true });
+    return jsonResponse({ ok: true });
+  };
+  try {
+    await st.bClearPreview.onclick();
+    const cl = posts.find((p) => p.url.includes("/prompt_library/clear_preview"));
+    check("v1.77: отправлен запрос очистки", !!cl && cl.body.id === "e12", JSON.stringify(cl?.body));
+    check("v1.77: обложка убрана из локальной записи",
+      !st.full.get("e12").preview, JSON.stringify(st.full.get("e12")));
+    check("v1.77: метка типа убрана", !st.full.get("e12").media);
+    check("v1.77: подсказка говорит, что превью удалено",
+      String(st.hintSticky || "").toLowerCase().includes("превью"), String(st.hintSticky));
+    check("v1.77: кнопка снова скрыта (обложки нет)",
+      st.bClearPreview.style.display === "none", String(st.bClearPreview.style.display));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+await run("v1.77: отказ сервера — обложка остаётся, причина видна", async () => {
+  const node = makeNode();
+  node.id = 33;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  st.full.set("e13", { id: "e13", title: "С обложкой", prompt: "текст", folder: "",
+    preview: "previews/e13.png", media: "image" });
+  await st.fillDetail("e13");
+  st.bEdit.onclick();
+  const origFetch = sandbox.fetch;
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    if (url.includes("/prompt_library/clear_preview")) {
+      return { ok: false, status: 500, json: async () => ({ error: "boom" }), text: async () => "boom" };
+    }
+    return jsonResponse({ ok: true });
+  };
+  try {
+    await st.bClearPreview.onclick();
+    check("v1.77: при отказе обложка на месте",
+      st.full.get("e13").preview === "previews/e13.png", JSON.stringify(st.full.get("e13")));
+    check("v1.77: причина отказа видна в подсказке",
+      String(st.hintSticky || "").includes("отказал"), String(st.hintSticky));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);
 if (errors.length) {
   console.log("=== ERRORS ===");

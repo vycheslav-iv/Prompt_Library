@@ -2403,6 +2403,42 @@ try:
         _broadcast_refresh()
         return web.json_response({"ok": True, "preview": prev})
 
+    @routes.post("/prompt_library/clear_preview")
+    @_with_body
+    async def _pl_clear_preview(request, body=None):
+        """Убрать обложку записи (v1.77): карточка остаётся, превью исчезает.
+
+        Файл обложки удаляется с диска — вернуть его нельзя, поэтому клиент
+        спрашивает подтверждение (как перед удалением записи). Метка типа
+        (`media`) тоже снимается: «📷 фото» без картинки врёт.
+        Граф записи не трогаем — очищается только обложка.
+        """
+        entry_id = str(body.get("id") or "").strip()
+        # id уходит в имя файла превью (previews/{id}.png) — тот же guard,
+        # что у /attach_preview и /preview: только буквы и цифры.
+        if not re.fullmatch(r"[a-zA-Z0-9]+", entry_id):
+            return web.json_response({"error": "bad id"}, status=400)
+        victim = None
+        found = False
+        with _DB_LOCK:
+            entries, folders = _load_db()
+            for e in entries:
+                if e.get("id") != entry_id:
+                    continue
+                victim = e.get("preview")
+                e["preview"] = None
+                e["media"] = None
+                found = True
+                break
+            if not found:
+                return web.json_response({"error": "entry not found"}, status=404)
+            _save_db(entries, folders)
+        # Файл — уже после записи базы: если он не удалится, карточка всё равно
+        # останется без обложки (файл-сирота не виден в интерфейсе).
+        _remove_preview_file(victim)
+        _broadcast_refresh()
+        return web.json_response({"ok": True, "id": entry_id})
+
     @routes.post("/prompt_library/save_pickup")
     @_locked
     async def _pl_save_pickup(request, body=None):

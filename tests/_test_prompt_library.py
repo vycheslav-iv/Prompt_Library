@@ -315,6 +315,43 @@ node.execute(mode=node.MODE_ISSUE, selected="", save_folder="Кнопка",
 check("«Выдача» сама в базу не пишет (кнопка обязательна)",
       len(mod._load_db()[0]) == before_issue)
 
+# --- v1.77: очистка превью записи -------------------------------------------
+# Запись остаётся, обложка (файл + поле) исчезает. Роут новый:
+# POST /prompt_library/clear_preview {id}.
+print("\n5.2. Очистка превью записи (v1.77)")
+h("POST", "/prompt_library/add", Req({"prompt": "запись с обложкой", "folder": "Кнопка"}))
+_entries, _folders = mod._load_db()
+_e = next((x for x in _entries if x.get("prompt") == "запись с обложкой"), None)
+_eid = _e["id"]
+# Настоящей картинки в песочнице нет — подставим «файл обложки» руками:
+# роут обязан и снять поле, и удалить файл.
+_root = mod._ensure_dirs()
+(_root / "previews" / f"{_eid}.png").write_bytes(b"PNG")
+_e["preview"] = f"previews/{_eid}.png"
+_e["media"] = "image"
+mod._save_db(_entries, _folders)
+r = h("POST", "/prompt_library/clear_preview", Req({"id": _eid}))
+check("clear_preview: ok", r["status"] == 200 and r["json"].get("ok"), str(r))
+_entries, _ = mod._load_db()
+_e2 = next((x for x in _entries if x.get("id") == _eid), None)
+check("обложка убрана из записи", _e2 is not None and not _e2.get("preview"), str(_e2))
+check("метка типа убрана (без обложки «📷 фото» врёт)",
+      _e2 is not None and not _e2.get("media"), str(_e2))
+check("файл обложки удалён с диска", not (_root / "previews" / f"{_eid}.png").exists())
+check("текст и название записи не тронуты",
+      _e2 is not None and _e2.get("prompt") == "запись с обложкой")
+r = h("POST", "/prompt_library/clear_preview", Req({"id": "abc123"}))
+check("clear_preview: неизвестный id -> 404", r["status"] == 404, str(r))
+r = h("POST", "/prompt_library/clear_preview", Req({"id": "../x"}))
+check("clear_preview: id вне базы -> 400", r["status"] == 400, str(r))
+# Запись без обложки — очистка не должна падать (идемпотентность).
+h("POST", "/prompt_library/add", Req({"prompt": "запись без обложки", "folder": "Кнопка"}))
+_entries, _ = mod._load_db()
+_e3 = next((x for x in _entries if x.get("prompt") == "запись без обложки"), None)
+r = h("POST", "/prompt_library/clear_preview", Req({"id": _e3["id"]}))
+check("clear_preview: у записи без обложки — ok, без исключения",
+      r["status"] == 200 and r["json"].get("ok"), str(r))
+
 r = h("GET", "/prompt_library/list", Req())
 check("/list отдаёт записи без workflow", all("workflow" not in e for e in r["json"]["entries"])
       and all("has_workflow" in e for e in r["json"]["entries"]))
