@@ -264,6 +264,57 @@ check("/add сохраняет заданное название (стрип)", 
 r = h("POST", "/prompt_library/add", Req({"prompt": "   "}))
 check("/add с пустым промптом -> 400", r["status"] == 400)
 
+# --- v1.76: кнопка «💾 Сохранить промпт» в режиме «Выдача» ------------------
+# Клиент присылает граф последнего прогона (app.graph.serialize()) вместе с
+# текстом: запись создаётся по нажатию, обложку прикрепляет attach_preview.
+print("\n5.1. Кнопка сохранения прогона (v1.76)")
+WF_RUN = {"nodes": [{"id": 1, "type": "KSampler", "widgets_values": [1, 2, 3]}],
+          "links": [], "version": 0.4}
+r = h("POST", "/prompt_library/add", Req({"prompt": "прогон по кнопке", "folder": "Кнопка",
+                                          "workflow": WF_RUN}))
+check("/add с workflow создаёт запись", r["status"] == 200 and r["json"].get("ok")
+      and not r["json"].get("duplicate"), str(r))
+entries, folders = mod._load_db()
+by_btn = next((e for e in entries if e.get("prompt") == "прогон по кнопке"), None)
+check("/add вернул id созданной записи", by_btn is not None and r["json"].get("id") == by_btn["id"],
+      str(r.get("json")))
+check("граф прогона сохранён файлом (карточка открывает воркфлоу)",
+      bool(by_btn) and mod._entry_has_workflow(by_btn))
+check("папка кнопки попала в дерево", "Кнопка" in folders)
+
+# Мусор вместо графа не должен ронять роут и не должен ставить битый воркфлоу
+r = h("POST", "/prompt_library/add", Req({"prompt": "прогон без графа", "folder": "Кнопка",
+                                          "workflow": "не словарь"}))
+entries, _ = mod._load_db()
+no_wf = next((e for e in entries if e.get("prompt") == "прогон без графа"), None)
+check("/add переживает мусорный workflow", r["status"] == 200 and no_wf is not None, str(r))
+check("мусорный workflow не прикреплён", bool(no_wf) and not mod._entry_has_workflow(no_wf))
+
+r = h("POST", "/prompt_library/add", Req({"prompt": "прогон с кривым nodes", "folder": "Кнопка",
+                                          "workflow": {"nodes": "не список"}}))
+entries, _ = mod._load_db()
+bad_nodes = next((e for e in entries if e.get("prompt") == "прогон с кривым nodes"), None)
+check("workflow с не-списком nodes игнорируется",
+      bool(bad_nodes) and not mod._entry_has_workflow(bad_nodes))
+
+# Повтор того же текста — дубликат оригинала; чужой граф не перезаписываем
+r2 = h("POST", "/prompt_library/add", Req({"prompt": "прогон по кнопке", "folder": "Другая",
+                                           "workflow": {"nodes": [], "links": []}}))
+check("/add повтор -> duplicate с папкой оригинала",
+      r2["json"].get("duplicate") is True and r2["json"].get("folder") == "Кнопка", str(r2.get("json")))
+check("/add повтор не меняет id оригинала", r2["json"].get("id") == by_btn["id"], str(r2.get("json")))
+check("повтор не создал вторую запись",
+      len([e for e in mod._load_db()[0] if e.get("prompt") == "прогон по кнопке"]) == 1)
+
+# В режиме «Выдача» сервер по-прежнему ничего не пишет сам (кнопка — только
+# клиентский путь): прогон с source в выдаче базу не трогает.
+before_issue = len(mod._load_db()[0])
+node.execute(mode=node.MODE_ISSUE, selected="", save_folder="Кнопка",
+             source="текст в выдаче без кнопки", extra_pnginfo={"workflow": {"nodes": []}},
+             unique_id=7)
+check("«Выдача» сама в базу не пишет (кнопка обязательна)",
+      len(mod._load_db()[0]) == before_issue)
+
 r = h("GET", "/prompt_library/list", Req())
 check("/list отдаёт записи без workflow", all("workflow" not in e for e in r["json"]["entries"])
       and all("has_workflow" in e for e in r["json"]["entries"]))

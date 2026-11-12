@@ -403,8 +403,8 @@ for (const vue of [false, true]) {
   } else {
     check(`${tag}: main+detail прямые дети root`, st.detail.parentNode === st.root);
     check(`${tag}: scrollArea нет в root`, scrollAreaOf() === undefined);
-    check(`${tag}: 8 детей root (подхват + ряд экспорта + 6)`,
-      st.root.children.length === 8 && st.root.children[7] === st.hintRow,
+    check(`${tag}: 9 детей root (подхват + «Сохранить промпт» + ряд экспорта + 6)`,
+      st.root.children.length === 9 && st.root.children[8] === st.hintRow,
       String(st.root.children.length));
     checkCanvasPanes(tag, st);
   }
@@ -420,7 +420,7 @@ await run("switch: canvas → Vue через LiteGraph.vueNodesMode", () => {
   // нода, созданная в canvas-режиме, после переключения флага должна сама
   // перейти в Vue-раскладку (шаг выше уже перевёл её в Vue — возвращаем назад)
   LG.vueNodesMode = false;
-  check("после возврата — canvas-раскладка", areaOf(stC) === undefined && stC.root.children.length === 8);
+  check("после возврата — canvas-раскладка", areaOf(stC) === undefined && stC.root.children.length === 9);
   LG.vueNodesMode = true; // именно это делает фронтенд в useVueFeatureFlags
   check("после флага — Vue-раскладка", areaOf(stC) !== undefined && stC.root.style.overflow === "hidden");
   check("пол переехал на scrollArea", areaOf(stC).style.minHeight === "480px");
@@ -432,7 +432,7 @@ await run("switch: Vue → canvas через LiteGraph.vueNodesMode", () => {
   nodeElStub.style.minWidth = ""; // сбрасываем, чтобы проверить повторное применение
   LG.vueNodesMode = false;
   check("вернулись в canvas-раскладку", areaOf(stC) === undefined);
-  check("8 детей root", stC.root.children.length === 8);
+  check("9 детей root", stC.root.children.length === 9);
   check("обрезка осталась (не зависит от режима)", stC.root.style.overflow === "hidden");
   checkCanvasPanes("после возврата", stC);
 });
@@ -1752,7 +1752,8 @@ await run("v1.27: защита от двойного клика на «Сохр�
     // берём ПОСЛЕДНЮЮ из созданных в этой ноде, а не первую за весь прогон
     const ta = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st.dText).pop();
     const saveBtn = walkDom(st.root).find((el) => el.tagName === "BUTTON"
-      && String(el.textContent).includes("Сохранить промпт"));
+      && String(el.textContent).includes("Сохранить промпт")
+      && el !== st.saveRunBtn);
     check("v1.27: кнопка ручного сохранения найдена", !!ta && !!saveBtn, String(saveBtn?.textContent));
     ta.value = "текст под двойным кликом";
     const p1 = saveBtn.onclick(); // первый клик уходит в fetch
@@ -1790,7 +1791,8 @@ await run("v1.29: ручной ввод с названием", async () => {
       !!st.inputTitle && st.inputTitle.tagName === "INPUT", String(st.inputTitle?.tagName));
     const ta = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st.dText).pop();
     const saveBtn = walkDom(st.root).find((el) => el.tagName === "BUTTON"
-      && String(el.textContent).includes("Сохранить промпт"));
+      && String(el.textContent).includes("Сохранить промпт")
+      && el !== st.saveRunBtn);
     check("v1.29: кнопка ручного сохранения найдена", !!ta && !!saveBtn);
     // С названием — уходит в POST, после успеха оба поля очищены
     st.inputTitle.value = "Моё название";
@@ -5064,7 +5066,8 @@ await run("v1.72.5: сохранение при выбранной папке-в
     st.plDrop({ kind: "folder", path: "ПапкаA" }, "__outs");
     const ta = madeEls.filter((e) => e.tagName === "TEXTAREA" && e !== st.dText).pop();
     const saveBtn = walkDom(st.root).find((el) => el.tagName === "BUTTON"
-      && String(el.textContent).includes("Сохранить промпт"));
+      && String(el.textContent).includes("Сохранить промпт")
+      && el !== st.saveRunBtn);
     check("v1.72.5: кнопка сохранения найдена", !!ta && !!saveBtn);
     // (а) открыта папка-вывод в «Выходах» → промпт идёт в неё
     st.selFolder = "__outs";
@@ -6422,6 +6425,249 @@ await run("v1.74.4: одна кнопка с жёлтой пиктограммо
   if (arrowA && arrowA.onclick) arrowA.onclick({ stopPropagation() {} });
   check("v1.74.4: сворачивание стрелкой папки переключает пиктограмму на ⊞",
     !!tb && tb.textContent === "⊞", String(tb && tb.textContent));
+});
+
+// --- v1.76: кнопка «💾 Сохранить промпт» в режиме «Выдача» -------------------
+// Запись создаётся ТОЛЬКО по нажатию: прогон придерживается в памяти ноды
+// (текст входа/подхвата + файл-превью), база в выдаче не трогается.
+await run("v1.76: кнопка сохранения — только в «Выдаче», окрашена, до прогона неактивна", async () => {
+  const node = makeNode();
+  node.id = 21;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  check("v1.76: кнопка и строка созданы", !!st.saveRunBtn && !!st.saveRunRow);
+  check("v1.76: в «Записи» строки не видно",
+    st.saveRunRow.style.display === "none", String(st.saveRunRow.style.display));
+  check("v1.76: кнопка окрашена акцентом (выделяется)",
+    /#2a5a91/i.test(String(st.saveRunBtn.style.cssText))
+      && /#4a9eff/i.test(String(st.saveRunBtn.style.cssText)),
+    String(st.saveRunBtn.style.cssText));
+  check("v1.76: подпись — «💾 Сохранить промпт»",
+    st.saveRunBtn.textContent === "💾 Сохранить промпт", st.saveRunBtn.textContent);
+  // v1.76.4: цвет активной карточки — только у НОВОЙ кнопки. Охранитель от
+  // массовой замены подстроки: однажды `background:#2a2a2a;color:#ddd`
+  // перекрасило 12 чужих элементов (поиск, сортировки, «Прикрепить превью»,
+  // селект подхвата…). В этой фазе записей нет, поэтому активной карточки с
+  // тем же фоном в DOM быть не может — ожидаем ровно один элемент.
+  const runColorEls = walkDom(st.root)
+    .filter((el) => /background:#2a5a91/i.test(String(el.style?.cssText || "")));
+  check("v1.76.4: цвет выделенной карточки только у новой кнопки (чужие не тронуты)",
+    runColorEls.length === 1 && runColorEls[0] === st.saveRunBtn,
+    "окрашено: " + runColorEls.length);
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  modeW.value = "📤 Выдача";
+  await (modeW.callback ? modeW.callback(modeW.value) : null);
+  check("v1.76: смена режима сама показывает строку",
+    st.saveRunRow.style.display === "flex", String(st.saveRunRow.style.display));
+  check("v1.76: до прогона кнопка неактивна", st.saveRunBtn.disabled === true);
+});
+
+await run("v1.76: прогон в «Выдаче» придерживается, кнопка сохраняет промпт + превью", async () => {
+  const node = makeNode();
+  node.id = 22;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  modeW.value = "📤 Выдача";
+  await (modeW.callback ? modeW.callback(modeW.value) : null);
+  st.selFolder = "Космос";
+  st.syncSaveFolder();
+  const origFetch = sandbox.fetch;
+  const prevSer = appStub.graph.serialize;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) {
+      return jsonResponse({ entries: [], folders: [] });
+    }
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("/prompt_library/add")) {
+      return jsonResponse({ ok: true, id: "run1", duplicate: false });
+    }
+    return jsonResponse({ ok: true, preview: "previews/run1.png" });
+  };
+  appStub.graph.serialize = () => ({ nodes: [{ id: 1, type: "KSampler" }], links: [] });
+  try {
+    apiStub.dispatch("executed", { node: "22", prompt_id: "q1",
+      output: { text: ["промпт из провода"] } });
+    apiStub.dispatch("executed", { node: "77", prompt_id: "q1",
+      output: { images: [{ filename: "out.png", subfolder: "", type: "output" }] } });
+    check("v1.76: в выдаче запись сама не создаётся", posts.length === 0,
+      JSON.stringify(posts.map((p) => p.url)));
+    apiStub.dispatch("execution_success", { prompt_id: "q1" });
+    await new Promise((r) => setImmediate(r));
+    check("v1.76: прогон придержан (текст + файл)",
+      !!(st.lastRun && st.lastRun.text === "промпт из провода"
+        && st.lastRun.image && st.lastRun.image.filename === "out.png"),
+      JSON.stringify(st.lastRun));
+    check("v1.76: после прогона кнопка активна", st.saveRunBtn.disabled === false);
+    await st.saveLastRun();
+    const add = posts.find((p) => p.url.includes("/prompt_library/add"));
+    check("v1.76: сохранён текст прогона",
+      !!(add && add.body.prompt === "промпт из провода"), JSON.stringify(add?.body));
+    check("v1.76: сохраняет в открытую категорию",
+      !!(add && add.body.folder === "Космос"), JSON.stringify(add?.body));
+    check("v1.76: граф прогона уходит в запись",
+      !!(add && add.body.workflow && add.body.workflow.nodes
+        && add.body.workflow.nodes.length === 1), JSON.stringify(add?.body?.workflow));
+    const cov = posts.find((p) => p.url.includes("attach_preview"));
+    check("v1.76: превью прогона прикреплено к новой записи",
+      !!(cov && cov.body.id === "run1" && cov.body.filename === "out.png"),
+      JSON.stringify(cov?.body));
+    check("v1.76: подсказка говорит, куда сохранено",
+      String(st.hintSticky || "").includes("Космос"), String(st.hintSticky));
+    check("v1.76: повторное нажатие не шлёт второй запрос",
+      (await st.saveLastRun(),
+        posts.filter((p) => p.url.includes("/prompt_library/add")).length === 1));
+  } finally {
+    sandbox.fetch = origFetch;
+    appStub.graph.serialize = prevSer;
+  }
+});
+
+await run("v1.76: «Запись» и «Выдача + запись» кнопку не включают", async () => {
+  const node = makeNode();
+  node.id = 23;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  const origFetch = sandbox.fetch;
+  sandbox.fetch = async (u) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    return jsonResponse({ ok: true });
+  };
+  try {
+    for (const m of ["📥 Запись", "📤📥 Выдача + запись"]) {
+      modeW.value = m;
+      await (modeW.callback ? modeW.callback(m) : null);
+      check(`v1.76: в режиме «${m}» строки нет`,
+        st.saveRunRow.style.display === "none", String(st.saveRunRow.style.display));
+    }
+    // Прогон, который сервер уже сохранил (saved_id), не должен включать кнопку
+    apiStub.dispatch("executed", { node: "23", prompt_id: "z1",
+      output: { text: ["текст"], saved_id: ["e5"] } });
+    apiStub.dispatch("execution_success", { prompt_id: "z1" });
+    await new Promise((r) => setImmediate(r));
+    modeW.value = "📤 Выдача";
+    await (modeW.callback ? modeW.callback(modeW.value) : null);
+    check("v1.76: сохранённый прогон кнопку не включает",
+      st.saveRunBtn.disabled === true && !st.lastRun, JSON.stringify(st.lastRun));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
+});
+
+await run("v1.76: при подхвате сохраняется текст узла, а не провода", async () => {
+  const node = makeNode();
+  node.id = 24;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  modeW.value = "📤 Выдача";
+  await (modeW.callback ? modeW.callback(modeW.value) : null);
+  st.pickupSel.value = "1622";
+  st.pickupSel.onchange();
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("/prompt_library/add")) return jsonResponse({ ok: true, id: "run2", duplicate: false });
+    return jsonResponse({ ok: true });
+  };
+  const prevSer = appStub.graph.serialize;
+  appStub.graph.serialize = () => ({ nodes: [], links: [] });
+  try {
+    apiStub.dispatch("executed", { node: "24", prompt_id: "q2",
+      output: { text: ["текст провода"] } });
+    apiStub.dispatch("executed", { node: "1622", prompt_id: "q2",
+      output: { text: ["финальный текст LLM"] } });
+    apiStub.dispatch("execution_success", { prompt_id: "q2" });
+    await new Promise((r) => setImmediate(r));
+    check("v1.76: придержан текст узла подхвата",
+      !!(st.lastRun && st.lastRun.text === "финальный текст LLM"), JSON.stringify(st.lastRun));
+    await st.saveLastRun();
+    const add = posts.find((p) => p.url.includes("/prompt_library/add"));
+    check("v1.76: сохранился текст узла, а не входа",
+      !!(add && add.body.prompt === "финальный текст LLM"), JSON.stringify(add?.body));
+  } finally {
+    sandbox.fetch = origFetch;
+    appStub.graph.serialize = prevSer;
+  }
+});
+
+await run("v1.76: дубликат — запись не создаётся и превью не шлётся", async () => {
+  const node = makeNode();
+  node.id = 25;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  modeW.value = "📤 Выдача";
+  await (modeW.callback ? modeW.callback(modeW.value) : null);
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    if (url.includes("/prompt_library/add")) {
+      return jsonResponse({ ok: true, id: "old1", duplicate: true, folder: "Планеты" });
+    }
+    return jsonResponse({ ok: true });
+  };
+  const prevSer = appStub.graph.serialize;
+  appStub.graph.serialize = () => ({ nodes: [], links: [] });
+  try {
+    apiStub.dispatch("executed", { node: "25", prompt_id: "q3", output: { text: ["уже есть"] } });
+    // Картинка нужна и в дубликате: без неё проверка «превью не отправляется»
+    // была бы слепой (attachPreview вообще не вызывался бы).
+    apiStub.dispatch("executed", { node: "78", prompt_id: "q3",
+      output: { images: [{ filename: "dup.png", subfolder: "", type: "output" }] } });
+    apiStub.dispatch("execution_success", { prompt_id: "q3" });
+    await new Promise((r) => setImmediate(r));
+    await st.saveLastRun();
+    check("v1.76: на дубликат превью не отправляется",
+      !posts.some((p) => p.url.includes("attach_preview")),
+      JSON.stringify(posts.map((p) => p.url)));
+    check("v1.76: подсказка говорит, где лежит оригинал",
+      String(st.hintSticky || "").includes("Планеты"), String(st.hintSticky));
+    check("v1.76: после дубликата кнопка гаснет (повтор не нужен)",
+      st.saveRunBtn.disabled === true);
+  } finally {
+    sandbox.fetch = origFetch;
+    appStub.graph.serialize = prevSer;
+  }
+});
+
+await run("v1.76: нечего сохранять — кнопка молчит и запросов нет", async () => {
+  const node = makeNode();
+  node.id = 26;
+  proto.onNodeCreated.call(node);
+  const st = node._pl;
+  const modeW = node.widgets.find((w) => w.name === "mode");
+  modeW.value = "📤 Выдача";
+  await (modeW.callback ? modeW.callback(modeW.value) : null);
+  const origFetch = sandbox.fetch;
+  const posts = [];
+  sandbox.fetch = async (u, init) => {
+    const url = String(u);
+    if (url.includes("/prompt_library/list")) return jsonResponse({ entries: [], folders: [] });
+    posts.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+    return jsonResponse({ ok: true });
+  };
+  try {
+    apiStub.dispatch("execution_success", { prompt_id: "q4" });
+    await new Promise((r) => setImmediate(r));
+    check("v1.76: без прогона придерживать нечего", !st.lastRun, JSON.stringify(st.lastRun));
+    check("v1.76: кнопка остаётся неактивной", st.saveRunBtn.disabled === true);
+    await st.saveLastRun();
+    check("v1.76: нажатие без прогона ничего не шлёт", posts.length === 0,
+      JSON.stringify(posts.map((p) => p.url)));
+  } finally {
+    sandbox.fetch = origFetch;
+  }
 });
 
 console.log("=== phases ok:", okCount, "| rAF left:", rafQueue.length);

@@ -2546,6 +2546,12 @@ try:
         media = str(body.get("media") or "").strip().lower()
         if media not in ("image", "video"):
             media = None
+        # v1.76: граф последнего прогона (кнопка «💾 Сохранить промпт» в «Выдаче»).
+        # Принимаем только форму графа — dict со списком nodes: иначе в записи
+        # оказался бы «воркфлоу», который нельзя открыть на канвасе.
+        wf = body.get("workflow")
+        if not (isinstance(wf, dict) and isinstance(wf.get("nodes"), list)):
+            wf = None
         # Замок — только на чтение/запись базы; PIL-обработка превью ниже идёт
         # вне замка и в отдельном потоке (иначе она морозит event loop ComfyUI,
         # а `await` под RLock не даёт взаимного исключения между задачами).
@@ -2559,6 +2565,10 @@ try:
             entry_id, created = _add_entry(entries, prompt, folder, title=title, media=media)
             if not created:
                 return web.json_response({"ok": True, "id": entry_id, "duplicate": False})
+            # v1.76: снапшот графа прогона — тем же путём, что и Queue-запись
+            # (файл workflows/{id}.json, inline только если файл не записался).
+            if wf is not None:
+                _attach_workflow(entries, entry_id, wf)
             # Сохраняем запись ДО тяжёлой фазы: ниже база перечитывается под
             # замком, и незаписанная запись потерялась бы вместе с превью.
             _save_db(entries, folders)

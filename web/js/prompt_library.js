@@ -151,7 +151,7 @@ function plHookVueMode() {
 
 // Маркер сборки: виден в F12 → Console. Нужен, чтобы точно знать, какая версия JS
 // реально загружена браузером (файл статичный: после правки исходника нужен Ctrl+F5).
-    const PL_JS_VERSION = "1.75.0-audit-fixes";
+    const PL_JS_VERSION = "1.76.4-save-run";
 console.log(`[PromptLibrary] JS ${PL_JS_VERSION} loaded`);
 
 app.registerExtension({
@@ -314,6 +314,34 @@ app.registerExtension({
             inputToggle.textContent = "Протестировать / ➕ Добавить промпт";
             inputToggle.title = "Открыть окно: текст пойдёт на провод «промпт» (тест), пока окно открыто; ➕ — сохранить в библиотеку";
             inputToggle.style.cssText = "background:#2a2a2a;color:#ddd;border:1px solid #555;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;flex-shrink:0;";
+
+            // v1.76: «💾 Сохранить промпт» — забрать в базу ПОСЛЕДНИЙ прогон
+            // (промпт + превью) по нажатию. Живёт только в режиме «📤 Выдача»:
+            // «Запись» и «Выдача + запись» сохраняют сами, кнопка там обманывала
+            // бы (второй раз ничего не добавится). Строка создаётся всегда и
+            // только переключает видимость — нода не прыгает по высоте.
+            const saveRunRow = document.createElement("div");
+            saveRunRow.style.cssText = "display:none;align-items:center;gap:6px;flex-shrink:0;height:26px;";
+            // display задаём свойством тоже: cssText парсит только браузер,
+            // а тестовая заглушка хранит его строкой (иначе проверка видимости
+            // читает пустоту и «слепнет»).
+            saveRunRow.style.display = "none";
+            const saveRunBtn = document.createElement("button");
+            saveRunBtn.type = "button";
+            saveRunBtn.textContent = "💾 Сохранить промпт";
+            saveRunBtn.title = "Сохранить промпт и превью последнего прогона в открытую категорию";
+            // Акцентная (зелёная) заливка: кнопка обязана выделяться среди
+            // серых кнопок ноды — это главное действие режима «Выдача».
+            // Цвет ВЫДЕЛЕННОЙ (активной) карточки промпта (v1.76.4): заливка
+            // #2a5a91 + рамка #4a9eff — ровно как у карточки, которая уходит
+            // в основной промпт. Кнопка читается как «этот результат выбран».
+            saveRunBtn.style.cssText = "flex:1 1 auto;min-width:0;background:#2a5a91;color:#dfe8ff;"
+                + "border:1px solid #4a9eff;border-radius:4px;padding:4px 10px;cursor:pointer;"
+                + "font-size:12px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+            saveRunBtn.disabled = true;
+            saveRunBtn.style.opacity = "0.5";
+            saveRunBtn.style.cursor = "not-allowed";
+            saveRunRow.appendChild(saveRunBtn);
 
             const inputArea = document.createElement("div");
             inputArea.style.cssText = "display:none;flex-direction:column;gap:4px;border:1px solid #4a9eff;border-radius:4px;padding:6px;background:#16202f;";
@@ -973,6 +1001,7 @@ app.registerExtension({
             scrollArea.style.cssText = "display:flex;flex-direction:column;gap:6px;";
 
             root.appendChild(pickupRow);
+            root.appendChild(saveRunRow);
             root.appendChild(inputToggle);
             root.appendChild(inputArea);
             root.appendChild(exportRow);
@@ -984,6 +1013,14 @@ app.registerExtension({
             const st = {
                 root, main, search, sortSel, viewSel, mediaSel, tree, list: listContent, listHead, hintRow, hint, detail,
                 pickupRow, pickupSel, inputTitle,
+                // v1.76: строка/кнопка «Сохранить промпт последнего прогона»
+                saveRunRow, saveRunBtn,
+                // v1.76: придержанный прогон режима «Выдача»: { text, image, prompt_id }.
+                // image — то, что сервер сам разослал в `executed` (обложка).
+                lastRun: null,
+                // prompt_id -> текст, который ОТДАЛА наша нода в этом прогоне.
+                // Нужен кнопке: runTexts общий кэш и может нести прошлый прогон.
+                runMine: new Map(),
                 bulkCount, bulkDel, bulkClear,
                 progTrack, progFill, exportRow, exportCaption, exportBtn, galleryBtn, importBtn, newFolderBtn,
                 treeHead, treeTitle, treeHeadBtns, collapseToggleBtn,
@@ -2030,6 +2067,96 @@ const reload = async () => {
             st.runPickupBlocked = new Set();
             const PL_TEXT_LIMIT = 50;      // без таймеров: чистим по количеству
             const PL_PENDING_LIMIT = 20;   // без таймеров: чистим по количеству
+
+            // --- v1.76: кнопка «💾 Сохранить промпт» в режиме «Выдача» --------
+            // Режим читаем из виджета в момент вызова: callback смены режима,
+            // onConfigure и загрузка воркфлоу приходят в разное время, а кэш
+            // значения разъехался бы с тем, что видит пользователь.
+            st.modeValue = () => {
+                try {
+                    const w = (this.widgets || []).find((x) => x && x.name === "mode");
+                    const v = w ? (Array.isArray(w.value) ? w.value[0] : w.value) : "";
+                    return String(v || "");
+                } catch (e) { return ""; }
+            };
+            st.modeIssue = () => st.modeValue() === "📤 Выдача";
+            // Видимость строки и активность кнопки: активна только когда есть
+            // придержанный прогон с текстом и режим выдающий.
+            st.syncSaveRun = () => {
+                try {
+                    const issue = st.modeIssue();
+                    saveRunRow.style.display = issue ? "flex" : "none";
+                    const ready = issue && !!(st.lastRun && String(st.lastRun.text || "").trim())
+                        && !st._savingRun;
+                    saveRunBtn.disabled = !ready;
+                    saveRunBtn.style.opacity = ready ? "1" : "0.5";
+                    saveRunBtn.style.cursor = ready ? "pointer" : "not-allowed";
+                } catch (e) { /* silent */ }
+            };
+            // Сохранение придержанного прогона: текст + граф + обложка.
+            // Повторное нажатие после успеха/дубликата ничего не шлёт: прогон
+            // одноразовый (иначе один и тот же результат плодил бы запросы).
+            st.saveLastRun = async () => {
+                if (st._savingRun) return;
+                const run = st.lastRun;
+                if (!run || !String(run.text || "").trim()) return;
+                // Куда: открытая категория; «Выходы» без открытой папки → корень
+                // (тот же контракт, что у ручной кнопки «💾 Сохранить промпт»).
+                let dest = (st.selFolder && !st.selFolder.startsWith("__")) ? st.selFolder : "";
+                if (!dest && st.selFolder === "__outs") {
+                    const p = st.outsBrowsePath || st.outsActiveFolder;
+                    if (p && !p.startsWith("__")) dest = p;
+                }
+                let workflow = null;
+                try { workflow = app.graph && app.graph.serialize ? app.graph.serialize() : null; }
+                catch (e) { workflow = null; }
+                st._savingRun = true;
+                const base = "💾 Сохранить промпт";
+                saveRunBtn.textContent = "⏳ Сохраняю...";
+                try {
+                    const r = await st.apiPost("/prompt_library/add", {
+                        prompt: run.text, folder: dest, workflow,
+                    });
+                    let out = {};
+                    try { out = await r.json(); } catch (e) { /* silent */ }
+                    if (!r.ok) {
+                        // Отказ сервера — не «успех»: кнопка гаснет, причина видна
+                        // в строке подсказки (api.fetchApi не бросает сам по себе).
+                        saveRunBtn.textContent = "❌ Ошибка";
+                        st.hintSticky = out && out.error
+                            ? `Не удалось сохранить прогон: ${out.error}.`
+                            : "Не удалось сохранить прогон — сервер отказал.";
+                        st.renderHint?.();
+                        return;
+                    }
+                    await reload();
+                    if (out && out.duplicate) {
+                        const where = out.folder || "корне";
+                        saveRunBtn.textContent = "⚠️ Уже есть";
+                        st.hintSticky = `Прогон уже есть в «${where}» — новая запись не создана.`;
+                        st.renderHint?.();
+                        try {
+                            st.toast("warn", "Prompt Library: дубликат",
+                                `Такой промпт уже есть в «${where}» — новая запись не создана.`);
+                        } catch (e) { /* silent */ }
+                    } else {
+                        // Обложка: файл прогона, который сервер разослал в `executed`.
+                        if (run.image && out && out.id) await st.attachPreview(String(out.id), run.image);
+                        saveRunBtn.textContent = "✅ Сохранено";
+                        st.hintSticky = `Прогон сохранён в «${dest || "Без категории"}»: промпт и превью.`;
+                        st.renderHint?.();
+                    }
+                    st.lastRun = null;
+                    st.syncSaveRun?.();
+                } catch (e) {
+                    saveRunBtn.textContent = "❌ Ошибка";
+                } finally {
+                    st._savingRun = false;
+                    st.syncSaveRun?.();
+                    setTimeout(() => { saveRunBtn.textContent = base; }, 1500);
+                }
+            };
+            saveRunBtn.onclick = () => { try { st.saveLastRun(); } catch (e) { /* silent */ } };
             st.rememberPending = (pid, rec) => {
                 try {
                     st.pendingPreview.set(pid, rec);
@@ -2222,6 +2349,18 @@ const reload = async () => {
                             && [String(d.node || ""), String(d.display_node || "")]
                                 .some((v) => v === mine || v.endsWith(":" + mine));
                         if (isMine) {
+                            // v1.76: что нода отдала в ЭТОМ прогоне — кнопке
+                            // «Сохранить промпт» в «Выдаче» (общий runTexts мог бы
+                            // принести текст прошлого прогона при кэше).
+                            const ownTxt = (d.output && d.output.text && d.output.text[0]) || "";
+                            if (ownTxt) {
+                                st.runMine.set(d.prompt_id, String(ownTxt));
+                                while (st.runMine.size > PL_PENDING_LIMIT) {
+                                    const first = st.runMine.keys().next().value;
+                                    if (first === undefined) break;
+                                    st.runMine.delete(first);
+                                }
+                            }
                             // Подхват: нода отчиталась токеном — сам текст возьмём
                             // после `execution_success` из узла-источника.
                             const tok = (d.output && d.output.pickup && d.output.pickup[0]) || "";
@@ -2311,12 +2450,29 @@ const reload = async () => {
                         const rec = st.pendingPreview.get(pid);
                         const shot = st.runImages.get(pid) || null;
                         const pick = st.pendingPickup.get(pid) || null;
+                        // v1.76: «Выдача» базу не трогает — прогон придерживаем,
+                        // чтобы кнопка «💾 Сохранить промпт» забрала его по нажатию.
+                        // Текст подхвата (если выбран узел) важнее текста нашего входа.
+                        const mineTxt = st.runMine.get(pid) || "";
+                        const pickNodeId = (st.pickupNode && st.pickupNode()) || "";
+                        const pickTxt = pickNodeId
+                            ? String((st.pickupText ? st.pickupText(pickNodeId) : "") || "")
+                            : "";
+                        const holdTxt = String(pickTxt || mineTxt || "").trim();
+                        st.runMine.delete(pid);
                         // Нода сама сказала, что подхват выключён режимом: причина уже
                         // показана подсказкой ноды (mode_notice), «кэш» тут — враньё.
                         const pickupOff = st.runPickupBlocked.delete(pid);
                         st.pendingPreview.delete(pid);
                         st.pendingPickup.delete(pid);
                         st.runImages.delete(pid);
+                        // Держим только выдающий режим и только прогон, который
+                        // сервер НЕ сохранил сам (rec = saved_id): иначе нажатие
+                        // кнопки создавало бы дубликат уже записанного.
+                        st.lastRun = (st.modeIssue() && holdTxt && !rec)
+                            ? { text: holdTxt, image: shot, prompt_id: pid }
+                            : null;
+                        st.syncSaveRun?.();
                         // Подхват (v1.25): запись ещё не создана — сначала сохраняем
                         // текст узла-источника, потом (из ответа) прикрепляем обложку.
                         if (pick) st.savePickup(pick, shot);
@@ -2350,6 +2506,7 @@ const reload = async () => {
                             st.pendingPickup.delete(pid);
                             st.runPickupBlocked.delete(pid);
                             st.runImages.delete(pid);
+                            st.runMine.delete(pid);
                         }
                     } catch (e) { /* silent */ }
                 };
@@ -6087,10 +6244,12 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
                     } else {
                         checkCycle();
                     }
+                    // v1.76: строка «💾 Сохранить промпт» живёт только в «Выдаче».
+                    st.syncSaveRun?.();
                 };
             }
 
-            requestAnimationFrame(() => { st.checkCycle?.(); st.refreshPickupOptions?.(); });
+            requestAnimationFrame(() => { st.checkCycle?.(); st.refreshPickupOptions?.(); st.syncSaveRun?.(); });
 
             const browserWidget = this.addDOMWidget("pl_browser", "custom", root, {
                 serialize: false,
@@ -6143,10 +6302,16 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
             // +28 к BASE_H (v1.48): ряд экспорта/импорта (22px + gap 6px).
             const BASE_H = 652;
             const INPUT_H = 202; // поле названия + textarea + кнопка сохранения + ряд прикрепления превью
+            // v1.76: +32, только в режиме «Выдача» — строка «💾 Сохранить промпт»
+            // (26px) + gap 6px. В пишущих режимах строки нет (display:none), и
+            // минимум не должен оставлять под неё пустоту.
+            const SAVE_RUN_H = 32;
+            const showSaveRun = () => { try { return st.modeIssue(); } catch (e) { return false; } };
             // Единый минимум для обоих режимов (single source of truth).
             st.minH = () => {
                 const showDetail = detail && detail.style.display !== "none";
-                return BASE_H + (showDetail ? DETAIL_H : 0) + (inputVisible ? INPUT_H : 0);
+                return BASE_H + (showSaveRun() ? SAVE_RUN_H : 0)
+                    + (showDetail ? DETAIL_H : 0) + (inputVisible ? INPUT_H : 0);
             };
             st.syncNodeSize = () => {
                 try {
@@ -6351,6 +6516,8 @@ document.querySelectorAll("[data-prompt]").forEach(function(b){b.addEventListene
                 // Список узлов-источников подхвата собирается из живого графа:
                 // после загрузки воркфлоу он другой (SPEC §30).
                 try { this._pl?.refreshPickupOptions?.(); } catch (e) { /* silent */ }
+                // v1.76: строка «Сохранить промпт» зависит от загруженного режима.
+                try { this._pl?.syncSaveRun?.(); } catch (e) { /* silent */ }
                 try {
                     // Одноразовая сверка после загрузки базы (без таймеров):
                     // виджет (если гидрация донесла) — свежий источник;
